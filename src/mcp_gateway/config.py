@@ -59,6 +59,8 @@ class ListenConfig(_Model):
 class IdentityPathsConfig(_Model):
     subject: str
     email: str | None
+    # Boolean claim that must be true before ``email`` is trusted; null means never trusted.
+    email_verified: str | None
     organization: str | None
     groups: str | None
 
@@ -67,7 +69,7 @@ class IdentityPathsConfig(_Model):
     def _subject_path(cls, value: str) -> str:
         return _require_dotted_path(value, what="identity.subject")
 
-    @field_validator("email", "organization", "groups")
+    @field_validator("email", "email_verified", "organization", "groups")
     @classmethod
     def _optional_path(cls, value: str | None) -> str | None:
         if value is None:
@@ -84,6 +86,8 @@ class AuthConfig(_Model):
     scopes_advertised: list[str] = Field(min_length=1)
     clock_skew_seconds: float = Field(ge=0)
     jwks_cache_ttl_seconds: float = Field(gt=0)
+    # How long past the TTL a cached key set is still served when a refresh fails.
+    jwks_max_stale_seconds: float = Field(ge=0)
     jwks_fetch_timeout_seconds: float = Field(gt=0)
     identity: IdentityPathsConfig
 
@@ -147,6 +151,7 @@ class UpstreamConfig(_Model):
 
 class LimitsConfig(_Model):
     max_request_body_bytes: int = Field(gt=0)
+    request_body_timeout_seconds: float = Field(gt=0)
 
 
 class AuditConfig(_Model):

@@ -213,6 +213,7 @@ async def consent_get(request: Request) -> Response:
                     "session": {
                         "access_token": {
                             "email": user["email"],
+                            "email_verified": True,
                             "org": user["org"],
                             "groups": user["groups"],
                         },

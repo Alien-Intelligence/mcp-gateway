@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
@@ -175,7 +176,14 @@ class Gateway:
         audit.organization = identity.organization
 
         try:
-            body = await _read_bounded_body(request, self._config.limits.max_request_body_bytes)
+            with anyio.fail_after(self._config.limits.request_body_timeout_seconds):
+                body = await _read_bounded_body(request, self._config.limits.max_request_body_bytes)
+        except TimeoutError:
+            logger.warning("request body not received within the configured timeout")
+            audit.emit(status=408, outcome="request_body_timeout")
+            return json_rpc_response(
+                408, INVALID_REQUEST, "The request body was not received in time.", None
+            )
         except ClientDisconnect:
             logger.info("client disconnected while sending the request body")
             audit.emit(status=499, outcome="client_disconnected")
@@ -196,6 +204,7 @@ class Gateway:
             method=request.method,
             inbound_headers=list(request.headers.items()),
             body=body,
+            receive=request.receive,
             rpc=rpc,
             credential=credential,
             identity=identity,
@@ -212,7 +221,14 @@ def create_app(
 ) -> Starlette:
     """Build the app. HTTP clients are created here and closed by the lifespan."""
     if resolver is None:
-        resolver = StaticResolver(Path(config.resolver.mapping_file), config.upstreams.keys())
+        resolver = StaticResolver(
+            Path(config.resolver.mapping_file),
+            config.upstreams.keys(),
+            email_matching=(
+                config.auth.identity.email is not None
+                and config.auth.identity.email_verified is not None
+            ),
+        )
 
     jwks_client = httpx.AsyncClient(
         transport=http_transport,
@@ -226,6 +242,7 @@ def create_app(
     }
     gateway = Gateway(config, TokenVerifier(config.auth, jwks_client), resolver, proxies)
 
+    # The root document mirrors the path-specific one: MCP clients probe the path variant first.
     prm = {
         "resource": config.public_url,
         "authorization_servers": [config.auth.issuer],

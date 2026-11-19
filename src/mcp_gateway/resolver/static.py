@@ -2,23 +2,27 @@
 
 The mapping file is re-parsed when its (mtime, size) changes. Key files are read at resolve
 time so a rotated or revoked key takes effect without a restart. Both are a few bytes, so the
-key read goes through ``asyncio.to_thread`` and the mapping stat/parse is done inline (one
+key read goes through a worker thread under a timeout and the mapping stat/parse is done inline (one
 ``stat`` per request; a parse only on change).
 """
 
-import asyncio
 import logging
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from mcp_gateway.identity import Identity
 from mcp_gateway.resolver.base import Credential, Denied, ResolverError
 
 logger = logging.getLogger(__name__)
+
+# Key files are a few bytes; a read that takes longer means a hung mount.
+KEY_READ_TIMEOUT_SECONDS = 5.0
 
 MatchKind = Literal["subject", "email", "organization", "group"]
 
@@ -68,7 +72,9 @@ def _normalise(kind: MatchKind, value: str) -> str:
     return value.casefold() if kind == "email" else value
 
 
-def _build_index(raw: str, base_dir: Path, upstream_names: Collection[str]) -> _Index:
+def _build_index(
+    raw: str, base_dir: Path, upstream_names: Collection[str], *, email_matching: bool
+) -> _Index:
     parsed = _MappingFile.model_validate_json(raw, strict=True)
     tables: dict[MatchKind, dict[str, _Rule]] = {
         "subject": {},
@@ -80,6 +86,12 @@ def _build_index(raw: str, base_dir: Path, upstream_names: Collection[str]) -> _
         if entry.upstream not in upstream_names:
             raise ValueError(f"entries.{index}: upstream is not a configured upstream")
         ((kind, value),) = entry.match.items()
+        if kind == "email" and not email_matching:
+            raise ValueError(
+                f"entries.{index}: email matchers need auth.identity.email and "
+                "auth.identity.email_verified; email_verified is null, so a verified email "
+                "can never be established"
+            )
         key = _normalise(kind, value)
         if key in tables[kind]:
             raise ValueError(f"entries.{index}: duplicate {kind} match")
@@ -108,8 +120,11 @@ def _describe(exc: Exception) -> str:
 
 
 class StaticResolver:
-    def __init__(self, mapping_file: Path, upstream_names: Collection[str]) -> None:
+    def __init__(
+        self, mapping_file: Path, upstream_names: Collection[str], *, email_matching: bool
+    ) -> None:
         self._mapping_file = mapping_file
+        self._email_matching = email_matching
         self._upstream_names = frozenset(upstream_names)
         self._signature: tuple[int, int] | None = None
         self._index: _Index | None = None
@@ -120,16 +135,22 @@ class StaticResolver:
             raise ResolverError(f"mapping file rejected: {self._load_error}")
 
     def _load(self) -> None:
+        # The signature is taken BEFORE the read: a file completed while (or after) we read
+        # it then differs from the stored signature, so the next request reloads it.
+        signature = self._safe_signature()
         try:
-            stat = self._mapping_file.stat()
-            signature = (stat.st_mtime_ns, stat.st_size)
             raw = self._mapping_file.read_text(encoding="utf-8")
-            index = _build_index(raw, self._mapping_file.parent, self._upstream_names)
+            index = _build_index(
+                raw,
+                self._mapping_file.parent,
+                self._upstream_names,
+                email_matching=self._email_matching,
+            )
         except (OSError, ValueError) as exc:
             # ValidationError and JSON errors are ValueError subclasses.
             self._index = None
             self._load_error = _describe(exc)
-            self._signature = self._safe_signature()
+            self._signature = signature
             logger.error("static resolver mapping file rejected: %s", self._load_error)
             return
         self._index = index
@@ -180,14 +201,17 @@ class StaticResolver:
 
     async def _read_key(self, rule: _Rule) -> str:
         try:
-            text = await asyncio.to_thread(rule.key_path.read_text, encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            with anyio.fail_after(KEY_READ_TIMEOUT_SECONDS):
+                text = await anyio.to_thread.run_sync(
+                    partial(rule.key_path.read_text, encoding="utf-8"), abandon_on_cancel=True
+                )
+        except (OSError, UnicodeDecodeError, TimeoutError) as exc:
             logger.error(
                 "api key file unreadable for mapping entry %d (%s)", rule.index, type(exc).__name__
             )
             raise ResolverError(f"api key file unreadable for entry {rule.index}") from exc
         key = text.strip()
-        if not key or any(ch.isspace() or not ch.isprintable() for ch in key):
+        if not key or not key.isascii() or any(ch.isspace() or not ch.isprintable() for ch in key):
             logger.error("api key file empty or malformed for mapping entry %d", rule.index)
             raise ResolverError(f"api key file empty or malformed for entry {rule.index}")
         return key

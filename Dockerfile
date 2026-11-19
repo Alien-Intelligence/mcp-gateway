@@ -20,7 +20,8 @@ FROM python:3.12-slim-bookworm
 
 RUN useradd --uid 1000 --user-group --no-create-home --shell /usr/sbin/nologin gateway
 
-COPY --from=builder --chown=1000:1000 /app/.venv /app/.venv
+# Owned by root: the runtime user (1000) can read and run the app but not modify its code.
+COPY --from=builder /app/.venv /app/.venv
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \

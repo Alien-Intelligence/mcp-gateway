@@ -438,7 +438,7 @@ async def test_upstream_content_encoding_is_not_decoded(
     assert upstream.requests[0].headers["accept-encoding"] == "gzip"
 
 
-async def test_midstream_upstream_failure_is_logged_audited_and_raised(
+async def test_midstream_upstream_failure_ends_the_stream_quietly_and_is_audited(
     app: Starlette,
     token: str,
     upstream: FakeUpstream,
@@ -450,8 +450,9 @@ async def test_midstream_upstream_failure_is_logged_audited_and_raised(
     )
     with caplog.at_level(logging.INFO):
         async with client_for(app) as http:
-            with pytest.raises(httpx.ReadError):
-                await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
+            response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
+    assert response.status_code == 200
+    assert response.content == b"data: 1\n\n"
     assert stream.closed
     (line,) = audit_lines(caplog)
     assert line["outcome"] == "upstream_error"
@@ -521,7 +522,7 @@ async def test_upstream_auth_failure_becomes_jsonrpc_error_with_http_200(
     upstream_status: int,
     code: int,
 ) -> None:
-    spy = SpyResolver(StaticResolver(mapping_dir / "mapping.json", ["primary"]))
+    spy = SpyResolver(StaticResolver(mapping_dir / "mapping.json", ["primary"], email_matching=True))
     upstream.responder = lambda _r: httpx.Response(
         upstream_status,
         json={"detail": "internal upstream detail"},
@@ -782,3 +783,177 @@ async def test_audit_can_be_disabled(
             response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert response.status_code == 200
     assert audit_lines(caplog) == []
+
+
+# --- raw ASGI drivers ---------------------------------------------------------------------
+
+
+def asgi_scope(
+    token: str, body: bytes, extra_headers: tuple[tuple[bytes, bytes], ...] = ()
+) -> dict[str, Any]:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"gw.example.com"),
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+            *extra_headers,
+        ],
+        "server": ("gw.example.com", 443),
+        "client": ("203.0.113.9", 1234),
+    }
+
+
+def routed_transport(idp: FakeIdp, upstream_handler: Any) -> httpx.MockTransport:
+    async def route(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "idp.example.com":
+            return idp.handle(request)
+        return await upstream_handler(request)
+
+    return httpx.MockTransport(route)
+
+
+async def call_then_disconnect(
+    app: Starlette, token: str, *, after_seconds: float
+) -> tuple[list[dict[str, Any]], float]:
+    """POST a tools/call, then send http.disconnect ``after_seconds`` later.
+
+    Returns the ASGI messages sent and how long the app took to return.
+    """
+    body = json.dumps(RPC_BODY).encode()
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.sleep(after_seconds)
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    started = asyncio.get_running_loop().time()
+    await asyncio.wait_for(app(asgi_scope(token, body), receive, send), timeout=5)
+    return sent, asyncio.get_running_loop().time() - started
+
+
+async def test_client_disconnect_while_waiting_for_upstream_headers_aborts_the_request(
+    mapping_dir: Path,
+    idp: FakeIdp,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cancelled = asyncio.Event()
+
+    async def never_answers(request: httpx.Request) -> httpx.Response:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    app = build_app(mapping_dir, routed_transport(idp, never_answers))
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        sent, elapsed = await call_then_disconnect(app, token, after_seconds=0.1)
+    assert cancelled.is_set(), "the in-flight upstream request must be cancelled"
+    assert elapsed < 2
+    assert not [m for m in sent if m["type"] == "http.response.start" and m["status"] != 499]
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "client_disconnected"
+    assert line["status"] == 499
+
+
+async def test_client_disconnect_while_draining_an_upstream_401_stops_the_drain(
+    mapping_dir: Path,
+    idp: FakeIdp,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = TrackedStream([b"denied"], hang=True)
+
+    async def rejects_slowly(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, stream=stream)
+
+    app = build_app(mapping_dir, routed_transport(idp, rejects_slowly))
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        _, elapsed = await call_then_disconnect(app, token, after_seconds=0.1)
+    assert elapsed < 2
+    assert stream.closed
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "client_disconnected"
+
+
+# --- request body timeout -----------------------------------------------------------------
+
+
+async def test_a_stalled_request_body_is_408_and_audited(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = build_app(mapping_dir, transport, limits__request_body_timeout_seconds=0.2)
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": b'{"jsonrpc"', "more_body": True}
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        await asyncio.wait_for(app(asgi_scope(token, b"x" * 100), receive, send), timeout=5)
+    (start,) = [m for m in sent if m["type"] == "http.response.start"]
+    assert start["status"] == 408
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "request_body_timeout"
+    assert line["status"] == 408
+
+
+# --- non-ASCII inbound headers --------------------------------------------------------------
+
+
+async def test_non_ascii_header_bytes_are_forwarded_verbatim(
+    app: Starlette, token: str, upstream: FakeUpstream
+) -> None:
+    body = json.dumps(RPC_BODY).encode()
+    delivered = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal delivered
+        if not delivered:
+            delivered = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = asgi_scope(token, body, ((b"user-agent", "café-client".encode()),))
+    await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    (start,) = [m for m in sent if m["type"] == "http.response.start"]
+    assert start["status"] == 200
+    assert (b"user-agent", "café-client".encode()) in upstream.requests[0].headers.raw

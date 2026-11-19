@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,7 @@ async def test_each_match_kind_resolves_its_own_key(state: Path) -> None:
             entry({"group": "g-a"}, "grp-a.key"),
         ],
     )
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
 
     async def key_of(ident: Identity) -> str:
         outcome = await resolver.resolve(ident)
@@ -80,7 +81,7 @@ async def test_each_match_kind_resolves_its_own_key(state: Path) -> None:
 
 async def test_credential_carries_upstream_and_labels(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key", {"client": "client-x"})])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity("s"))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
     assert isinstance(outcome, Credential)
     assert outcome.upstream == "primary"
     assert dict(outcome.labels) == {"client": "client-x"}
@@ -97,7 +98,7 @@ async def test_precedence_subject_then_email_then_organization_then_group(state:
             entry({"subject": "s"}, "subj.key"),
         ],
     )
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     full = identity("s", email="a@x.example", organization="o", groups=("g",))
 
     async def key(ident: Identity) -> str:
@@ -115,7 +116,7 @@ async def test_precedence_subject_then_email_then_organization_then_group(state:
 
 async def test_email_match_is_case_insensitive(state: Path) -> None:
     path = write_mapping(state, [entry({"email": "Alice@Client-X.example"}, "mail.key")])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(
         identity(email="alice@CLIENT-x.EXAMPLE")
     )
     assert isinstance(outcome, Credential)
@@ -126,7 +127,7 @@ async def test_subject_and_organization_matches_are_case_sensitive(state: Path) 
         state,
         [entry({"subject": "Sub"}, "subj.key"), entry({"organization": "Org"}, "org.key")],
     )
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     assert await resolver.resolve(identity("sub")) == Denied("no_mapping")
     assert await resolver.resolve(identity("x", organization="org")) == Denied("no_mapping")
 
@@ -135,7 +136,9 @@ async def test_several_matching_group_entries_are_ambiguous(state: Path) -> None
     path = write_mapping(
         state, [entry({"group": "a"}, "grp-a.key"), entry({"group": "b"}, "grp-b.key")]
     )
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity(groups=("a", "b")))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(
+        identity(groups=("a", "b"))
+    )
     assert outcome == Denied("ambiguous_mapping")
 
 
@@ -143,13 +146,17 @@ async def test_one_group_entry_matched_by_two_groups_is_not_ambiguous(state: Pat
     path = write_mapping(
         state, [entry({"group": "a"}, "grp-a.key"), entry({"group": "b"}, "grp-b.key")]
     )
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity(groups=("a", "a", "zzz")))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(
+        identity(groups=("a", "a", "zzz"))
+    )
     assert isinstance(outcome, Credential)
 
 
 async def test_no_match_is_denied_without_fallback(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity("someone-else"))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(
+        identity("someone-else")
+    )
     assert outcome == Denied("no_mapping")
 
 
@@ -157,7 +164,7 @@ async def test_missing_key_file_raises_without_leaking_anything(
     state: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "absent.key")])
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     with pytest.raises(ResolverError, match="entry 0"):
         await resolver.resolve(identity("s"))
     assert "entry 0" in caplog.text
@@ -168,13 +175,13 @@ async def test_empty_or_malformed_key_file_raises(state: Path, content: str) -> 
     write_key(state, "bad.key", content)
     path = write_mapping(state, [entry({"subject": "s"}, "bad.key")])
     with pytest.raises(ResolverError):
-        await StaticResolver(path, UPSTREAMS).resolve(identity("s"))
+        await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
 
 
 async def test_key_is_stripped(state: Path) -> None:
     write_key(state, "pad.key", "  fake-alien-key-padded \n\n")
     path = write_mapping(state, [entry({"subject": "s"}, "pad.key")])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity("s"))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == "fake-alien-key-padded"
 
@@ -184,7 +191,7 @@ async def test_relative_key_path_resolves_against_the_mapping_directory(tmp_path
     (nested / "keys").mkdir(parents=True)
     (nested / "keys" / "k").write_text("fake-alien-key-nested")
     path = write_mapping(nested, [entry({"subject": "s"}, "keys/k")])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity("s"))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == "fake-alien-key-nested"
 
@@ -196,14 +203,14 @@ async def test_absolute_key_path_is_allowed(tmp_path: Path) -> None:
     mapping_dir = tmp_path / "mapping"
     mapping_dir.mkdir()
     path = write_mapping(mapping_dir, [entry({"subject": "s"}, str(elsewhere / "abs.key"))])
-    outcome = await StaticResolver(path, UPSTREAMS).resolve(identity("s"))
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == "fake-alien-key-abs"
 
 
 async def test_rotated_and_revoked_keys_are_picked_up_without_reload(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     write_key(state, "subj.key", "fake-alien-key-rotated")
     rotated = await resolver.resolve(identity("s"))
     assert isinstance(rotated, Credential)
@@ -215,7 +222,7 @@ async def test_rotated_and_revoked_keys_are_picked_up_without_reload(state: Path
 
 async def test_mapping_file_is_reloaded_when_its_mtime_changes(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     assert isinstance(await resolver.resolve(identity("s")), Credential)
     write_mapping(state, [entry({"subject": "t"}, "subj.key")])
     bump_mtime(path)
@@ -227,7 +234,7 @@ async def test_bad_reload_serves_nothing_and_recovers_on_fix(
     state: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     path.write_text('{"entries": [')
     bump_mtime(path)
     with pytest.raises(ResolverError, match="mapping file unusable"):
@@ -282,7 +289,7 @@ def test_invalid_mapping_documents_fail_at_load(tmp_path: Path, document: dict[s
     path = tmp_path / "mapping.json"
     path.write_text(json.dumps(document))
     with pytest.raises(ResolverError):
-        StaticResolver(path, UPSTREAMS)
+        StaticResolver(path, UPSTREAMS, email_matching=True)
 
 
 def test_duplicate_match_keys_fail_at_load(state: Path) -> None:
@@ -291,16 +298,78 @@ def test_duplicate_match_keys_fail_at_load(state: Path) -> None:
         [entry({"email": "A@x.example"}, "mail.key"), entry({"email": "a@X.example"}, "subj.key")],
     )
     with pytest.raises(ResolverError, match="duplicate email"):
-        StaticResolver(path, UPSTREAMS)
+        StaticResolver(path, UPSTREAMS, email_matching=True)
 
 
 def test_missing_mapping_file_fails_at_load(tmp_path: Path) -> None:
     with pytest.raises(ResolverError):
-        StaticResolver(tmp_path / "absent.json", UPSTREAMS)
+        StaticResolver(tmp_path / "absent.json", UPSTREAMS, email_matching=True)
 
 
 async def test_invalidate_is_a_harmless_noop(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
-    resolver = StaticResolver(path, UPSTREAMS)
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
     await resolver.invalidate(identity("s"))
     assert isinstance(await resolver.resolve(identity("s")), Credential)
+
+
+def test_email_matchers_are_refused_when_no_verified_email_can_be_established(
+    state: Path,
+) -> None:
+    path = write_mapping(state, [entry({"email": "a@x.example"}, "mail.key")])
+    with pytest.raises(ResolverError, match="email_verified"):
+        StaticResolver(path, UPSTREAMS, email_matching=False)
+
+
+async def test_non_email_mappings_load_without_email_matching(state: Path) -> None:
+    path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
+    outcome = await StaticResolver(path, UPSTREAMS, email_matching=False).resolve(identity("s"))
+    assert isinstance(outcome, Credential)
+
+
+async def test_a_mapping_completed_during_a_failed_read_is_reloaded_next_request(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
+    complete = json.dumps({"entries": [entry({"subject": "t"}, "subj.key")]})
+    real_read_text = Path.read_text
+
+    def read_while_writer_finishes(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self != path:
+            return real_read_text(self, *args, **kwargs)
+        partial = real_read_text(self, *args, **kwargs)[:10]
+        self.write_text(complete)  # the writer completes right after we read the partial file
+        return partial
+
+    path.write_text('{"entries": [')  # a half-written file, as the writer starts
+    monkeypatch.setattr(Path, "read_text", read_while_writer_finishes)
+    with pytest.raises(ResolverError):
+        await resolver.resolve(identity("s"))
+    monkeypatch.setattr(Path, "read_text", real_read_text)
+    assert isinstance(await resolver.resolve(identity("t")), Credential)
+
+
+async def test_a_hung_key_read_times_out_as_a_resolver_error(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = write_mapping(state, [entry({"subject": "s"}, "subj.key")])
+    resolver = StaticResolver(path, UPSTREAMS, email_matching=True)
+    real_read_text = Path.read_text
+
+    def hang_on_keys(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self.suffix == ".key":
+            time.sleep(1.0)
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", hang_on_keys)
+    monkeypatch.setattr("mcp_gateway.resolver.static.KEY_READ_TIMEOUT_SECONDS", 0.05)
+    with pytest.raises(ResolverError, match="unreadable"):
+        await resolver.resolve(identity("s"))
+
+
+async def test_a_non_ascii_key_is_refused_not_sent_upstream(state: Path) -> None:
+    write_key(state, "bad.key", "fake-alien-key-clé")
+    path = write_mapping(state, [entry({"subject": "s"}, "bad.key")])
+    with pytest.raises(ResolverError):
+        await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))

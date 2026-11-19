@@ -115,11 +115,22 @@ class TokenVerifier:
         if missing:
             raise InsufficientScopeError(f"missing required scope: {' '.join(missing)}")
 
+    def _age(self) -> float | None:
+        return None if self._fetched_at is None else self._clock() - self._fetched_at
+
     def _expired(self) -> bool:
-        return (
-            self._fetched_at is None
-            or self._clock() - self._fetched_at >= self._config.jwks_cache_ttl_seconds
-        )
+        age = self._age()
+        return age is None or age >= self._config.jwks_cache_ttl_seconds
+
+    def _stale_but_usable(self) -> bool:
+        """A key set that outlived its TTL but is still inside the stale-serving window."""
+        age = self._age()
+        limit = self._config.jwks_cache_ttl_seconds + self._config.jwks_max_stale_seconds
+        return age is not None and age < limit
+
+    def _may_fetch(self) -> bool:
+        last = self._last_attempt
+        return last is None or self._clock() - last >= KID_REFETCH_MIN_INTERVAL_SECONDS
 
     def _lookup(self, kid: str | None) -> PyJWK | None:
         if kid is not None:
@@ -127,16 +138,35 @@ class TokenVerifier:
         everything = [*self._keys.values(), *self._unkeyed]
         return everything[0] if len(everything) == 1 else None
 
-    async def _key_for(self, kid: str | None) -> PyJWK:
-        if self._expired():
+    async def _ensure_fresh(self) -> None:
+        """Refresh an expired key set; fall back to the cached one while it is usable.
+
+        With a cached set in hand, fetches are spaced by the minimum interval so an IdP outage
+        costs one fetch per interval, not one per request. With nothing cached there is no
+        alternative to a fetch.
+        """
+        if not self._expired():
+            return
+        have_cache = self._fetched_at is not None
+        if have_cache and not self._may_fetch():
+            if self._stale_but_usable():
+                return
+            raise JwksUnavailableError("identity provider keys are unavailable")
+        try:
             await self._refresh(self._fetch_seq)
+        except JwksUnavailableError:
+            if not self._stale_but_usable():
+                raise
+            logger.warning(
+                "JWKS refresh failed; serving the cached key set (age %.0f s)", self._age() or 0.0
+            )
+
+    async def _key_for(self, kid: str | None) -> PyJWK:
+        await self._ensure_fresh()
         key = self._lookup(kid)
         if key is not None:
             return key
-        last = self._last_attempt
-        if kid is not None and (
-            last is None or self._clock() - last >= KID_REFETCH_MIN_INTERVAL_SECONDS
-        ):
+        if kid is not None and self._may_fetch():
             await self._refresh(self._fetch_seq)
             key = self._lookup(kid)
             if key is not None:
@@ -170,7 +200,10 @@ class TokenVerifier:
                 self._config.jwks_uri, timeout=self._config.jwks_fetch_timeout_seconds
             )
             response.raise_for_status()
-            return PyJWKSet.from_dict(response.json())
+            document = response.json()
+            if not isinstance(document, dict):
+                raise ValueError("JWKS document is not a JSON object")
+            return PyJWKSet.from_dict(document)
         except (httpx.HTTPError, ValueError, jwt.PyJWTError) as exc:
             logger.error("JWKS fetch failed (%s)", type(exc).__name__)
             raise JwksUnavailableError("identity provider keys are unavailable") from exc

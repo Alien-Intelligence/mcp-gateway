@@ -45,6 +45,15 @@ def _optional_string(claims: Mapping[str, Any], path: str | None, *, what: str) 
     return value or None
 
 
+def _verified_email(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> str | None:
+    """The email claim, only when the verification claim is the boolean ``true``."""
+    if mapping.email_verified is None:
+        return None
+    if _lookup(claims, mapping.email_verified) is not True:
+        return None
+    return _optional_string(claims, mapping.email, what="email")
+
+
 def _optional_groups(claims: Mapping[str, Any], path: str | None) -> tuple[str, ...]:
     if path is None:
         return ()
@@ -62,7 +71,7 @@ def build_identity(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> I
         raise IdentityError(f"claim '{mapping.subject}' (subject) is missing or not a string")
     return Identity(
         subject=subject,
-        email=_optional_string(claims, mapping.email, what="email"),
+        email=_verified_email(claims, mapping),
         organization=_optional_string(claims, mapping.organization, what="organization"),
         groups=_optional_groups(claims, mapping.groups),
         claims=MappingProxyType(dict(claims)),

@@ -279,3 +279,70 @@ async def test_missing_required_scope_is_insufficient_scope(
 def test_token_scopes_ignores_wrong_types() -> None:
     assert token_scopes({"scope": 5, "scp": [1, "a", ""]}) == {"a"}
     assert token_scopes({"scope": "a b", "scp": "c"}) == {"a", "b", "c"}
+
+
+async def test_failed_refresh_after_ttl_serves_the_cached_keys_without_refetching_each_request(
+    idp: FakeIdp, rsa_key: rsa.RSAPrivateKey, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = Clock()
+    verifier = make_verifier(
+        idp, clock=clock, jwks_cache_ttl_seconds=60, jwks_max_stale_seconds=600
+    )
+    await verifier.verify(mint(rsa_key))
+    idp.down = True
+    clock.now += 61
+    with caplog.at_level("WARNING", logger="mcp_gateway.auth"):
+        assert (await verifier.verify(mint(rsa_key)))["sub"] == "user-1"
+    assert "serving the cached key set" in caplog.text
+    calls = idp.calls
+    for _ in range(5):
+        await verifier.verify(mint(rsa_key))
+    assert idp.calls == calls, "the minimum refetch interval applies to the expiry path"
+    clock.now += KID_REFETCH_MIN_INTERVAL_SECONDS
+    await verifier.verify(mint(rsa_key))
+    assert idp.calls == calls + 1
+
+
+async def test_stale_keys_stop_being_served_after_the_stale_window(
+    idp: FakeIdp, rsa_key: rsa.RSAPrivateKey
+) -> None:
+    clock = Clock()
+    verifier = make_verifier(
+        idp, clock=clock, jwks_cache_ttl_seconds=60, jwks_max_stale_seconds=600
+    )
+    await verifier.verify(mint(rsa_key))
+    idp.down = True
+    clock.now += 60 + 600 + 1
+    with pytest.raises(JwksUnavailableError):
+        await verifier.verify(mint(rsa_key))
+
+
+async def test_a_recovered_idp_replaces_the_stale_keys(
+    idp: FakeIdp, rsa_key: rsa.RSAPrivateKey
+) -> None:
+    clock = Clock()
+    verifier = make_verifier(
+        idp, clock=clock, jwks_cache_ttl_seconds=60, jwks_max_stale_seconds=600
+    )
+    await verifier.verify(mint(rsa_key))
+    idp.down = True
+    clock.now += 61
+    await verifier.verify(mint(rsa_key))
+    idp.down = False
+    clock.now += KID_REFETCH_MIN_INTERVAL_SECONDS
+    calls = idp.calls
+    await verifier.verify(mint(rsa_key))
+    await verifier.verify(mint(rsa_key))
+    assert idp.calls == calls + 1
+
+
+@pytest.mark.parametrize("document", [[], "keys", 7, None])
+async def test_a_jwks_that_is_not_a_json_object_is_unavailable(
+    rsa_key: rsa.RSAPrivateKey, document: Any
+) -> None:
+    config = config_from(base_config_dict()).auth
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=document))
+    )
+    with pytest.raises(JwksUnavailableError):
+        await TokenVerifier(config, client).verify(mint(rsa_key))

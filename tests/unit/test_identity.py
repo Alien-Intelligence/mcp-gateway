@@ -5,15 +5,31 @@ import pytest
 from mcp_gateway.config import IdentityPathsConfig
 from mcp_gateway.identity import IdentityError, build_identity
 
-KEYCLOAK = IdentityPathsConfig(subject="sub", email="email", organization="org", groups="groups")
+KEYCLOAK = IdentityPathsConfig(
+    subject="sub",
+    email="email",
+    email_verified="email_verified",
+    organization="org",
+    groups="groups",
+)
 HYDRA = IdentityPathsConfig(
-    subject="sub", email="ext.email", organization="ext.org", groups="ext.teams"
+    subject="sub",
+    email="ext.email",
+    email_verified="ext.email_verified",
+    organization="ext.org",
+    groups="ext.teams",
 )
 
 
 def test_keycloak_style_top_level_claims() -> None:
     identity = build_identity(
-        {"sub": "u1", "email": "a@x.example", "org": "client-x", "groups": ["g1", "g2"]},
+        {
+            "sub": "u1",
+            "email": "a@x.example",
+            "email_verified": True,
+            "org": "client-x",
+            "groups": ["g1", "g2"],
+        },
         KEYCLOAK,
     )
     assert identity.subject == "u1"
@@ -24,7 +40,15 @@ def test_keycloak_style_top_level_claims() -> None:
 
 def test_hydra_style_nested_claims() -> None:
     identity = build_identity(
-        {"sub": "u1", "ext": {"email": "a@x.example", "org": "client-y", "teams": ["t"]}},
+        {
+            "sub": "u1",
+            "ext": {
+                "email": "a@x.example",
+                "email_verified": True,
+                "org": "client-y",
+                "teams": ["t"],
+            },
+        },
         HYDRA,
     )
     assert identity.email == "a@x.example"
@@ -40,7 +64,9 @@ def test_absent_optional_claims_are_none_and_empty() -> None:
 
 
 def test_paths_configured_as_null_are_never_read() -> None:
-    paths = IdentityPathsConfig(subject="sub", email=None, organization=None, groups=None)
+    paths = IdentityPathsConfig(
+        subject="sub", email=None, email_verified=None, organization=None, groups=None
+    )
     identity = build_identity({"sub": "u", "email": "a@x.example", "groups": ["g"]}, paths)
     assert identity.email is None
     assert identity.groups == ()
@@ -68,7 +94,7 @@ def test_missing_or_non_string_subject_is_an_error(claims: dict[str, Any]) -> No
     [
         {"sub": "u", "org": ["client-x"]},
         {"sub": "u", "org": 7},
-        {"sub": "u", "email": {"a": 1}},
+        {"sub": "u", "email": {"a": 1}, "email_verified": True},
     ],
 )
 def test_wrong_scalar_types_are_errors_not_coerced(claims: dict[str, Any]) -> None:
@@ -91,3 +117,23 @@ def test_claims_are_read_only_and_not_in_repr() -> None:
     source["sub"] = "changed"
     assert identity.claims["sub"] == "u1"
     assert "secret_claim" not in repr(identity)
+
+
+@pytest.mark.parametrize(
+    "verified", [False, None, "true", 1, "yes"], ids=["false", "null", "str", "int", "yes"]
+)
+def test_email_is_untrusted_unless_the_verification_claim_is_boolean_true(verified: Any) -> None:
+    claims = {"sub": "u", "email": "a@x.example", "email_verified": verified}
+    assert build_identity(claims, KEYCLOAK).email is None
+
+
+def test_email_is_untrusted_when_the_verification_claim_is_absent() -> None:
+    assert build_identity({"sub": "u", "email": "a@x.example"}, KEYCLOAK).email is None
+
+
+def test_email_is_never_trusted_when_the_verification_path_is_null() -> None:
+    paths = IdentityPathsConfig(
+        subject="sub", email="email", email_verified=None, organization=None, groups=None
+    )
+    identity = build_identity({"sub": "u", "email": "a@x.example", "email_verified": True}, paths)
+    assert identity.email is None

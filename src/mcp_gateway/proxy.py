@@ -1,7 +1,7 @@
 """Streaming reverse proxy to one upstream MCP server. Responses are never rewritten."""
 
 import logging
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from typing import Any
 
 import anyio
@@ -76,6 +76,42 @@ async def _close(response: httpx.Response) -> None:
         logger.warning("closing the upstream response timed out")
 
 
+async def _watching_disconnect[T](
+    receive: Receive, operation: Callable[[], Awaitable[T]]
+) -> tuple[T | None, bool]:
+    """Run ``operation`` while listening for the client going away.
+
+    Returns ``(result, disconnected)``. On a disconnect the operation is cancelled and the
+    result is None; a result that completed in the same instant is still returned so the
+    caller can release it. Exceptions from ``operation`` propagate unchanged.
+    """
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+    disconnected = False
+
+    async def watch(scope: anyio.CancelScope) -> None:
+        nonlocal disconnected
+        while (await receive())["type"] != "http.disconnect":
+            pass
+        disconnected = True
+        scope.cancel()
+
+    async def run(scope: anyio.CancelScope) -> None:
+        try:
+            outcome.append(await operation())
+        except Exception as exc:  # re-raised below, outside the task group
+            failure.append(exc)
+        finally:
+            scope.cancel()
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(watch, group.cancel_scope)
+        group.start_soon(run, group.cancel_scope)
+    if failure:
+        raise failure[0]
+    return (outcome[0] if outcome else None), disconnected
+
+
 async def _drain(response: httpx.Response) -> None:
     received = 0
     async for chunk in response.aiter_raw():
@@ -126,6 +162,15 @@ class RelayResponse(StreamingResponse):
             raise failure[0]
 
 
+def _wire_headers(headers: list[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
+    """Encode headers as the ASGI server decoded them (latin-1), so inbound bytes survive intact.
+
+    httpx would refuse a non-ASCII ``str`` value; forwarding the raw bytes keeps the proxy
+    transparent and leaves validation to the upstream HTTP stack.
+    """
+    return [(name.encode("latin-1"), value.encode("latin-1")) for name, value in headers]
+
+
 class UpstreamProxy:
     def __init__(self, name: str, config: UpstreamConfig, client: httpx.AsyncClient) -> None:
         self._name = name
@@ -138,6 +183,7 @@ class UpstreamProxy:
         method: str,
         inbound_headers: list[tuple[str, str]],
         body: bytes,
+        receive: Receive,
         rpc: RpcInfo,
         credential: Credential,
         identity: Identity,
@@ -147,13 +193,15 @@ class UpstreamProxy:
         request = self._client.build_request(
             method,
             self._url,
-            headers=build_upstream_headers(inbound_headers, credential.api_key),
+            headers=_wire_headers(build_upstream_headers(inbound_headers, credential.api_key)),
             content=body or None,
         )
         audit.upstream = self._name
         reply_id = rpc.id if rpc.expects_reply else None
         try:
-            response = await self._client.send(request, stream=True)
+            response, gone = await _watching_disconnect(
+                receive, lambda: self._client.send(request, stream=True)
+            )
         except httpx.TimeoutException as exc:
             logger.error("upstream %s timed out (%s)", self._name, type(exc).__name__)
             audit.emit(status=504, outcome="upstream_error")
@@ -166,29 +214,45 @@ class UpstreamProxy:
             return json_rpc_response(
                 502, UPSTREAM_UNREACHABLE, "The service could not be reached.", reply_id
             )
+        if gone:
+            if response is not None:
+                await _close(response)
+            return self._client_gone(audit)
+        if response is None:
+            raise RuntimeError("upstream send finished without a response or a disconnect")
 
         audit.upstream_status = response.status_code
         if response.status_code in _AUTH_REPLIES:
-            return await self._reject(response, rpc, identity, resolver, audit)
+            return await self._reject(response, receive, rpc, identity, resolver, audit)
         return self._stream(response, audit)
+
+    @staticmethod
+    def _client_gone(audit: AuditRecord) -> Response:
+        logger.info("client disconnected while waiting for the upstream")
+        audit.emit(status=499, outcome="client_disconnected")
+        return Response(status_code=499)
 
     async def _reject(
         self,
         response: httpx.Response,
+        receive: Receive,
         rpc: RpcInfo,
         identity: Identity,
         resolver: CredentialResolver,
         audit: AuditRecord,
     ) -> Response:
         upstream_status = response.status_code
+        gone = False
         try:
-            await _drain(response)
+            _, gone = await _watching_disconnect(receive, lambda: _drain(response))
         except httpx.HTTPError as exc:
             logger.warning(
                 "draining upstream %d body failed (%s)", upstream_status, type(exc).__name__
             )
         finally:
             await _close(response)
+        if gone:
+            return self._client_gone(audit)
         try:
             await resolver.invalidate(identity)
         except ResolverError:
@@ -213,8 +277,8 @@ class UpstreamProxy:
                     yield chunk
             except httpx.HTTPError as exc:
                 logger.error("upstream %s stream failed (%s)", self._name, type(exc).__name__)
+                # Headers are already sent, so there is no status to change: end the stream.
                 audit.emit(status=status, outcome="upstream_error")
-                raise
             finally:
                 # Runs on completion, upstream failure and client disconnect (cancellation).
                 await _close(response)

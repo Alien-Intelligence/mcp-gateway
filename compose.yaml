@@ -110,14 +110,14 @@ services:
                   "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs",
                   "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"],
                   "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"],
-                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300,
+                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600,
                   "jwks_fetch_timeout_seconds": 5,
-                  "identity": {"subject": "sub", "email": "email", "organization": "org", "groups": "groups"}},
+                  "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}},
          "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
          "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
                                "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
                                "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
-         "limits": {"max_request_body_bytes": 1048576}, "audit": {"enabled": true}}
+         "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30}, "audit": {"enabled": true}}
     volumes:
       - *gateway-state
     ports:
@@ -150,14 +150,14 @@ services:
                   "jwks_uri": "http://hydra:4444/.well-known/jwks.json",
                   "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"],
                   "required_scopes": [], "scopes_advertised": ["openid"],
-                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300,
+                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600,
                   "jwks_fetch_timeout_seconds": 5,
-                  "identity": {"subject": "sub", "email": "ext.email", "organization": "ext.org", "groups": "ext.groups"}},
+                  "identity": {"subject": "sub", "email": "ext.email", "email_verified": "ext.email_verified", "organization": "ext.org", "groups": "ext.groups"}},
          "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
          "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
                                "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
                                "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
-         "limits": {"max_request_body_bytes": 1048576}, "audit": {"enabled": true}}
+         "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30}, "audit": {"enabled": true}}
     volumes:
       - *gateway-state
     ports:

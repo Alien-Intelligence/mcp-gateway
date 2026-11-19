@@ -37,10 +37,12 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
             "scopes_advertised": ["openid", "mcp-gateway"],
             "clock_skew_seconds": 5,
             "jwks_cache_ttl_seconds": 300,
+            "jwks_max_stale_seconds": 3600,
             "jwks_fetch_timeout_seconds": 5,
             "identity": {
                 "subject": "sub",
                 "email": "email",
+                "email_verified": "email_verified",
                 "organization": "org",
                 "groups": "groups",
             },
@@ -55,7 +57,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
                 "pool_timeout_seconds": 10,
             }
         },
-        "limits": {"max_request_body_bytes": 1048576},
+        "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30},
         "audit": {"enabled": True},
     }
 
@@ -98,6 +100,7 @@ def mint(
         "aud": PUBLIC_URL,
         "sub": "user-1",
         "email": "alice@client-x.example",
+        "email_verified": True,
         "org": "client-x",
         "exp": now + 300,
         "iat": now,
