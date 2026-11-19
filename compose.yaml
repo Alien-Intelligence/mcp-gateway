@@ -1,0 +1,180 @@
+# Development identity providers and gateway instances for the OAuth e2e tests.
+# Secrets come from the gitignored .env (see .env.example). Everything is bound
+# to loopback.
+
+name: mcp-gateway-dev
+
+networks:
+  gatewaydev:
+    name: gatewaydev
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
+          gateway: 172.31.250.1
+
+x-gateway-state: &gateway-state
+  type: bind
+  source: ${MCP_GATEWAY_STATE_DIR:?set MCP_GATEWAY_STATE_DIR in .env}
+  target: /run/gateway/state
+  read_only: true
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set KC_BOOTSTRAP_ADMIN_PASSWORD in .env}
+      # Substituted into the realm import (${E2E_USER_PASSWORD} placeholder).
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
+      KC_HOSTNAME: http://localhost:18080
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./dev/keycloak/alien-gateway-dev-realm.json:/opt/keycloak/data/import/alien-gateway-dev-realm.json:ro
+    ports:
+      - "127.0.0.1:18080:8080"
+    networks:
+      gatewaydev:
+        aliases: [keycloak]
+    healthcheck:
+      # The image has no curl: probe the management port with bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  hydra:
+    image: oryd/hydra:v26.2.0
+    # --dev: the issuer is plain http on localhost.
+    command: ["serve", "all", "--config", "/etc/hydra/hydra.yml", "--dev"]
+    environment:
+      SECRETS_SYSTEM: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET in .env}
+    volumes:
+      - ./dev/hydra/hydra.yml:/etc/hydra/hydra.yml:ro
+    ports:
+      - "127.0.0.1:14444:4444"
+    expose:
+      - "4445"
+    networks:
+      gatewaydev:
+        aliases: [hydra]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:4444/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  hydra-login:
+    build:
+      context: ./dev/hydra-login
+    environment:
+      HYDRA_ADMIN_URL: http://hydra:4445
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
+      ALLOWED_RESOURCES: http://localhost:18001/mcp
+    ports:
+      - "127.0.0.1:13000:3000"
+    networks:
+      gatewaydev:
+        aliases: [hydra-login]
+    depends_on:
+      hydra:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:3000/healthz", timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  gateway-keycloak:
+    build:
+      context: .
+    environment:
+      MCP_GATEWAY_UPSTREAM_URL: ${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18000/mcp", "listen": {"host": "0.0.0.0", "port": 8000},
+         "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev",
+                  "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs",
+                  "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"],
+                  "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"],
+                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300,
+                  "jwks_fetch_timeout_seconds": 5,
+                  "identity": {"subject": "sub", "email": "email", "organization": "org", "groups": "groups"}},
+         "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
+         "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
+                               "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
+                               "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
+         "limits": {"max_request_body_bytes": 1048576}, "audit": {"enabled": true}}
+    volumes:
+      - *gateway-state
+    ports:
+      - "127.0.0.1:18000:8000"
+    networks:
+      gatewaydev:
+        aliases: [gateway-keycloak]
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  gateway-hydra:
+    build:
+      context: .
+    environment:
+      MCP_GATEWAY_UPSTREAM_URL: ${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18001/mcp", "listen": {"host": "0.0.0.0", "port": 8000},
+         "auth": {"issuer": "http://localhost:14444",
+                  "jwks_uri": "http://hydra:4444/.well-known/jwks.json",
+                  "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"],
+                  "required_scopes": [], "scopes_advertised": ["openid"],
+                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300,
+                  "jwks_fetch_timeout_seconds": 5,
+                  "identity": {"subject": "sub", "email": "ext.email", "organization": "ext.org", "groups": "ext.groups"}},
+         "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
+         "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
+                               "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
+                               "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
+         "limits": {"max_request_body_bytes": 1048576}, "audit": {"enabled": true}}
+    volumes:
+      - *gateway-state
+    ports:
+      - "127.0.0.1:18001:8000"
+    networks:
+      gatewaydev:
+        aliases: [gateway-hydra]
+    depends_on:
+      hydra:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
