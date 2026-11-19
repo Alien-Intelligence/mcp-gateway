@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Cache
+.cache/
+*.cache
+.ruff_cache/
+.pytest_cache/
+
+# Logs
+*.log
+logs/
+
+# Claude Code temp files
+tmpclaude-*
+.claude
+
+# Test coverage artifacts
+.coverage
+coverage.xml
+
+# Local secrets and generated dev state: never committed (main is public)
+.secrets/
+dev/state/
+*.key
+mapping.json

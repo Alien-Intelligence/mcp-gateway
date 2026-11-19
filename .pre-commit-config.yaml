@@ -1,0 +1,51 @@
+# Pre-commit hooks for mcp-gateway
+# Install: uv pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# Mirrors mcp-base's configuration so both repos enforce the same Ruff
+# rule set (including PLC0415: no inline imports) at commit time.
+
+default_language_version:
+  python: python3.12
+
+repos:
+  # Conventional commits validation
+  - repo: https://github.com/commitizen-tools/commitizen
+    rev: v4.10.1
+    hooks:
+      - id: commitizen
+        stages: [commit-msg]
+
+  # Python code quality with Ruff
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # General quality checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: debug-statements
+      - id: check-case-conflict
+
+  # Block new noqa additions in Python diffs (suppression must be a human decision).
+  # Only fails on noqa added in the staged diff; existing noqa are grandfathered.
+  - repo: local
+    hooks:
+      - id: no-new-noqa
+        name: Block new noqa additions
+        entry: >-
+          bash -c 'a=$(git diff --cached -U0 --diff-filter=AM -- "*.py" | grep -E "^\+" | grep -v "^\+\+\+" | grep -nE "noqa" || true); if [ -n "$a" ]; then printf "BLOCKED: new noqa added.\nFix the lint rule, or get human approval and bypass with SKIP=no-new-noqa\n%s\n" "$a"; exit 1; fi'
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]

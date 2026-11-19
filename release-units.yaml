@@ -1,0 +1,10 @@
+# Post-merge versioning (ci-scripts docs/VERSIONING.md): the release bot bumps these after merge to dev.
+release_branch: dev
+units:
+  # The mcp-gateway image: what the Dockerfile copies (src/) plus the files it is built from.
+  - name: mcp-gateway
+    tag_format: "v{version}"
+    paths: [src/, pyproject.toml, uv.lock, Dockerfile]
+    files:
+      - {path: pyproject.toml, kind: regex, pattern: '^version = "(?P<version>[^"]+)"'}
+      - {path: uv.lock, kind: uv-lock, package: mcp-gateway}

@@ -1,0 +1,1 @@
+"""Alien MCP Gateway."""

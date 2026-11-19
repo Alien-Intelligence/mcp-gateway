@@ -1,0 +1,24 @@
+# GitLab CI/CD for mcp-gateway.
+# Build mode: tests, lint and security scans only. Image build and deploy jobs come with the distribution phase.
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - project: 'alias3/datastreaming/ci-scripts'
+    ref: main
+    file:
+      - '/templates/stages.gitlab-ci.yml'
+      - '/templates/jobs/release.gitlab-ci.yml'
+      - '/templates/jobs/python-test.gitlab-ci.yml'
+      - '/templates/jobs/python-lint.gitlab-ci.yml'
+
+variables:
+  # Versioning: the release bot bumps after merge (ci-scripts docs/VERSIONING.md)
+  VBUMP_RELEASE_BRANCH: "dev"
+  GIT_SUBMODULE_STRATEGY: none
+  PYTHON_VERSION: "3.12"
+  PYTHON_EXTRAS: "--extra dev"
+  WITH_TYPE_CHECK: "true"
+  LINT_DIRS: "src/ tests/ scripts/ dev/"
+  # The e2e suite needs the compose stack and the dev platform; it runs locally (README).
+  PYTEST_MARKER: "not e2e"
