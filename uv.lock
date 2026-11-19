@@ -905,6 +905,7 @@ name = "mcp-gateway"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pyjwt", extra = ["crypto"] },
@@ -926,6 +927,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.16.0" },
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.27.0" },
