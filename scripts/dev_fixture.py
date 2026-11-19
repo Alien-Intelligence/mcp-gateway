@@ -37,6 +37,9 @@ from typing import Any
 
 import httpx
 
+DESCRIPTION = (
+    "Idempotent fixture for the gateway end-to-end tests, driving a real Alien dev platform."
+)
 CONNECT_TIMEOUT_S = 10.0
 READ_TIMEOUT_S = 30.0
 BODY_EXCERPT_CHARS = 500
@@ -1056,7 +1059,7 @@ def print_summary(
 
 
 def parse_args(argv: Sequence[str]) -> Config:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser = argparse.ArgumentParser(description=DESCRIPTION)
     parser.add_argument("--tokens-file", type=Path, required=True)
     parser.add_argument("--api-base", required=True)
     parser.add_argument("--mcp-url", required=True)
