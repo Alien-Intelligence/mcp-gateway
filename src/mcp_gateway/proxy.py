@@ -22,6 +22,7 @@ from mcp_gateway.headers import (
 )
 from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import (
+    GATEWAY_ERROR,
     UPSTREAM_PAYMENT_REQUIRED,
     UPSTREAM_TIMEOUT,
     UPSTREAM_UNAUTHORIZED,
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 # Upstream 401/402 bodies are drained (to free the connection) but never relayed.
 _DRAIN_LIMIT_BYTES = 64 * 1024
 _CLOSE_TIMEOUT_SECONDS = 5.0
+
+UPSTREAM_ERROR_MESSAGE = "The service returned an error for this request."
 
 _AUTH_REPLIES: dict[int, tuple[int, str]] = {
     401: (
@@ -356,17 +359,14 @@ class UpstreamProxy:
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(response, receive, rpc, identity, resolver, audit)
             await self._track_session(method, session_id, response, subject_key)
-            if (
-                tool_policy is not None
-                and response.is_success
-                and rpc.method == "tools/list"
-                and rpc.expects_reply
-                and not _is_event_stream(response)
-            ):
-                # A JSON body answers exactly its own POST, so only a tools/list one is filtered.
-                return await self._respond_filtered(
-                    response, rpc, tool_policy, session_id, receive, audit
-                )
+            if tool_policy is not None and rpc.method == "tools/list" and rpc.expects_reply:
+                if not response.is_success:
+                    return await self._replace_failure(response, rpc, receive, audit)
+                if not _is_event_stream(response):
+                    # A JSON body answers exactly its own POST: only a tools/list one is filtered.
+                    return await self._respond_filtered(
+                        response, rpc, tool_policy, session_id, receive, audit
+                    )
             return self.stream(response, rpc, session_id, audit, tool_policy)
         except BaseException:
             # Nothing owns the response yet: close it rather than leak the connection.
@@ -441,6 +441,37 @@ class UpstreamProxy:
             rpc.id if rpc.expects_reply else None,
             {"upstream_status": upstream_status},
         )
+
+    async def _replace_failure(
+        self, response: httpx.Response, rpc: RpcInfo, receive: Receive, audit: AuditRecord
+    ) -> Response:
+        """Answer a failed ``tools/list`` with the gateway's error: the status stays, the body goes.
+
+        A failure body is free-form text or JSON the gateway cannot vouch for, and one that
+        looks like a tool list must not reach the client. The status is kept (a ``404`` still
+        tells the client its session ended), and so is ``Retry-After``.
+        """
+        reply_id = rpc.id
+        if reply_id is None:
+            raise RuntimeError("a filtered tools/list always carries a request id")
+        status = response.status_code
+        gone = False
+        try:
+            with anyio.fail_after(self._read_timeout):
+                _, gone = await watching_disconnect(receive, lambda: _drain(response))
+        except (httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("draining upstream %d body failed (%s)", status, type(exc).__name__)
+        finally:
+            await _close(response)
+        if gone:
+            return self._client_gone(audit)
+        audit.reason = "upstream_status"
+        audit.emit(status=status, outcome="upstream_error")
+        reply = json_rpc_response(status, GATEWAY_ERROR, UPSTREAM_ERROR_MESSAGE, reply_id)
+        retry_after = response.headers.get("retry-after")
+        if retry_after is not None:
+            reply.headers["Retry-After"] = retry_after
+        return reply
 
     async def _read_filterable_body(self, response: httpx.Response) -> bytes:
         """The whole upstream body, within ``max_filtered_response_bytes`` and the read timeout."""

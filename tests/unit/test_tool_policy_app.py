@@ -596,11 +596,55 @@ async def test_a_success_reply_that_is_neither_json_nor_sse_is_replaced(
     }
 
 
-async def test_a_failed_upstream_status_is_relayed_as_it_came(
+UPSTREAM_ERROR = "The service returned an error for this request."
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500, 503])
+async def test_a_failed_tool_list_keeps_its_status_but_never_its_body(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    status: int,
+) -> None:
+    leak = json.dumps(tools_reply()).encode()
+    upstream.responder = lambda _r: httpx.Response(
+        status, headers={**JSON_TYPE, "Retry-After": "3"}, content=leak
+    )
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=LIST, headers=alice)
+    assert response.status_code == status
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "error": {"code": -32005, "message": UPSTREAM_ERROR},
+    }
+    assert response.headers["retry-after"] == "3"
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["status"], line["upstream_status"]) == (
+        "upstream_error",
+        status,
+        status,
+    )
+
+
+async def test_a_failed_tool_list_sent_as_a_stream_is_replaced_too(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    stream = TrackedStream([event(tools_reply())])
+    upstream.responder = lambda _r: httpx.Response(500, headers=SSE, stream=stream)
+    response = await http.post("/mcp", json=LIST, headers=alice)
+    assert response.status_code == 500
+    assert response.json()["error"]["message"] == UPSTREAM_ERROR
+    assert b"delete_all" not in response.content
+    assert stream.closed
+
+
+async def test_the_other_failed_responses_are_still_relayed_as_they_came(
     http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
 ) -> None:
     upstream.responder = lambda _r: httpx.Response(500, headers=JSON_TYPE, content=b'{"e":1}')
-    response = await http.post("/mcp", json=LIST, headers=alice)
+    response = await http.post("/mcp", json=call("search"), headers=alice)
     assert (response.status_code, response.content) == (500, b'{"e":1}')
 
 
