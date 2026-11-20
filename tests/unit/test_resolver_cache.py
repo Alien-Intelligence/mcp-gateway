@@ -176,6 +176,21 @@ async def test_last_waiter_leaving_cancels_the_backend_call() -> None:
     assert backend.calls == 2
 
 
+async def test_a_resolve_right_after_the_last_waiter_left_starts_a_fresh_call() -> None:
+    backend = Backend(credential())
+    backend.gate = asyncio.Event()
+    cache, _ = build(backend)
+    only = asyncio.create_task(cache.resolve(identity()))
+    await asyncio.sleep(0.02)
+    only.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await only
+    # The cancelled backend call has not finished unwinding yet: a joiner must not inherit it.
+    backend.gate = None
+    assert isinstance(await asyncio.wait_for(cache.resolve(identity()), timeout=2), Credential)
+    assert backend.calls == 2
+
+
 async def test_invalidate_drops_the_entry_and_tells_the_inner_resolver() -> None:
     backend = Backend(credential(key="fake-alien-key-old"), credential(key="fake-alien-key-new"))
     cache, _ = build(backend)
