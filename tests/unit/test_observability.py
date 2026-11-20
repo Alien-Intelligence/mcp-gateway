@@ -427,6 +427,37 @@ async def test_an_unexpected_exception_is_audited_and_answered_with_the_id(
     assert len(spans_named(observed.spans, RESOLVE_SPAN)) == 1, "the resolve span must be ended"
 
 
+async def test_a_failing_recording_never_changes_the_answer_and_is_counted(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_finish(self: object, summary: object) -> None:
+        raise RuntimeError("secret-detail")
+
+    observed = build_observed(mapping_dir, transport)
+    monkeypatch.setattr("mcp_gateway.telemetry.RequestObserver.finish", broken_finish)
+    with caplog.at_level(logging.INFO):
+        async with client_for(observed.app) as http:
+            response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
+    assert response.status_code == 200
+    (line,) = [
+        json.loads(r.getMessage())
+        for r in caplog.records
+        if r.name == "mcp_gateway.audit" and r.levelno == logging.INFO
+    ]
+    assert (line["outcome"], line["status"]) == ("forwarded", 200)
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["recording request telemetry failed (RuntimeError)"]
+    counts = {
+        point.attributes["signal"]: point.value
+        for point in metric_points(observed.reader, "mcp_gateway.telemetry.failures")
+    }
+    assert counts == {"record": 1, "traces": 0, "metrics": 0}
+
+
 # --- every terminal path: one audit line, one span, one count --------------------------------
 
 

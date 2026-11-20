@@ -14,7 +14,8 @@ Errors are a span status without a message, never a recorded exception.
 
 import logging
 import re
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+import threading
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
@@ -39,15 +40,18 @@ from opentelemetry.metrics import CallbackOptions, Meter, NoOpMeter, Observation
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
     MetricExporter,
+    MetricExportResult,
     MetricReader,
+    MetricsData,
     PeriodicExportingMetricReader,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     SimpleSpanProcessor,
     SpanExporter,
+    SpanExportResult,
 )
 from opentelemetry.sdk.trace.sampling import ALWAYS_ON
 from opentelemetry.trace import Link, Span, SpanKind, StatusCode, Tracer
@@ -135,6 +139,90 @@ class RequestSummary:
     labels: Mapping[str, str] | None
     session_present: bool
     reason: str | None
+
+
+FAILURE_SIGNALS = ("record", "traces", "metrics")
+
+
+class TelemetryFailures:
+    """Plain, thread-safe counts of telemetry that failed, one per signal.
+
+    ``record``: recording a finished request in process raised. ``traces`` / ``metrics``: an
+    OTLP export returned a failure or raised. The exporters run in the SDK's background
+    threads, and the recording runs in a failure path, so the counts are plain integers under
+    a lock: counting never calls into OpenTelemetry and cannot itself fail. They are exposed
+    by an observable counter that reads them at collection time.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = dict.fromkeys(FAILURE_SIGNALS, 0)
+
+    def increment(self, signal: str) -> None:
+        with self._lock:
+            self._counts[signal] += 1
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return dict(self._counts)
+
+
+class _CountingSpanExporter(SpanExporter):
+    """Counts a span export that did not succeed; the SDK sees exactly what the wrapped one did."""
+
+    def __init__(self, inner: SpanExporter, failures: TelemetryFailures) -> None:
+        self._inner = inner
+        self._failures = failures
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        try:
+            result = self._inner.export(spans)
+        except BaseException:
+            self._failures.increment("traces")
+            raise
+        if result is not SpanExportResult.SUCCESS:
+            self._failures.increment("traces")
+        return result
+
+    def shutdown(self) -> None:
+        self._inner.shutdown()
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        return self._inner.force_flush(timeout_millis)
+
+
+class _CountingMetricExporter(MetricExporter):
+    """Counts a metric export that did not succeed; the SDK sees exactly what the wrapped one did.
+
+    The periodic reader reads the preferred temporality and aggregation from the exporter it
+    is given, so they are copied from the wrapped exporter (set by its own constructor).
+    """
+
+    def __init__(self, inner: MetricExporter, failures: TelemetryFailures) -> None:
+        super().__init__(
+            preferred_temporality=inner._preferred_temporality,
+            preferred_aggregation=inner._preferred_aggregation,
+        )
+        self._inner = inner
+        self._failures = failures
+
+    def export(
+        self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: object
+    ) -> MetricExportResult:
+        try:
+            result = self._inner.export(metrics_data, timeout_millis, **kwargs)
+        except BaseException:
+            self._failures.increment("metrics")
+            raise
+        if result is not MetricExportResult.SUCCESS:
+            self._failures.increment("metrics")
+        return result
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        return self._inner.force_flush(timeout_millis)
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        self._inner.shutdown(timeout_millis, **kwargs)
 
 
 class _Instruments:
@@ -296,15 +384,31 @@ class Telemetry:
         tracer: Tracer,
         meter: Meter,
         closers: list[Callable[[], Awaitable[None]]],
+        failures: TelemetryFailures,
     ) -> None:
         self.tracer = tracer
         self.meter = meter
         self.instruments = _Instruments(meter)
         self.closers = closers
+        self.failures = failures
+
+        def observe_failures(options: CallbackOptions) -> Iterable[Observation]:
+            for signal, count in failures.snapshot().items():
+                yield Observation(count, {"signal": signal})
+
+        meter.create_observable_counter(
+            "mcp_gateway.telemetry.failures",
+            callbacks=[observe_failures],
+            unit="{failure}",
+            description=(
+                "Telemetry that failed, by signal: in-process request recording (record) "
+                "and OTLP exports that failed (traces, metrics). Best effort: never changes a response."
+            ),
+        )
 
     @classmethod
     def noop(cls) -> "Telemetry":
-        return cls(trace.NoOpTracer(), NoOpMeter(INSTRUMENTATION_NAME), [])
+        return cls(trace.NoOpTracer(), NoOpMeter(INSTRUMENTATION_NAME), [], TelemetryFailures())
 
     def start_request(self, traceparents: list[str]) -> RequestObserver:
         """Open the server span. It is always a new root trace.
@@ -365,31 +469,45 @@ def read_headers_file(path: str) -> dict[str, str]:
     return headers
 
 
-def _exporters(otlp: OtlpConfig) -> tuple[SpanExporter, MetricExporter]:
+def _exporters(
+    otlp: OtlpConfig, failures: TelemetryFailures
+) -> tuple[SpanExporter, MetricExporter]:
     headers = read_headers_file(otlp.headers_file) if otlp.headers_file is not None else None
     if otlp.protocol == "grpc":
         insecure = urlsplit(otlp.endpoint).scheme == "http"
         return (
-            GrpcSpanExporter(
-                endpoint=otlp.endpoint,
-                insecure=insecure,
-                headers=headers,
-                timeout=otlp.timeout_seconds,
+            _CountingSpanExporter(
+                GrpcSpanExporter(
+                    endpoint=otlp.endpoint,
+                    insecure=insecure,
+                    headers=headers,
+                    timeout=otlp.timeout_seconds,
+                ),
+                failures,
             ),
-            GrpcMetricExporter(
-                endpoint=otlp.endpoint,
-                insecure=insecure,
-                headers=headers,
-                timeout=otlp.timeout_seconds,
+            _CountingMetricExporter(
+                GrpcMetricExporter(
+                    endpoint=otlp.endpoint,
+                    insecure=insecure,
+                    headers=headers,
+                    timeout=otlp.timeout_seconds,
+                ),
+                failures,
             ),
         )
     base = otlp.endpoint.rstrip("/")
     return (
-        HttpSpanExporter(
-            endpoint=f"{base}/v1/traces", headers=headers, timeout=otlp.timeout_seconds
+        _CountingSpanExporter(
+            HttpSpanExporter(
+                endpoint=f"{base}/v1/traces", headers=headers, timeout=otlp.timeout_seconds
+            ),
+            failures,
         ),
-        HttpMetricExporter(
-            endpoint=f"{base}/v1/metrics", headers=headers, timeout=otlp.timeout_seconds
+        _CountingMetricExporter(
+            HttpMetricExporter(
+                endpoint=f"{base}/v1/metrics", headers=headers, timeout=otlp.timeout_seconds
+            ),
+            failures,
         ),
     )
 
@@ -433,10 +551,11 @@ def build_telemetry(
     resource = Resource.create(
         {"service.name": service_name, **(otlp.resource_attributes if otlp else {})}
     )
+    failures = TelemetryFailures()
     otlp_span: SpanExporter | None = None
     otlp_metric: MetricExporter | None = None
     if otlp is not None:
-        otlp_span, otlp_metric = _exporters(otlp)
+        otlp_span, otlp_metric = _exporters(otlp, failures)
     interval_ms = int(otlp.export_interval_seconds * 1000) if otlp else None
     timeout_ms = int(otlp.timeout_seconds * 1000) if otlp else None
     shutdown_seconds = (otlp.timeout_seconds if otlp else 1.0) + _SHUTDOWN_SLACK_SECONDS
@@ -474,4 +593,4 @@ def build_telemetry(
             bounded_shutdown("the metric exporter", meter_provider.shutdown, shutdown_seconds)
         )
 
-    return Telemetry(tracer, meter, closers)
+    return Telemetry(tracer, meter, closers, failures)

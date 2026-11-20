@@ -99,7 +99,15 @@ class AuditRecord:
                     reason=self.reason,
                 )
             )
-        except Exception as exc:  # telemetry must not fail a request that already has its answer
+        # Catching is allowed here, and only here: by the time emit runs the request's answer is
+        # already decided or sent. Raising would abort a response the client is entitled to, or
+        # crash a stream after its end, because recording telemetry broke. What is caught is
+        # any Exception raised while ending the span or recording the metrics (not
+        # BaseException: cancellation and exit still propagate). It is never silent: it is
+        # logged at ERROR with the exception type and counted in
+        # mcp_gateway.telemetry.failures{signal="record"}; the audit line below is still written.
+        except Exception as exc:
+            self.observer.telemetry.failures.increment("record")
             logging.getLogger(__name__).error(
                 "recording request telemetry failed (%s)", type(exc).__name__, exc_info=exc
             )

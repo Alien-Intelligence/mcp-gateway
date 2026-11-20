@@ -70,7 +70,7 @@ On Alien, an API key is a billed user and an upstream session: users that share 
 
 ### Observability
 
-`observability.otlp` exports traces and metrics over OTLP (`grpc` or `http/protobuf`); `{"otlp": null}` exports nothing. Each request is one root trace with three spans (request, credential resolution, upstream call) and the metrics `mcp_gateway.requests`, `mcp_gateway.request.duration`, `mcp_gateway.upstream.duration`, `mcp_gateway.resolver.lookups` and `mcp_gateway.sessions.bound`. Spans and metrics never carry the subject, e-mail, a token, a key, a session id, arguments or content; resolver labels are span attributes only. Details: [`docs/configuration.md`](docs/configuration.md#observability).
+`observability.otlp` exports traces and metrics over OTLP (`grpc` or `http/protobuf`); `{"otlp": null}` exports nothing. Each request is one root trace with three spans (request, credential resolution, upstream call) and the metrics `mcp_gateway.requests`, `mcp_gateway.request.duration`, `mcp_gateway.upstream.duration`, `mcp_gateway.resolver.lookups`, `mcp_gateway.sessions.bound` and `mcp_gateway.telemetry.failures` (telemetry is best effort: a recording or export failure is counted, never changes a response). Spans and metrics never carry the subject, e-mail, a token, a key, a session id, arguments or content; resolver labels are span attributes only. Details: [`docs/configuration.md`](docs/configuration.md#observability).
 
 ### Request id and audit line
 
