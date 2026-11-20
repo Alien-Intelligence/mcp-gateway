@@ -5,7 +5,7 @@ The gateway reads one JSON document from the environment variable `MCP_GATEWAY_C
 - Every key is required. There is no default for any key. An optional value is written as an explicit `null`.
 - Unknown keys are refused at every level.
 - Types are strict: `"5"` is not a number, `1` is not `true`.
-- A secret is never written inline. Keys that hold one (`secret_file`, `dsn_file`, `url_file`, `headers_file`, `client_key_file`) take the path of a file.
+- A secret is never written inline. Keys that hold one (`secret_file`, `dsn_file`, `url_file`, `headers_file`, `client_key_file`, `encryption_key_file`) take the path of a file.
 - A bad document stops the process at start with `startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` on stdout. The message names the key and the rule, never the value.
 
 In the tables, "required" means the key must be present. Durations are in seconds. "gt 0" means strictly greater than zero.
@@ -25,7 +25,7 @@ In the tables, "required" means the key must be present. Durations are in second
 | `observability` | object | Traces and metrics export. |
 | `sessions` | object | Binding of upstream session ids to subjects. |
 | `state` | object | Where session bindings and cached credentials live: in this process or in a Redis shared by every replica. |
-| `policies` | object | Origin policy and tool policy. |
+| `policies` | object | Origin policy, tool policy and rate limits. |
 
 `GET /healthz` answers `{"status":"ok"}` without authentication: it is the liveness probe and never looks at the state backend. `GET /readyz` is the readiness probe (see [`state`](#state)).
 
@@ -74,7 +74,7 @@ A claim of the wrong type is a `401`. A missing optional claim is an absent valu
 
 The resolver turns the verified identity into an Alien API key, an upstream name and labels, or a denial. `type` selects the kind; the other keys depend on it. A resolver that fails closes the request (`500`, or `503` with `Retry-After: 5` when a backend is down).
 
-The identity handed to every resolver is `subject`, `email` (verified only, else null), `organization` (or null) and `groups`.
+The identity handed to every resolver is `subject`, `email` (verified only, else `null`), `organization` (or `null`) and `groups`.
 
 Denials return `403` and a JSON-RPC error: `-32010` for `no_mapping`, `-32011` for `ambiguous_mapping`, `-32012` for any other reason. The client sees a generic message; the reason is in the audit line.
 
@@ -254,7 +254,7 @@ An upstream `Mcp-Session-Id` is bound to the subject it was issued to, in the ba
 
 ## `state`
 
-State that must agree between replicas lives here: the session bindings (`sessions`) and the resolver cache (`resolver_cache`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
+State that must agree between replicas lives here: the session bindings (`sessions`), the resolver cache (`resolver_cache`) and the rate limit buckets (`policies.rate_limits`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
 
 ### `memory`
 
@@ -313,7 +313,7 @@ An upstream `401` or `402` deletes the cached entry and bumps its generation. A 
 |---|---|---|
 | `allowed_origins` | list of strings | Browser origins allowed on the MCP endpoint, `scheme://host[:port]`, http or https only. Scheme and host are lowercased and a default port is dropped. An entry with a path, query, fragment or userinfo is refused, and so is `null`. A request with an `Origin` header not in the list gets `403` (`-32008`) before authentication. An empty list refuses every request that carries an `Origin`; requests without one pass. |
 | `tools` | object or `null` | Tool allow/deny policy, see below. `null` means no policy: the gateway never parses or rewrites a response, and relays bytes exactly as the upstream sent them. |
-| `rate_limits` | object or null | Token buckets per subject and per organization. `null` turns rate limiting off. See below. |
+| `rate_limits` | object or `null` | Token buckets per subject and, optionally, per organization. `null` turns rate limiting off. See below. |
 
 ### `policies.tools`
 
@@ -382,7 +382,7 @@ The refusal has three shapes, chosen so that the sender can read it:
 
 Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1 and at most 86400 (one day). The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
 
-Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<h>` and `{p}rl:o:<h>`, `h` being the same keyed digest, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.redis.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
+Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<h>` and `{p}rl:o:<h>`, `h` being the same keyed digest, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
 
 ## `audit`
 
@@ -409,7 +409,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `tool` | string or null | `params.name` of a `tools/call`. |
 | `status` | integer | HTTP status the gateway answered (the upstream's for a relayed response, `499` when the client left). |
 | `outcome` | string | See below. |
-| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a `tools/list` reply the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name. |
+| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a `tools/list` reply the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name, or the bucket that refused a `rate_limited` request (`subject` or `organization`). |
 | `upstream` | string or null | Upstream name, once one was chosen. |
 | `latency_ms` | number | From receipt to the end of the response (the end of the stream for SSE). |
 | `upstream_status` | integer or null | Status the upstream answered. |
@@ -459,7 +459,7 @@ Each request is a new root trace; an inbound `traceparent` is never its parent. 
 | `mcp-gateway resolve_credential` | internal | `mcp_gateway.resolver.type` (`static`, `webhook`, `store_sql`, `store_redis`, `chain`), `mcp_gateway.resolver.cache` (`hit`, `miss`, `negative`, `none` when the cache is off), `mcp_gateway.resolver.result` (`credential`, `denied`, `unavailable`, `error`, `disconnected`, `aborted`). |
 | `mcp-gateway upstream` | client | `mcp_gateway.upstream`, `http.response.status_code`, `mcp_gateway.upstream.error` (`timeout`, `unreachable`, `aborted`). Ends at the response headers. |
 
-Error status is set on the request span for `status >= 500`, `upstream_stream_failed` and `internal_error`, with no message and no recorded exception. Spans never carry the subject, e-mail, organization, a token, a key, a session id, arguments or content.
+Error status is set on the request span for `status >= 500`, `upstream_stream_failed`, `tool_policy_failed` and `internal_error`, with no message and no recorded exception. Spans never carry the subject, e-mail, organization, a token, a key, a session id, arguments or content.
 
 ### Metrics
 
@@ -472,7 +472,7 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
 | `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |
 
-Telemetry is best effort: it never changes a response that is already decided or sent. A failure while recording a request is logged at ERROR (exception type only) and counted under `signal="record"`, and the audit line is still written. OTLP export failures happen in the SDK's background threads, which only log them; the gateway counts them under `traces` and `metrics` without altering what the SDK sees. Alert on a rising `mcp_gateway.telemetry.failures`: a collector that is down is otherwise visible only in the logs.
+Telemetry is best effort: it never changes a response that is already decided or sent. A failure while recording a request is logged at ERROR with its traceback (the message names the exception type and carries no request data) and counted under `signal="record"`, and the audit line is still written. OTLP export failures happen in the SDK's background threads, which only log them; the gateway counts them under `traces` and `metrics` without altering what the SDK sees. Alert on a rising `mcp_gateway.telemetry.failures`: a collector that is down is otherwise visible only in the logs.
 
 `rpc_method` is one of the standard MCP methods or `other` (and `none` for a body that is not JSON-RPC): the method is client-chosen text, so it is bounded. Tool names and resolver labels are never metric attributes (their values come from clients and backends, not from this file); they are span attributes only.
 
