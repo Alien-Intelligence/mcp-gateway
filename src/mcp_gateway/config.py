@@ -5,6 +5,7 @@ optional claim paths are written as explicit ``null``.
 """
 
 import os
+import re
 from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
@@ -132,8 +133,171 @@ class StaticResolverConfig(_Model):
     mapping_file: str = Field(min_length=1)
 
 
-# Add further resolver kinds as union members; `type` discriminates.
-ResolverConfig = Annotated[StaticResolverConfig, Field(discriminator="type")]
+class HmacAuthConfig(_Model):
+    type: Literal["hmac"]
+    # File holding the shared secret; never inline.
+    secret_file: str = Field(min_length=1)
+
+
+class MtlsAuthConfig(_Model):
+    type: Literal["mtls"]
+    client_cert_file: str = Field(min_length=1)
+    client_key_file: str = Field(min_length=1)
+
+
+WebhookAuthConfig = Annotated[HmacAuthConfig | MtlsAuthConfig, Field(discriminator="type")]
+
+
+class WebhookResolverConfig(_Model):
+    type: Literal["webhook"]
+    url: str
+    auth: WebhookAuthConfig
+    # Private CA bundle used to verify the webhook server (both auth modes); null = system CAs.
+    ca_file: str | None
+    default_upstream: str = Field(min_length=1)
+    # Per attempt, covering connect, send and read.
+    timeout_seconds: float = Field(gt=0)
+    max_attempts: int = Field(ge=1, le=10)
+    backoff_base_seconds: float = Field(gt=0)
+    backoff_max_seconds: float = Field(gt=0)
+    # Upper bound applied to the ttl_seconds an allow answer asks for.
+    max_ttl_seconds: float = Field(gt=0)
+
+    @field_validator("url")
+    @classmethod
+    def _webhook_url(cls, value: str) -> str:
+        return _require_http_url(value, what="webhook url")
+
+    @field_validator("ca_file")
+    @classmethod
+    def _ca_file_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("ca_file must be a path or null")
+        return value
+
+    @model_validator(mode="after")
+    def _mtls_needs_https(self) -> Self:
+        if isinstance(self.auth, MtlsAuthConfig) and urlsplit(self.url).scheme != "https":
+            raise ValueError("mtls auth needs an https webhook url")
+        if self.backoff_max_seconds < self.backoff_base_seconds:
+            raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")
+        return self
+
+
+# Only these named parameters may appear in a store_sql query.
+SQL_PLACEHOLDERS = frozenset({"subject", "email", "organization"})
+_SQL_PARAM = re.compile(r"%\((\w*)\)s")
+
+
+def validate_sql_query(query: str) -> str:
+    """Accept one SELECT that uses only the allowed named parameters."""
+    stripped = query.strip()
+    if stripped.endswith(";"):
+        stripped = stripped[:-1].rstrip()
+    if not re.match(r"select\b", stripped, re.IGNORECASE):
+        raise ValueError("query must be a single SELECT statement")
+    if ";" in stripped:
+        raise ValueError("query must be a single statement with no ';' inside")
+    found = _SQL_PARAM.findall(stripped)
+    if not found:
+        raise ValueError("query must use at least one of %(subject)s, %(email)s, %(organization)s")
+    unknown = sorted(set(found) - SQL_PLACEHOLDERS)
+    if unknown:
+        raise ValueError(f"query uses unsupported parameters: {', '.join(unknown)}")
+    # Anything left over once named parameters and the '%%' escape are removed is a positional
+    # or malformed placeholder.
+    leftover = _SQL_PARAM.sub("", stripped).replace("%%", "")
+    if "%" in leftover:
+        raise ValueError("query may only use named %(name)s parameters (and %% for a literal %)")
+    return stripped
+
+
+class StoreSqlResolverConfig(_Model):
+    type: Literal["store_sql"]
+    # File holding the PostgreSQL DSN (it carries the password); never inline.
+    dsn_file: str = Field(min_length=1)
+    query: str
+    default_upstream: str = Field(min_length=1)
+    pool_min_size: int = Field(ge=1)
+    pool_max_size: int = Field(ge=1)
+    connect_timeout_seconds: float = Field(gt=0)
+    statement_timeout_seconds: float = Field(gt=0)
+
+    @field_validator("query")
+    @classmethod
+    def _query_shape(cls, value: str) -> str:
+        return validate_sql_query(value)
+
+    @model_validator(mode="after")
+    def _pool_bounds(self) -> Self:
+        if self.pool_max_size < self.pool_min_size:
+            raise ValueError("pool_max_size must be >= pool_min_size")
+        return self
+
+
+KEY_PLACEHOLDERS = frozenset({"subject", "email", "organization"})
+_KEY_BRACES = re.compile(r"\{([^{}]*)\}")
+
+
+def validate_key_pattern(pattern: str) -> str:
+    """Accept a pattern whose only braces are the allowed ``{name}`` placeholders."""
+    found = _KEY_BRACES.findall(pattern)
+    if not found:
+        raise ValueError("key_pattern must use at least one of {subject}, {email}, {organization}")
+    unknown = sorted(set(found) - KEY_PLACEHOLDERS)
+    if unknown:
+        raise ValueError(f"key_pattern uses unsupported placeholders: {', '.join(unknown)}")
+    if "{" in _KEY_BRACES.sub("", pattern) or "}" in _KEY_BRACES.sub("", pattern):
+        raise ValueError("key_pattern has an unbalanced brace")
+    return pattern
+
+
+class StoreRedisResolverConfig(_Model):
+    type: Literal["store_redis"]
+    # File holding the redis:// or rediss:// URL (it may carry the password); never inline.
+    url_file: str = Field(min_length=1)
+    key_pattern: str
+    default_upstream: str = Field(min_length=1)
+    connect_timeout_seconds: float = Field(gt=0)
+    socket_timeout_seconds: float = Field(gt=0)
+    max_connections: int = Field(ge=1)
+
+    @field_validator("key_pattern")
+    @classmethod
+    def _pattern_shape(cls, value: str) -> str:
+        return validate_key_pattern(value)
+
+
+# `chain` members: any resolver except another chain (one level only).
+LeafResolverConfig = Annotated[
+    StaticResolverConfig
+    | WebhookResolverConfig
+    | StoreSqlResolverConfig
+    | StoreRedisResolverConfig,
+    Field(discriminator="type"),
+]
+
+
+class ChainResolverConfig(_Model):
+    type: Literal["chain"]
+    resolvers: list[LeafResolverConfig] = Field(min_length=2)
+
+
+ResolverConfig = Annotated[
+    StaticResolverConfig
+    | WebhookResolverConfig
+    | StoreSqlResolverConfig
+    | StoreRedisResolverConfig
+    | ChainResolverConfig,
+    Field(discriminator="type"),
+]
+
+
+class ResolverCacheConfig(_Model):
+    positive_ttl_seconds: float = Field(gt=0)
+    # Short: a denial is re-checked soon so a freshly added mapping works quickly.
+    negative_ttl_seconds: float = Field(gt=0)
+    max_entries: int = Field(ge=1)
 
 
 class UpstreamConfig(_Model):
@@ -163,6 +327,8 @@ class GatewayConfig(_Model):
     listen: ListenConfig
     auth: AuthConfig
     resolver: ResolverConfig
+    # null disables the cache.
+    resolver_cache: ResolverCacheConfig | None
     upstreams: dict[str, UpstreamConfig] = Field(min_length=1)
     limits: LimitsConfig
     audit: AuditConfig
