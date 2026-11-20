@@ -346,24 +346,51 @@ async def test_a_json_body_cut_short_is_an_incomplete_response(
     assert len(body) < declared
 
 
-async def test_a_client_going_away_during_a_hanging_call_aborts_the_upstream_request(
+async def test_a_client_leaving_mid_stream_does_not_abort_the_upstream_request(
     settings: StubSettings,
     http: httpx.AsyncClient,
     stub: StubControl,
     evidence: dict[str, Any],
 ) -> None:
+    """Decision of 2026-11-20: a disconnect is not a cancellation; the upstream finishes its work."""
     token = (await obtain_grant(settings, KEYCLOAK, PERSONAS["carol"])).token
     async with asyncio.timeout(TEST_SECONDS):
-        call = asyncio.create_task(post(http, KEYCLOAK, token, tool_call("hang")))
-        await stub.wait_for(lambda r: r["tool"] == "hang", timeout=DISCONNECT_SECONDS)
-        # Positive control: while the client is still here, the stub sees no disconnect.
-        assert not [r for r in await stub.requests() if r["tool"] == "hang" and r["disconnected"]]
+        async with http.stream(
+            "POST",
+            KEYCLOAK.gateway_url,
+            json=tool_call("slow_sse", count=6, delay_seconds=0.3),
+            headers=bearer(token, Accept="application/json, text/event-stream"),
+        ) as response:
+            async for _first in response.aiter_raw():
+                break  # one event arrived, the client leaves with five more to come
         started = time.monotonic()
-        call.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await call
         record = await stub.wait_for(
-            lambda r: r["tool"] == "hang" and r["disconnected"], timeout=DISCONNECT_SECONDS
+            lambda r: r["tool"] == "slow_sse" and (r["completed"] or r["disconnected"]),
+            timeout=DISCONNECT_SECONDS,
         )
     assert record["persona"] == "carol"
+    assert record["completed"] is True, "the stub sent its whole response to the gateway"
+    assert record["disconnected"] is False
+    evidence.update(completed_after_leaving_s=round(time.monotonic() - started, 2))
+
+
+async def test_closing_a_get_stream_still_closes_the_upstream_stream(
+    settings: StubSettings,
+    http: httpx.AsyncClient,
+    stub: StubControl,
+    evidence: dict[str, Any],
+) -> None:
+    """A listen stream has no request to complete: the client leaving ends it, as before."""
+    token = (await obtain_grant(settings, KEYCLOAK, PERSONAS["alice"])).token
+    session = await open_session(http, KEYCLOAK, token)
+    async with asyncio.timeout(TEST_SECONDS):
+        async with http.stream(
+            "GET", KEYCLOAK.gateway_url, headers=session_headers(token, session, **SSE)
+        ) as response:
+            await read_event_ids(response, 1)
+        started = time.monotonic()
+        record = await stub.wait_for(
+            lambda r: r["method"] == "GET" and r["disconnected"], timeout=DISCONNECT_SECONDS
+        )
+    assert record["completed"] is False
     evidence.update(disconnect_seen_after_s=round(time.monotonic() - started, 2))
