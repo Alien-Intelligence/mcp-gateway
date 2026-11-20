@@ -10,6 +10,7 @@ from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic_core import ErrorDetails
 
 from mcp_gateway.origin import normalize_origin
 
@@ -665,6 +666,22 @@ class GatewayConfig(_Model):
         return f"{self.public_origin}{self.resource_metadata_path}"
 
 
+def _describe(error: ErrorDetails) -> str:
+    """One validation problem as location and rule, never the offending input.
+
+    pydantic's message for an unknown discriminator value quotes it. A mistyped value can be
+    a secret pasted into the wrong key, so that message is replaced by a fixed one that lists
+    the accepted choices (taken from the schema, not from the input).
+    """
+    where = ".".join(str(part) for part in error["loc"]) or "<root>"
+    if error["type"] == "union_tag_invalid":
+        context = error.get("ctx")
+        if context is None or "expected_tags" not in context:
+            return f"{where}: unknown type"
+        return f"{where}: unknown type, expected one of {context['expected_tags']}"
+    return f"{where}: {error['msg']}"
+
+
 def parse_config(raw: str) -> GatewayConfig:
     """Parse and validate a JSON config document."""
     try:
@@ -672,8 +689,7 @@ def parse_config(raw: str) -> GatewayConfig:
     except ValidationError as exc:
         # Report location and rule only: never echo input values.
         problems = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
-            for err in exc.errors(include_input=False, include_url=False)
+            _describe(err) for err in exc.errors(include_input=False, include_url=False)
         )
         raise ConfigError(f"invalid {CONFIG_ENV_VAR}: {problems}") from exc
 

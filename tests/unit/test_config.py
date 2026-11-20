@@ -374,3 +374,18 @@ def test_rate_limits_key_is_required(config_dict: dict[str, Any]) -> None:
     del config_dict["policies"]["rate_limits"]
     with pytest.raises(ConfigError, match="rate_limits"):
         _parse(config_dict)
+
+
+@pytest.mark.parametrize(("section", "known"), [("state", "memory, redis"), ("resolver", "static")])
+def test_an_unknown_discriminator_value_is_never_echoed_in_the_error(
+    config_dict: dict[str, Any], section: str, known: str
+) -> None:
+    """A mistyped value can be a secret pasted into the wrong key; the message lists only the choices."""
+    config_dict[section]["type"] = "pasted-secret-1234"
+    with pytest.raises(ConfigError) as caught:
+        _parse(config_dict)
+    message = str(caught.value)
+    assert "pasted-secret-1234" not in message
+    assert f"{section}: " in message
+    for name in known.split(", "):
+        assert name in message
