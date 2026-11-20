@@ -6,6 +6,7 @@ from mcp_gateway.headers import (
     MUST_STRIP_REQUEST_HEADERS,
     build_upstream_headers,
     filter_response_headers,
+    has_content_encoding,
 )
 
 KEY = SecretStr("fake-alien-key-unit_test_key")
@@ -56,10 +57,26 @@ def test_allow_listed_headers_pass_with_original_values() -> None:
         assert out[name.lower()] == value
 
 
-def test_accept_encoding_defaults_to_identity_and_is_forwarded_when_present() -> None:
+def test_accept_encoding_is_identity_whatever_the_client_sent() -> None:
     assert _as_dict(build_upstream_headers([], KEY))["accept-encoding"] == "identity"
-    out = _as_dict(build_upstream_headers([("Accept-Encoding", "gzip")], KEY))
-    assert out["accept-encoding"] == "gzip"
+    out = build_upstream_headers(
+        [("Accept-Encoding", "gzip, br"), ("accept-encoding", "deflate")], KEY
+    )
+    assert [value for name, value in out if name == "accept-encoding"] == ["identity"]
+
+
+@pytest.mark.parametrize(
+    ("values", "encoded"),
+    [
+        ([], False),
+        (["identity"], False),
+        (["gzip"], True),
+        (["identity, br"], True),
+        (["GZIP"], True),
+    ],
+)
+def test_content_encoding_detection(values: list[str], encoded: bool) -> None:
+    assert has_content_encoding([("Content-Encoding", v) for v in values]) is encoded
 
 
 def test_repeated_allowed_headers_are_kept() -> None:

@@ -16,7 +16,9 @@ WEBHOOK: dict[str, Any] = {
     "auth": {"type": "hmac", "secret_file": "/run/secrets/hmac"},
     "ca_file": None,
     "default_upstream": "primary",
+    "allow_insecure_http": False,
     "timeout_seconds": 3,
+    "total_timeout_seconds": 20,
     "max_attempts": 3,
     "backoff_base_seconds": 0.2,
     "backoff_max_seconds": 2,
@@ -152,11 +154,39 @@ def test_secrets_cannot_be_given_inline() -> None:
         parse({**{k: v for k, v in SQL.items() if k != "dsn_file"}, "dsn": "postgresql://x"})
 
 
+def test_plain_http_webhook_needs_the_explicit_dev_flag() -> None:
+    plain = {**WEBHOOK, "url": "http://webhook-resolver:8080/resolve"}
+    with pytest.raises(ConfigError, match="https"):
+        parse(plain)
+    with pytest.raises(ConfigError, match="https"):
+        parse({**plain, "url": "http://127.0.0.1:9/resolve"})  # loopback gets no exemption
+    parse({**plain, "allow_insecure_http": True})
+    parse(WEBHOOK)
+
+
+@pytest.mark.parametrize("total", [3, 2.9, 0])
+def test_total_timeout_must_exceed_the_attempt_timeout(total: float) -> None:
+    with pytest.raises(ConfigError, match="total_timeout_seconds"):
+        parse({**WEBHOOK, "total_timeout_seconds": total})
+
+
+def test_allow_insecure_http_is_required() -> None:
+    with pytest.raises(ConfigError, match="allow_insecure_http"):
+        parse({k: v for k, v in WEBHOOK.items() if k != "allow_insecure_http"})
+
+
 def test_mtls_needs_https_and_both_files() -> None:
     mtls = {"type": "mtls", "client_cert_file": "/c", "client_key_file": "/k"}
     parse({**WEBHOOK, "auth": mtls})  # https url
     with pytest.raises(ConfigError, match="https"):
-        parse({**WEBHOOK, "auth": mtls, "url": "http://erp.example.com/r"})
+        parse(
+            {
+                **WEBHOOK,
+                "auth": mtls,
+                "url": "http://erp.example.com/r",
+                "allow_insecure_http": True,
+            }
+        )
     with pytest.raises(ConfigError, match="client_key_file"):
         parse({**WEBHOOK, "auth": {"type": "mtls", "client_cert_file": "/c"}})
 
@@ -253,11 +283,27 @@ def test_key_pattern_is_validated_at_config_load() -> None:
 
 
 def test_render_substitutes_in_one_pass() -> None:
-    # A value that looks like a placeholder is inserted verbatim, not expanded again.
+    # A value that looks like a placeholder is inserted (encoded), not expanded again.
     identity = Identity(subject="{email}", email="a@b.c", organization="org", groups=(), claims={})
-    assert render_key("k:{subject}:{organization}", identity) == "k:{email}:org"
+    assert render_key("k:{subject}:{organization}", identity) == "k:%7Bemail%7D:org"
+
+
+def test_values_are_percent_encoded_so_distinct_identities_never_share_a_key() -> None:
+    first = Identity(subject="c", email=None, organization="a:b", groups=(), claims={})
+    second = Identity(subject="b:c", email=None, organization="a", groups=(), claims={})
+    pattern = "k:{organization}:{subject}"
+    assert render_key(pattern, first) == "k:a%3Ab:c"
+    assert render_key(pattern, second) == "k:a:b%3Ac"
+    assert render_key(pattern, first) != render_key(pattern, second)
+
+
+def test_encoding_follows_url_quoting_for_the_customer_to_mirror() -> None:
+    who = Identity(
+        subject="alice@x.example/é 1", email=None, organization="o~._-", groups=(), claims={}
+    )
+    assert render_key("{organization}|{subject}", who) == "o~._-|alice%40x.example%2F%C3%A9%201"
 
 
 def test_render_returns_none_when_a_used_placeholder_is_null() -> None:
     assert render_key("k:{subject}:{organization}", ident(organization=None)) is None
-    assert render_key("k:{subject}", ident(organization=None)) == "k:u{1}"
+    assert render_key("k:{subject}", ident(organization=None)) == "k:u%7B1%7D"

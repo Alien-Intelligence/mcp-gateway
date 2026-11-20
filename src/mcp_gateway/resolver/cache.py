@@ -112,6 +112,10 @@ class CachingResolver:
         finally:
             flight.waiters -= 1
             if flight.waiters == 0 and not flight.task.done():
+                # Leave the map now: a caller arriving before the done-callback runs must start
+                # a fresh call, not join one that is being cancelled.
+                if self._flights.get(key) is flight:
+                    del self._flights[key]
                 flight.task.cancel()
 
     async def invalidate(self, identity: Identity) -> None:

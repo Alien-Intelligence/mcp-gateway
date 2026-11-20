@@ -51,7 +51,9 @@ def webhook_config(url: str, auth: dict[str, Any], **overrides: Any) -> WebhookR
         "auth": auth,
         "ca_file": None,
         "default_upstream": "primary",
+        "allow_insecure_http": True,
         "timeout_seconds": 2,
+        "total_timeout_seconds": 10,
         "max_attempts": 3,
         "backoff_base_seconds": 0.01,
         "backoff_max_seconds": 0.05,
@@ -96,9 +98,31 @@ async def resolver(server: WebhookServer, secret_file: str) -> AsyncIterator[Web
         yield item
 
 
-def test_signature_is_hmac_sha256_over_timestamp_dot_body() -> None:
-    expected = hmac.new(b"k", b"1700000000." + b'{"a":1}', hashlib.sha256).hexdigest()
-    assert sign(b"k", 1700000000, b'{"a":1}') == f"sha256={expected}"
+def test_signature_is_hmac_sha256_over_timestamp_nonce_and_body() -> None:
+    expected = hmac.new(b"k", b"1700000000.abc123." + b'{"a":1}', hashlib.sha256).hexdigest()
+    assert sign(b"k", 1700000000, "abc123", b'{"a":1}') == f"sha256={expected}"
+
+
+async def test_every_attempt_carries_a_fresh_nonce_inside_the_signature(
+    resolver: WebhookResolver, server: WebhookServer
+) -> None:
+    await resolver.resolve(identity())
+    await resolver.resolve(identity())
+    nonces = [seen.headers["x-mcp-gateway-nonce"] for seen in server.seen]
+    assert len(set(nonces)) == 2
+    assert all(len(nonce) == 32 and int(nonce, 16) >= 0 for nonce in nonces)
+    # The server verified the signature over timestamp.nonce.body.
+    assert [seen.signature_valid for seen in server.seen] == [True, True]
+
+
+async def test_a_replayed_request_with_another_nonce_fails_the_signature(
+    resolver: WebhookResolver, server: WebhookServer
+) -> None:
+    await resolver.resolve(identity())
+    forged = {**server.seen[0].headers, "x-mcp-gateway-nonce": "00" * 16}
+    assert server.verify_headers(forged, server.seen[0].body) is False, (
+        "the nonce is part of the signed string"
+    )
 
 
 async def test_allow_sends_only_the_identity_and_a_valid_signature(
@@ -210,6 +234,27 @@ async def test_timeout_is_transient_and_bounded(secret_file: str, server: Webhoo
             await resolver.resolve(identity())
     assert time.monotonic() - started < 2
     assert len(server.seen) == 2
+
+
+async def test_total_timeout_bounds_the_whole_retry_loop(
+    secret_file: str, server: WebhookServer
+) -> None:
+    server.responders = [slow_responder(5, ALLOW)]
+    # Ten attempts of up to 0.2 s plus pauses would take over two seconds.
+    async for resolver in make_resolver(
+        server,
+        secret_file,
+        timeout_seconds=0.2,
+        total_timeout_seconds=0.5,
+        max_attempts=10,
+        backoff_base_seconds=0.05,
+        backoff_max_seconds=0.1,
+    ):
+        started = time.monotonic()
+        with pytest.raises(ResolverUnavailableError, match="within"):
+            await resolver.resolve(identity())
+    assert time.monotonic() - started < 1.2
+    assert 1 <= len(server.seen) < 10
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 500])
@@ -339,7 +384,9 @@ async def test_mtls_rejects_a_client_certificate_from_an_untrusted_ca(tmp_path: 
         await server.stop()
 
 
-async def test_server_certificate_from_an_unknown_ca_is_not_trusted(tmp_path: Path) -> None:
+async def test_server_certificate_from_an_unknown_ca_is_a_config_error_not_retried(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     pki = make_pki(tmp_path)
     server = WebhookServer()
     server.responders = [json_responder(ALLOW)]
@@ -353,14 +400,16 @@ async def test_server_certificate_from_an_unknown_ca_is_not_trusted(tmp_path: Pa
                 "client_cert_file": pki.client_cert,
                 "client_key_file": pki.client_key,
             },
-            max_attempts=1,
+            max_attempts=3,
         )
         resolver = WebhookResolver(config, UPSTREAMS)
         try:
-            with pytest.raises(ResolverUnavailableError):
+            with pytest.raises(ResolverError, match="verif") as caught:
                 await resolver.resolve(identity())
+            assert not isinstance(caught.value, ResolverUnavailableError)
         finally:
             await resolver.aclose()
+        assert not [r for r in caplog.records if "webhook attempt" in r.getMessage()]
     finally:
         await server.stop()
 

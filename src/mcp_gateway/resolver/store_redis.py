@@ -2,6 +2,11 @@
 
 The key is ``key_pattern`` with ``{subject}``, ``{email}`` and ``{organization}`` replaced in
 one pass (never ``str.format``, so a value that itself contains braces is inserted verbatim).
+Each substituted value is percent-encoded (``urllib.parse.quote(value, safe="")``: everything
+except ``A-Z a-z 0-9 _ . - ~`` becomes ``%XX`` over its UTF-8 bytes), so a value can never
+contain the pattern's own separators and two identities cannot render the same key
+(``a:b`` + ``c`` versus ``a`` + ``b:c``). The customer writes keys the same way: subject
+``alice@x.example`` is stored under ``...:alice%40x.example``.
 An identity with no value for a placeholder the pattern uses is ``no_mapping``. The stored
 value is a JSON object ``{"api_key": "...", "upstream": "<name>" | null, "labels": {...} | null}``,
 parsed strictly; a missing key is ``no_mapping``.
@@ -10,8 +15,12 @@ parsed strictly; a missing key is ``no_mapping``.
 import logging
 import re
 from collections.abc import Collection
+from urllib.parse import quote
 
+import anyio
 import redis.asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import AuthenticationError, RedisError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -48,7 +57,7 @@ def render_key(pattern: str, identity: Identity) -> str | None:
         if value is None:
             missing = True
             return ""
-        return value
+        return quote(value, safe="")
 
     rendered = _PLACEHOLDER.sub(replace, pattern)
     return None if missing else rendered
@@ -68,6 +77,9 @@ class RedisStoreResolver:
                 socket_timeout=config.socket_timeout_seconds,
                 max_connections=config.max_connections,
                 decode_responses=True,
+                # redis-py retries three times with backoff by default, which would make a
+                # lookup outlast the configured timeouts.
+                retry=Retry(NoBackoff(), 0),
             )
         except (ValueError, RedisError) as exc:
             raise ResolverError("store_redis url is not a valid redis URL") from exc
@@ -77,7 +89,10 @@ class RedisStoreResolver:
         if key is None:
             return Denied("no_mapping")
         try:
-            value = await self._client.get(key)
+            with anyio.fail_after(
+                self._config.connect_timeout_seconds + self._config.socket_timeout_seconds
+            ):
+                value = await self._client.get(key)
         except AuthenticationError as exc:
             raise ResolverError("store_redis authentication failed") from exc
         except (RedisConnectionError, RedisTimeoutError, TimeoutError, OSError) as exc:

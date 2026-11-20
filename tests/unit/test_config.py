@@ -48,6 +48,7 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("limits", "max_sse_event_bytes"),
         ("sessions",),
         ("sessions", "max_entries"),
+        ("sessions", "max_entries_per_subject"),
         ("sessions", "idle_ttl_seconds"),
         ("policies",),
         ("policies", "allowed_origins"),
@@ -236,7 +237,19 @@ def test_allowed_origins_are_normalised_at_load(config_dict: dict[str, Any]) -> 
     assert config.policies.allowed_origins == ["https://app.example.com", "http://[::1]"]
 
 
-@pytest.mark.parametrize("bad", ["app.example.com", "https://app.example.com/path", "https://"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "app.example.com",
+        "https://app.example.com/path",
+        "https://",
+        "null",
+        "NULL",
+        "vscode-webview://abc",
+        "file://localhost",
+        "chrome-extension://abcdef",
+    ],
+)
 def test_allowed_origins_reject_non_origins(config_dict: dict[str, Any], bad: str) -> None:
     config_dict["policies"]["allowed_origins"] = [bad]
     with pytest.raises(ConfigError, match="allowed_origins"):
@@ -247,6 +260,8 @@ def test_allowed_origins_reject_non_origins(config_dict: dict[str, Any], bad: st
     ("section", "key", "value"),
     [
         ("sessions", "max_entries", 0),
+        ("sessions", "max_entries_per_subject", 0),
+        ("sessions", "max_entries_per_subject", 101),
         ("sessions", "idle_ttl_seconds", 0),
         ("limits", "max_sse_event_bytes", 0),
     ],

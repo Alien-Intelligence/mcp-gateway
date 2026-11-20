@@ -157,9 +157,14 @@ class WebhookResolverConfig(_Model):
     # Private CA bundle used to verify the webhook server (both auth modes); null = system CAs.
     ca_file: str | None
     default_upstream: str = Field(min_length=1)
+    # The reply carries the customer's API key, so the webhook must be https. True lifts that
+    # for plain http and exists for dev and test stacks only: false in any real deployment.
+    allow_insecure_http: bool
     # Per attempt, covering connect, send and read.
     timeout_seconds: float = Field(gt=0)
     max_attempts: int = Field(ge=1, le=10)
+    # Wall-clock ceiling for the whole resolution: every attempt and every backoff pause.
+    total_timeout_seconds: float = Field(gt=0)
     backoff_base_seconds: float = Field(gt=0)
     backoff_max_seconds: float = Field(gt=0)
     # Upper bound applied to the ttl_seconds an allow answer asks for.
@@ -179,8 +184,15 @@ class WebhookResolverConfig(_Model):
 
     @model_validator(mode="after")
     def _mtls_needs_https(self) -> Self:
-        if isinstance(self.auth, MtlsAuthConfig) and urlsplit(self.url).scheme != "https":
+        scheme = urlsplit(self.url).scheme
+        if scheme != "https" and not self.allow_insecure_http:
+            raise ValueError(
+                "webhook url must be https (allow_insecure_http=true is for dev and test only)"
+            )
+        if isinstance(self.auth, MtlsAuthConfig) and scheme != "https":
             raise ValueError("mtls auth needs an https webhook url")
+        if self.total_timeout_seconds <= self.timeout_seconds:
+            raise ValueError("total_timeout_seconds must be > timeout_seconds")
         if self.backoff_max_seconds < self.backoff_base_seconds:
             raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")
         return self
@@ -330,7 +342,15 @@ class SessionsConfig(_Model):
     """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it (in memory)."""
 
     max_entries: int = Field(gt=0)
+    # One subject over this cap evicts its own oldest binding, never another subject's.
+    max_entries_per_subject: int = Field(gt=0)
     idle_ttl_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _subject_cap_within_total(self) -> Self:
+        if self.max_entries_per_subject > self.max_entries:
+            raise ValueError("max_entries_per_subject must be <= max_entries")
+        return self
 
 
 class PoliciesConfig(_Model):
@@ -344,9 +364,10 @@ class PoliciesConfig(_Model):
         normalised: list[str] = []
         for item in value:
             origin = normalize_origin(item)
-            if origin is None:
+            if origin is None or urlsplit(origin).scheme not in ("http", "https"):
                 raise ValueError(
-                    "allowed_origins entries must be origins such as 'https://app.example.com'"
+                    "allowed_origins entries must be http(s) origins such as "
+                    "'https://app.example.com' ('null' is refused)"
                 )
             normalised.append(origin)
         return normalised

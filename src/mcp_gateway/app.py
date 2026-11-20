@@ -12,6 +12,7 @@ from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
+from starlette.types import Receive
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.auth import (
@@ -20,6 +21,7 @@ from mcp_gateway.auth import (
     JwksUnavailableError,
     TokenVerifier,
 )
+from mcp_gateway.closing import close_all
 from mcp_gateway.config import GatewayConfig
 from mcp_gateway.identity import Identity, IdentityError, build_identity
 from mcp_gateway.jsonrpc import (
@@ -37,7 +39,12 @@ from mcp_gateway.jsonrpc import (
     parse_request,
 )
 from mcp_gateway.origin import OriginPolicy
-from mcp_gateway.proxy import UpstreamProxy, build_client, json_rpc_response
+from mcp_gateway.proxy import (
+    UpstreamProxy,
+    build_client,
+    json_rpc_response,
+    watching_disconnect,
+)
 from mcp_gateway.resolver import (
     Credential,
     CredentialResolver,
@@ -83,6 +90,16 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
             return None
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+_SINGLE_VALUE_HEADERS = ("Mcp-Session-Id", "Mcp-Protocol-Version")
+
+
+def _repeated_header(request: Request) -> str | None:
+    for name in _SINGLE_VALUE_HEADERS:
+        if len(request.headers.getlist(name)) > 1:
+            return name
+    return None
 
 
 def _bearer_token(request: Request) -> str | None:
@@ -173,11 +190,14 @@ class Gateway:
             )
 
     async def _resolve(
-        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord
+        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, receive: Receive
     ) -> Credential | Response:
         reply_id = rpc.id if rpc.expects_reply else None
         try:
-            outcome = await self._resolver.resolve(identity)
+            # A client that leaves must not keep a (possibly slow) lookup running.
+            outcome, gone = await watching_disconnect(
+                receive, lambda: self._resolver.resolve(identity)
+            )
         except ResolverUnavailableError as exc:
             logger.error("credential backend unavailable: %s", exc)
             audit.emit(status=503, outcome="resolver_unavailable")
@@ -190,6 +210,10 @@ class Gateway:
             logger.error("credential resolution failed: %s", exc)
             audit.emit(status=500, outcome="gateway_error")
             return json_rpc_response(500, GATEWAY_ERROR, GATEWAY_ERROR_MESSAGE, reply_id)
+        if gone or outcome is None:
+            logger.info("client disconnected while the credential was being resolved")
+            audit.emit(status=499, outcome="client_disconnected")
+            return Response(status_code=499)
         if isinstance(outcome, Denied):
             audit.reason = outcome.reason
             audit.emit(status=403, outcome="denied")
@@ -241,7 +265,16 @@ class Gateway:
             audit.emit(status=400, outcome="mcp_header_mismatch")
             return json_rpc_response(400, HEADER_MISMATCH, mismatch, reply_id)
 
-        credential = await self._resolve(identity, rpc, audit)
+        repeated = _repeated_header(request)
+        if repeated is not None:
+            # Two values would let a front proxy and the upstream disagree about which one counts,
+            # and the binding check would look at the other one.
+            audit.emit(status=400, outcome="duplicate_header")
+            return json_rpc_response(
+                400, INVALID_REQUEST, f"The {repeated} header must appear once.", reply_id
+            )
+
+        credential = await self._resolve(identity, rpc, audit, request.receive)
         if isinstance(credential, Response):
             return credential
         audit.labels = dict(credential.labels)
@@ -299,6 +332,7 @@ def create_app(
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
     sessions = SessionRegistry(
         max_entries=config.sessions.max_entries,
+        max_entries_per_subject=config.sessions.max_entries_per_subject,
         idle_ttl_seconds=config.sessions.idle_ttl_seconds,
         clock=session_clock,
     )
@@ -331,10 +365,9 @@ def create_app(
         try:
             yield
         finally:
-            await resolver.aclose()
-            await jwks_client.aclose()
-            for client in clients.values():
-                await client.aclose()
+            await close_all(
+                [resolver.aclose, jwks_client.aclose, *(c.aclose for c in clients.values())]
+            )
 
     return Starlette(
         routes=[

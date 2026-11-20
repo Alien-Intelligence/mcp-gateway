@@ -1,5 +1,6 @@
 """Gateway-level protocol rules through ``create_app``: origin, Mcp-* mirror, sessions, streams."""
 
+import gzip
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -516,7 +517,7 @@ async def test_failure_of_a_json_body_aborts_instead_of_ending_cleanly(
     assert line["outcome"] == "upstream_stream_failed"
 
 
-async def test_event_over_the_cap_aborts_even_while_the_reply_is_owed(
+async def test_event_over_the_cap_while_the_reply_is_owed_reports_the_failure(
     two_user_dir: Path,
     transport: httpx.MockTransport,
     upstream: FakeUpstream,
@@ -530,8 +531,77 @@ async def test_event_over_the_cap_aborts_even_while_the_reply_is_owed(
     sse_responder(upstream, stream)
     with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
         async with client_for(app) as client:
-            with pytest.raises(UpstreamStreamAbortedError):
-                await client.post("/mcp", json=RPC_BODY, headers=alice)
+            response = await client.post("/mcp", json=RPC_BODY, headers=alice)
+    assert response.content.startswith(b"event: message\ndata: ")
+    assert b"x" * 20 not in response.content
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "event_too_large")
     assert stream.closed
+
+
+async def test_event_over_the_cap_after_the_reply_aborts(
+    two_user_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+) -> None:
+    data = base_config_dict(str(two_user_dir / "mapping.json"))
+    data["limits"]["max_sse_event_bytes"] = 64
+    app = create_app(config_from(data), http_transport=transport)
+    stream = TrackedStream([REPLY, b"x" * 200, b"\n\n"])
+    sse_responder(upstream, stream)
+    async with client_for(app) as client:
+        with pytest.raises(UpstreamStreamAbortedError):
+            await client.post("/mcp", json=RPC_BODY, headers=alice)
+    assert stream.closed
+
+
+async def test_client_accept_encoding_never_reaches_the_upstream(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    sse_responder(upstream, TrackedStream([REPLY]))
+    await http.post("/mcp", json=RPC_BODY, headers={**alice, "Accept-Encoding": "gzip, br"})
+    assert upstream.requests[0].headers.get_list("accept-encoding") == ["identity"]
+
+
+async def test_compressed_event_stream_is_a_stream_failure(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = TrackedStream([gzip.compress(REPLY)])
+    upstream.responder = lambda _r: httpx.Response(
+        200, headers={**SSE, "Content-Encoding": "gzip"}, stream=stream
+    )
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=RPC_BODY, headers=alice)
+    assert "content-encoding" not in response.headers
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
+    assert stream.closed
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "encoded_event_stream")
+
+
+@pytest.mark.parametrize("header", ["Mcp-Session-Id", "Mcp-Protocol-Version"])
+async def test_a_repeated_single_value_header_is_400_and_not_forwarded(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    bob: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    header: str,
+) -> None:
+    await initialize(http, upstream, alice, "sess-a")
+    # Bob's own (unbound) id first, alice's bound id second: a parser that picks the other value
+    # than the gateway did would hand bob alice's session.
+    pairs = [*bob.items(), (header, "unbound"), (header, "sess-a")]
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=RPC_BODY, headers=pairs)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    assert header in response.json()["error"]["message"]
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["status"], line["outcome"]) == (400, "duplicate_header")

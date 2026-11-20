@@ -3,6 +3,7 @@
 import asyncio
 import importlib.util
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType
@@ -12,6 +13,7 @@ import pytest
 import uvicorn
 
 from mcp_gateway.resolver import Credential, Denied, ResolverError, WebhookResolver
+from mcp_gateway.resolver.webhook import sign
 
 from .conftest import FAKE_API_KEY
 from .test_webhook_resolver import SECRET, UPSTREAMS, identity, webhook_config
@@ -180,3 +182,74 @@ def test_secrets_and_settings_have_no_defaults(state_dir: Path) -> None:
         broken = {k: v for k, v in env.items() if k != name}
         with pytest.raises(RuntimeError, match=name):
             service.load_settings(broken)
+
+
+# --- replay protection -------------------------------------------------------------------
+
+
+def signed_headers(timestamp: int, nonce: str, body: bytes) -> dict[str, str]:
+    return {
+        "X-MCP-Gateway-Timestamp": str(timestamp),
+        "X-MCP-Gateway-Nonce": nonce,
+        "X-MCP-Gateway-Signature": sign(SECRET.encode(), timestamp, nonce, body),
+    }
+
+
+@pytest.fixture
+async def replay_client(state_dir: Path) -> AsyncIterator[httpx.AsyncClient]:
+    settings = service.load_settings(
+        env_for(state_dir, WEBHOOK_HMAC_SECRET_FILE=str(state_dir.parent / "hmac"))
+    )
+    app = service.create_app(settings)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://webhook"
+    ) as client:
+        yield client
+
+
+BODY = json.dumps(
+    {"subject": "u", "email": "alice@client-x.example", "organization": None}
+).encode()
+NONCE_A = "a" * 32
+NONCE_B = "b" * 32
+
+
+async def test_a_replayed_request_is_refused(replay_client: httpx.AsyncClient) -> None:
+    headers = signed_headers(int(time.time()), NONCE_A, BODY)
+    assert (await replay_client.post("/resolve", content=BODY, headers=headers)).status_code == 200
+    again = await replay_client.post("/resolve", content=BODY, headers=headers)
+    assert again.status_code == 401
+    other = signed_headers(int(time.time()), NONCE_B, BODY)
+    assert (await replay_client.post("/resolve", content=BODY, headers=other)).status_code == 200
+
+
+async def test_a_request_without_a_usable_nonce_is_refused(
+    replay_client: httpx.AsyncClient,
+) -> None:
+    now = int(time.time())
+    for nonce in ("", "not hex!", "ab"):
+        headers = signed_headers(now, nonce, BODY)
+        response = await replay_client.post("/resolve", content=BODY, headers=headers)
+        assert response.status_code == 401, nonce
+
+
+async def test_a_non_ascii_signature_is_401_not_a_server_error(
+    replay_client: httpx.AsyncClient,
+) -> None:
+    headers = signed_headers(int(time.time()), NONCE_A, BODY)
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    raw = [(k, "sha256=é".encode("latin-1") if k.endswith(b"signature") else v) for k, v in raw]
+    response = await replay_client.post("/resolve", content=BODY, headers=raw)
+    assert response.status_code == 401
+
+
+def test_the_nonce_ledger_forgets_after_the_replay_window_and_is_bounded() -> None:
+    now = [1000.0]
+    ledger = service.NonceLedger(30, capacity=2, clock=lambda: now[0])
+    assert ledger.accept("n1")
+    assert not ledger.accept("n1")
+    assert ledger.accept("n2")
+    assert not ledger.accept("n3"), "a full ledger refuses instead of evicting"
+    now[0] += 61  # past 2 * window: n1 and n2 could no longer pass the timestamp check
+    assert ledger.accept("n3")
+    assert ledger.accept("n1")

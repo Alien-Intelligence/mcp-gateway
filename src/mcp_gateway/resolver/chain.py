@@ -7,6 +7,7 @@ chain and are returned or raised as is, so the request fails closed.
 import logging
 from collections.abc import Sequence
 
+from mcp_gateway.closing import close_all
 from mcp_gateway.identity import Identity
 from mcp_gateway.resolver.base import Credential, CredentialResolver, Denied, ResolverError
 
@@ -43,5 +44,4 @@ class ChainResolver:
             raise failure
 
     async def aclose(self) -> None:
-        for resolver in self._resolvers:
-            await resolver.aclose()
+        await close_all(resolver.aclose for resolver in self._resolvers)

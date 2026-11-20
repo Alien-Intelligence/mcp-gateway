@@ -64,7 +64,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
             "max_sse_event_bytes": 65536,
         },
         "audit": {"enabled": True},
-        "sessions": {"max_entries": 100, "idle_ttl_seconds": 600},
+        "sessions": {"max_entries": 100, "max_entries_per_subject": 20, "idle_ttl_seconds": 600},
         "policies": {"allowed_origins": ["https://app.example.com"]},
     }
 

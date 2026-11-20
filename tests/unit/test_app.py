@@ -466,7 +466,7 @@ async def test_upstream_content_encoding_is_not_decoded(
     )
     assert response.headers["content-encoding"] == "gzip"
     assert response.json()["id"] == 7
-    assert upstream.requests[0].headers["accept-encoding"] == "gzip"
+    assert upstream.requests[0].headers["accept-encoding"] == "identity"
 
 
 async def test_midstream_failure_after_the_reply_is_aborted_not_ended_cleanly(
@@ -538,7 +538,104 @@ async def test_client_disconnect_aborts_the_upstream_request(
         await asyncio.wait_for(app(scope, receive, send), timeout=5)
     assert stream.closed, "the upstream response must be closed when the client disconnects"
     assert [m for m in sent if m["type"] == "http.response.body" and m["body"]]
-    assert audit_lines(caplog)[0]["outcome"] == "forwarded"
+    assert audit_lines(caplog)[0]["outcome"] == "client_disconnected"
+
+
+class FailingCloseResolver(FixedResolver):
+    async def aclose(self) -> None:
+        raise ResolverError("resolver close failed")
+
+
+async def test_lifespan_closes_every_client_even_when_the_resolver_close_fails(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[httpx.AsyncClient] = []
+    original = httpx.AsyncClient.aclose
+
+    async def recording_aclose(self: httpx.AsyncClient) -> None:
+        closed.append(self)
+        await original(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_aclose)
+    app = build_app(mapping_dir, transport, resolver=FailingCloseResolver(Denied("no_mapping")))
+    with pytest.raises(ResolverError, match="resolver close failed"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert len(closed) == 2, "the JWKS client and the upstream client are both closed"
+
+
+class HangingResolver:
+    """Never answers; records being cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def resolve(self, identity: Identity) -> Credential | Denied:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def invalidate(self, identity: Identity) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_client_leaving_during_resolution_cancels_it(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = HangingResolver()
+    app = build_app(mapping_dir, transport, resolver=resolver)
+    body = json.dumps(RPC_BODY).encode()
+    body_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.sleep(0.05)  # the client gives up while the lookup is running
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"gw.example.com"),
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "server": ("gw.example.com", 443),
+        "client": ("203.0.113.9", 1234),
+    }
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert resolver.cancelled
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["status"], line["outcome"]) == (499, "client_disconnected")
 
 
 # --- upstream auth failures -----------------------------------------------------------
