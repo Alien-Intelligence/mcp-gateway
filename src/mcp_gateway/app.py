@@ -36,13 +36,16 @@ from mcp_gateway.jsonrpc import (
     INVALID_REQUEST,
     NO_RPC,
     ORIGIN_REFUSED,
+    RATE_LIMITED,
     RESOLVER_UNAVAILABLE,
     SESSION_NOT_FOUND,
     STATE_UNAVAILABLE,
     RpcInfo,
     check_mcp_headers,
+    error_body,
     is_tool_batch,
     parse_request,
+    tool_error_result,
 )
 from mcp_gateway.origin import OriginPolicy
 from mcp_gateway.proxy import (
@@ -50,6 +53,12 @@ from mcp_gateway.proxy import (
     build_client,
     json_rpc_response,
     watching_disconnect,
+)
+from mcp_gateway.ratelimit import (
+    MemoryRateLimiter,
+    RateLimiter,
+    RateLimitUnavailableError,
+    bucket_specs,
 )
 from mcp_gateway.resolver import (
     CachingResolver,
@@ -106,6 +115,40 @@ def _state_unavailable(audit: AuditRecord, reply_id: str | int | None) -> Respon
     return response
 
 
+RETRY_AFTER_META_KEY = "club.alien/retryAfterSeconds"
+
+
+def _rate_limited_message(retry_after: int) -> str:
+    return f"Rate limit reached for this account. Retry in {retry_after} s."
+
+
+def _rate_limited_response(rpc: RpcInfo, retry_after: int) -> Response:
+    """Answer a refused request in the one shape its sender will actually read.
+
+    Only a tool execution error reliably reaches the model, and a 2xx never disturbs the
+    transport (several clients treat any other status as a connection failure), so a request
+    that has an id is answered with 200. A request nobody can be answered (notification, client
+    response, GET, DELETE, unparsable body) gets the plain 429.
+    """
+    message = _rate_limited_message(retry_after)
+    headers = {"Retry-After": str(retry_after)}
+    if rpc.id is None or rpc.method is None:
+        return JSONResponse(
+            error_body(RATE_LIMITED, message, None, {"retry_after_seconds": retry_after}),
+            status_code=429,
+            headers=headers,
+        )
+    if rpc.method == "tools/call":
+        return JSONResponse(
+            tool_error_result(rpc.id, message, {RETRY_AFTER_META_KEY: retry_after}),
+            headers=headers,
+        )
+    return JSONResponse(
+        error_body(RATE_LIMITED, message, rpc.id, {"retry_after_seconds": retry_after}),
+        headers=headers,
+    )
+
+
 async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
     """Read the whole body, or return None as soon as it is known to exceed ``limit``."""
     declared = request.headers.get("content-length")
@@ -146,8 +189,10 @@ class Gateway:
         proxies: dict[str, UpstreamProxy],
         sessions: SessionStore,
         telemetry: Telemetry,
+        rate_limiter: RateLimiter | None,
     ) -> None:
         self._config = config
+        self._rate_limiter = rate_limiter
         self._telemetry = telemetry
         self._origins = OriginPolicy(config.policies.allowed_origins)
         self._sessions = sessions
@@ -221,6 +266,37 @@ class Gateway:
                 status_code=503,
                 headers={"Retry-After": str(JWKS_RETRY_AFTER_SECONDS)},
             )
+
+    async def _rate_limit(
+        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, *, subject_key: str
+    ) -> Response | None:
+        """Take a token from every applicable bucket, or answer why not. Never calls the resolver."""
+        limits = self._config.policies.rate_limits
+        limiter = self._rate_limiter
+        if limits is None or limiter is None:
+            return None
+        buckets = bucket_specs(limits, subject_key=subject_key, organization=identity.organization)
+        if not buckets:
+            return None
+        try:
+            decision = await limiter.acquire(buckets)
+        except RateLimitUnavailableError as exc:
+            logger.error("rate limit state unavailable: %s", exc)
+            audit.emit(status=503, outcome="state_unavailable")
+            response = json_rpc_response(
+                503,
+                STATE_UNAVAILABLE,
+                STATE_UNAVAILABLE_MESSAGE,
+                rpc.id if rpc.expects_reply else None,
+            )
+            response.headers["Retry-After"] = str(STATE_RETRY_AFTER_SECONDS)
+            return response
+        if decision.allowed:
+            return None
+        audit.reason = decision.limited_scope
+        response = _rate_limited_response(rpc, decision.retry_after_seconds)
+        audit.emit(status=response.status_code, outcome="rate_limited")
+        return response
 
     async def _resolve(
         self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, receive: Receive
@@ -345,13 +421,20 @@ class Gateway:
                 400, INVALID_REQUEST, f"The {repeated} header must appear once.", reply_id
             )
 
+        subject_key = f"{self._config.auth.issuer}\x1f{identity.subject}"
+        # After the identity is known and before any credential lookup, so a flood is refused
+        # without ever reaching the resolver backend.
+        limited = await self._rate_limit(identity, rpc, audit, subject_key=subject_key)
+        if limited is not None:
+            return limited
+
         credential = await self._resolve(identity, rpc, audit, request.receive)
         if isinstance(credential, Response):
             return credential
         audit.labels = dict(credential.labels)
         try:
             return await self._serve(
-                request, body, inbound_headers, rpc, identity, credential, audit
+                request, body, inbound_headers, rpc, identity, credential, subject_key, audit
             )
         except StateUnavailableError as exc:
             # Raised before a response was chosen (session check, binding a new session,
@@ -367,10 +450,10 @@ class Gateway:
         rpc: RpcInfo,
         identity: Identity,
         credential: Credential,
+        subject_key: str,
         audit: AuditRecord,
     ) -> Response:
         reply_id = rpc.id if rpc.expects_reply else None
-        subject_key = f"{self._config.auth.issuer}\x1f{identity.subject}"
         session_id = request.headers.get("mcp-session-id")
         if session_id is not None and not await self._sessions.check(
             credential.upstream, session_id, subject_key
@@ -440,15 +523,19 @@ def create_app(
     state: State | None = None,
     span_exporter: SpanExporter | None = None,
     metric_reader: MetricReader | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> Starlette:
     """Build the app. HTTP clients are created here and closed by the lifespan.
 
     ``span_exporter`` and ``metric_reader`` replace the configured OTLP export; tests use them
     to read spans and metrics in memory. ``state`` replaces the backend ``config.state`` names
-    (tests inject failing stores); the lifespan closes it either way.
+    (tests inject failing stores); the lifespan closes it either way. ``rate_limiter`` replaces the
+    limiter that ``policies.rate_limits`` otherwise installs; it is unused while that key is null.
     """
     if state is None:
         state = build_state(config, session_clock=session_clock)
+    if rate_limiter is None and config.policies.rate_limits is not None:
+        rate_limiter = MemoryRateLimiter(clock=time.monotonic)
     telemetry = build_telemetry(
         config.observability, span_exporter=span_exporter, metric_reader=metric_reader
     )
@@ -488,7 +575,13 @@ def create_app(
         # The shared store has no cheap count, so the gauge exists with the memory backend only.
         telemetry.observe_sessions(lambda: len(sessions))
     gateway = Gateway(
-        config, TokenVerifier(config.auth, jwks_client), resolver, proxies, sessions, telemetry
+        config,
+        TokenVerifier(config.auth, jwks_client),
+        resolver,
+        proxies,
+        sessions,
+        telemetry,
+        rate_limiter,
     )
 
     # RFC 9728 section 3.3: the document describes the resource it was fetched for, so only the

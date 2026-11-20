@@ -525,7 +525,31 @@ class ToolsPolicyConfig(_Model):
     rules: list[ToolRuleConfig]
 
 
+class TokenBucketConfig(_Model):
+    """One token bucket: ``burst`` is the capacity (and the starting level), ``per_minute`` the refill."""
+
+    burst: int = Field(ge=1)
+    per_minute: float = Field(gt=0, allow_inf_nan=False)
+
+
+class RateLimitsConfig(_Model):
+    """Token buckets per subject and per organization; each null scope is not limited."""
+
+    per_subject: TokenBucketConfig | None
+    per_organization: TokenBucketConfig | None
+
+    @model_validator(mode="after")
+    def _at_least_one_scope(self) -> Self:
+        if self.per_subject is None and self.per_organization is None:
+            raise ValueError(
+                "rate_limits needs per_subject or per_organization (use null to disable limiting)"
+            )
+        return self
+
+
 class PoliciesConfig(_Model):
+    # null disables rate limiting.
+    rate_limits: RateLimitsConfig | None
     # Browser origins allowed on the MCP endpoint, as scheme://host[:port]. An empty list
     # refuses every request that carries an Origin header; requests without one pass.
     allowed_origins: list[str]
