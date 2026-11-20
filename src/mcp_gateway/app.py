@@ -34,16 +34,17 @@ from mcp_gateway.jsonrpc import (
     HEADER_MISMATCH,
     INVALID_PARAMS,
     INVALID_REQUEST,
-    NO_RPC,
     ORIGIN_REFUSED,
+    PARSE_ERROR,
     RATE_LIMITED,
     RESOLVER_UNAVAILABLE,
     SESSION_NOT_FOUND,
     STATE_UNAVAILABLE,
+    BodyKind,
     RpcInfo,
     check_mcp_headers,
+    declares_non_utf8_charset,
     error_body,
-    is_tool_batch,
     parse_request,
     tool_error_result,
 )
@@ -88,6 +89,7 @@ INTERNAL_ERROR_MESSAGE = "The gateway failed to handle this request."
 REQUEST_ID_HEADER = "x-request-id"
 ORIGIN_REFUSED_MESSAGE = "The request origin is not allowed."
 SESSION_NOT_FOUND_MESSAGE = "The session was not found. Start a new session."
+PARSE_ERROR_MESSAGE = "Parse error"
 BATCH_REFUSED_MESSAGE = "Batched tool requests are not accepted. Send one request per call."
 INVALID_PARAMS_MESSAGE = "Invalid params"
 
@@ -393,7 +395,7 @@ class Gateway:
             audit.emit(status=413, outcome="body_too_large")
             return json_rpc_response(413, INVALID_REQUEST, "The request body is too large.", None)
 
-        rpc = parse_request(body) if body else NO_RPC
+        rpc = parse_request(body)
         audit.rpc_method, audit.rpc_id, audit.tool = rpc.method, rpc.id, rpc.tool
 
         reply_id = rpc.id if rpc.expects_reply else None
@@ -459,7 +461,7 @@ class Gateway:
         )
         if tool_policy is not None:
             audit.upstream = credential.upstream
-            refusal = self._refuse_tool_request(tool_policy, rpc, body, audit)
+            refusal = self._refuse_tool_request(tool_policy, rpc, inbound_headers, audit)
             if refusal is not None:
                 return refusal
 
@@ -479,14 +481,22 @@ class Gateway:
 
     @staticmethod
     def _refuse_tool_request(
-        policy: EffectivePolicy, rpc: RpcInfo, body: bytes, audit: AuditRecord
+        policy: EffectivePolicy,
+        rpc: RpcInfo,
+        headers: list[tuple[str, str]],
+        audit: AuditRecord,
     ) -> Response | None:
         """Refuse a tool request the policy does not allow, or None to forward it.
 
-        A denied tool is answered exactly like a tool that does not exist. A request whose tool
-        cannot be read is refused too: the gateway never forwards what it cannot check.
+        A denied tool is answered exactly like a tool that does not exist. A request the gateway
+        cannot read is refused too: while a policy is active it never forwards what it cannot check.
         """
-        if rpc.method is None and body and is_tool_batch(body):
+        if rpc.kind is BodyKind.UNPARSABLE or (
+            rpc.kind is not BodyKind.EMPTY and declares_non_utf8_charset(headers)
+        ):
+            audit.emit(status=400, outcome="unparsable_request")
+            return json_rpc_response(400, PARSE_ERROR, PARSE_ERROR_MESSAGE, None)
+        if rpc.tool_batch:
             # A batch is invisible to the single-request checks, so it is refused outright.
             audit.emit(status=400, outcome="batch_refused")
             return json_rpc_response(400, INVALID_REQUEST, BATCH_REFUSED_MESSAGE, None)

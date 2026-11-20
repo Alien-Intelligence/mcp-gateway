@@ -220,6 +220,112 @@ async def test_other_methods_are_not_subject_to_the_tool_policy(
     assert len(upstream.requests) == 3
 
 
+# --- bodies the gateway cannot read ----------------------------------------------------
+
+CALL_DELETE_ALL = b'{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"delete_all"}'
+
+UNREADABLE_BODIES = {
+    "invalid_utf8": CALL_DELETE_ALL + b',"x":"\xff"}',
+    "utf8_bom": b"\xef\xbb\xbf" + CALL_DELETE_ALL + b"}",
+    "utf16": (CALL_DELETE_ALL + b"}").decode().encode("utf-16"),
+    "truncated": CALL_DELETE_ALL,
+    "not_json": b"delete_all please",
+    "scalar_number": b"5",
+    "scalar_string": b'"tools/call"',
+    "scalar_null": b"null",
+    "deep_nesting": b"[" * 10_000 + b"]" * 10_000,
+}
+
+
+@pytest.mark.parametrize("body", UNREADABLE_BODIES.values(), ids=UNREADABLE_BODIES.keys())
+async def test_a_body_that_is_not_utf8_json_is_refused_and_never_forwarded(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", content=body, headers={**alice, **JSON_TYPE})
+    assert response.status_code == 400
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32700, "message": "Parse error"},
+    }
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["status"]) == ("unparsable_request", 400)
+
+
+@pytest.mark.parametrize("charset", ["latin-1", "ISO-8859-1", "utf-16", "UTF-8-SIG", "nonsense"])
+async def test_a_charset_other_than_utf8_is_refused_even_for_ascii_bodies(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    charset: str,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post(
+            "/mcp",
+            content=json.dumps(call("search")).encode(),
+            headers={**alice, "Content-Type": f"application/json; charset={charset}"},
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32700
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "unparsable_request"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "application/json",
+        "application/json; charset=utf-8",
+        "application/json;charset=UTF-8",
+        'application/json; charset="utf-8"',
+    ],
+)
+async def test_an_absent_or_utf8_charset_is_accepted_in_any_case(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream, content_type: str
+) -> None:
+    response = await http.post(
+        "/mcp",
+        content=json.dumps(call("search")).encode(),
+        headers={**alice, "Content-Type": content_type},
+    )
+    assert response.status_code == 200
+    assert len(upstream.requests) == 1
+
+
+async def test_an_empty_body_is_not_unparsable(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    upstream.responder = lambda _r: httpx.Response(202)
+    response = await http.post("/mcp", content=b"", headers={**alice, **JSON_TYPE})
+    assert response.status_code == 202
+    assert len(upstream.requests) == 1
+
+
+async def test_without_a_policy_an_unreadable_body_is_forwarded_untouched(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+) -> None:
+    async with client_for(build(mapping_dir, transport, tools=None)) as client:
+        for body in UNREADABLE_BODIES.values():
+            response = await client.post(
+                "/mcp",
+                content=body,
+                headers={**alice, "Content-Type": "application/json; charset=latin-1"},
+            )
+            assert response.status_code == 200
+    assert [sent.content for sent in upstream.requests] == list(UNREADABLE_BODIES.values())
+
+
 # --- batches ----------------------------------------------------------------------------
 
 

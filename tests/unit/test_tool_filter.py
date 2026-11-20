@@ -5,7 +5,6 @@ from typing import Any
 
 import pytest
 
-from mcp_gateway.jsonrpc import is_tool_batch
 from mcp_gateway.tool_filter import (
     POLICY_FAILED_MESSAGE,
     SseReplyFilter,
@@ -197,23 +196,3 @@ def test_the_failure_event_is_a_gateway_error_reply() -> None:
         "id": 3,
         "error": {"code": -32005, "message": POLICY_FAILED_MESSAGE},
     }
-
-
-# --- batches ----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("body", "expected"),
-    [
-        (b'[{"jsonrpc":"2.0","id":1,"method":"tools/call"}]', True),
-        (b'[{"jsonrpc":"2.0","id":1,"method":"ping"},{"id":2,"method":"tools/list"}]', True),
-        (b'[{"jsonrpc":"2.0","id":1,"method":"ping"}]', False),
-        (b'[1, null, "tools/call"]', False),
-        (b"[]", False),
-        (b'{"method":"tools/call"}', False),
-        (b"not json", False),
-        (b"", False),
-    ],
-)
-def test_is_tool_batch(body: bytes, expected: bool) -> None:
-    assert is_tool_batch(body) is expected

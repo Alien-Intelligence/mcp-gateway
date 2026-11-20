@@ -620,6 +620,10 @@ async def _batch_refused(env: Env) -> None:
     await env.post(env.rebuild(policies__tools=DENY_BLOCKED), json=batch)
 
 
+async def _unparsable_request(env: Env) -> None:
+    await env.post(env.rebuild(policies__tools=DENY_BLOCKED), content=b"\xff not json", json=None)
+
+
 async def _tool_policy_failed(env: Env) -> None:
     env.upstream.responder = lambda _r: httpx.Response(
         200, headers={"Content-Type": "application/json"}, content=b"not json"
@@ -665,6 +669,7 @@ SCENARIOS: dict[str, Scenario] = {
     "upstream_stream_failed": _upstream_stream_failed,
     "tool_denied": _tool_denied,
     "batch_refused": _batch_refused,
+    "unparsable_request": _unparsable_request,
     "tool_policy_failed": _tool_policy_failed,
     "forwarded": _forwarded,
     "client_disconnected": _client_disconnected,

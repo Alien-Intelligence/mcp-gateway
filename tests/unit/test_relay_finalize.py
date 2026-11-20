@@ -14,7 +14,7 @@ from starlette.types import Message
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.config import UpstreamConfig
 from mcp_gateway.identity import Identity
-from mcp_gateway.jsonrpc import RpcInfo
+from mcp_gateway.jsonrpc import BodyKind, RpcInfo
 from mcp_gateway.proxy import RelayResponse, UpstreamProxy, build_client
 from mcp_gateway.resolver.base import Credential, Denied
 from mcp_gateway.state import MemorySessionStore, SessionStore
@@ -81,7 +81,7 @@ def build_relay(
         }
     )
     proxy = UpstreamProxy(UPSTREAM, config, build_client(config, None), sessions, 65536, 65536)
-    request_with_id = RpcInfo(method="tools/call", id=7, tool="x", target="x")
+    request_with_id = RpcInfo(method="tools/call", id=7, tool="x", target="x", kind=BodyKind.OBJECT)
     response = proxy.stream(upstream, request_with_id, SESSION, audit, None)
     assert isinstance(response, RelayResponse)
     return response
@@ -230,7 +230,7 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
             inbound_headers=[],
             body=b"{}",
             receive=receive,
-            rpc=RpcInfo(method="initialize", id=1, tool=None, target=None),
+            rpc=RpcInfo(method="initialize", id=1, tool=None, target=None, kind=BodyKind.OBJECT),
             credential=Credential(api_key=SecretStr("k"), upstream=UPSTREAM, labels={}),
             identity=identity,
             resolver=NoResolver(),

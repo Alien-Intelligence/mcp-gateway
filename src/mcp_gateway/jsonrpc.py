@@ -2,9 +2,12 @@
 
 import base64
 import binascii
+import codecs
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from email.message import Message
+from enum import Enum
 from typing import Any
 
 # Gateway-originated JSON-RPC error codes (server-defined range).
@@ -24,6 +27,7 @@ STATE_UNAVAILABLE = -32013
 RATE_LIMITED = -32014
 # Allocated by the MCP 2026-07-28 transport spec for a header that disagrees with the body.
 HEADER_MISMATCH = -32020
+PARSE_ERROR = -32700
 INVALID_REQUEST = -32600
 INVALID_PARAMS = -32602
 
@@ -40,6 +44,16 @@ _BASE64_PREFIX = "=?base64?"
 _BASE64_SUFFIX = "?="
 
 
+class BodyKind(Enum):
+    """What the request body turned out to be. Only ``UNPARSABLE`` means the gateway cannot check it."""
+
+    EMPTY = "empty"
+    OBJECT = "object"
+    ARRAY = "array"
+    # Not strict UTF-8 JSON, or JSON that is neither an object nor an array.
+    UNPARSABLE = "unparsable"
+
+
 @dataclass(frozen=True)
 class RpcInfo:
     """What the gateway reads from a request body; never the arguments."""
@@ -50,6 +64,10 @@ class RpcInfo:
     # What ``Mcp-Name`` mirrors: ``params.name`` (tools/call, prompts/get) or ``params.uri``
     # (resources/read). None for other methods or when the body lacks it.
     target: str | None
+    kind: BodyKind
+    # A JSON array holding any ``tools/call`` or ``tools/list`` element: the single-request
+    # fields above cannot see inside a batch, so the tool policy needs to be told.
+    tool_batch: bool = False
 
     @property
     def expects_reply(self) -> bool:
@@ -60,53 +78,88 @@ class RpcInfo:
         return self.method is not None and self.id is not None
 
 
-NO_RPC = RpcInfo(method=None, id=None, tool=None, target=None)
+NO_RPC = RpcInfo(method=None, id=None, tool=None, target=None, kind=BodyKind.EMPTY)
+UNPARSABLE = RpcInfo(method=None, id=None, tool=None, target=None, kind=BodyKind.UNPARSABLE)
+
+# Methods whose answer or arguments the tool policy governs.
+TOOL_METHODS = frozenset({"tools/call", "tools/list"})
+
+_UNREADABLE = object()
 
 
-def parse_request(body: bytes) -> RpcInfo:
-    """Extract id/method/tool. A non-JSON or unexpected body yields ``NO_RPC``."""
-    if not body:
-        return NO_RPC
+def _decode(body: bytes) -> Any:
+    """The JSON document of a strict UTF-8 body, else ``_UNREADABLE``.
+
+    ``json.loads`` on bytes would also accept UTF-16/32 and a UTF-8 BOM; a body the
+    gateway reads differently from the upstream is exactly what must never pass a check.
+    """
     try:
-        document: Any = json.loads(body)
+        return json.loads(body.decode("utf-8"))
     except (ValueError, RecursionError):
-        # Not JSON, not UTF-8, or nested past the interpreter's limit: forwarded untouched,
-        # method unknown.
-        return NO_RPC
-    if not isinstance(document, dict):
-        return NO_RPC
+        # Not UTF-8, not JSON, or nested past the interpreter's limit.
+        return _UNREADABLE
+
+
+def _valid_id(raw_id: Any) -> bool:
+    return isinstance(raw_id, str) or (isinstance(raw_id, int) and not isinstance(raw_id, bool))
+
+
+def _single(document: dict[str, Any]) -> RpcInfo:
     method = document.get("method")
     method = method if isinstance(method, str) else None
     raw_id = document.get("id")
-    rpc_id: str | int | None = None
-    if isinstance(raw_id, str) or isinstance(raw_id, int) and not isinstance(raw_id, bool):
-        rpc_id = raw_id
+    rpc_id: str | int | None = raw_id if _valid_id(raw_id) else None
     params = document.get("params")
     target: str | None = None
     if isinstance(params, dict) and method in _NAMED_BY_FIELD:
         value = params.get(_NAMED_BY_FIELD[method])
         target = value if isinstance(value, str) else None
     tool = target if method == "tools/call" else None
-    return RpcInfo(method=method, id=rpc_id, tool=tool, target=target)
+    return RpcInfo(method=method, id=rpc_id, tool=tool, target=target, kind=BodyKind.OBJECT)
 
 
-# Methods whose answer or arguments the tool policy governs.
-TOOL_METHODS = frozenset({"tools/call", "tools/list"})
+def parse_request(body: bytes) -> RpcInfo:
+    """Extract id/method/tool from a request body.
 
-
-def is_tool_batch(body: bytes) -> bool:
-    """True for a JSON array body holding any ``tools/call`` or ``tools/list`` element.
-
-    ``parse_request`` reads single objects only, so a batch is invisible to it; the tool
-    policy needs to know when one hides a tool request.
+    An empty body is ``NO_RPC``; a body that is not strict UTF-8 JSON forming an object or an
+    array is ``UNPARSABLE``. Without a tool policy both are forwarded untouched.
     """
-    try:
-        document: Any = json.loads(body)
-    except (ValueError, RecursionError):
-        return False
-    return isinstance(document, list) and any(
-        isinstance(element, dict) and element.get("method") in TOOL_METHODS for element in document
-    )
+    if not body:
+        return NO_RPC
+    document = _decode(body)
+    if isinstance(document, dict):
+        return _single(document)
+    if isinstance(document, list):
+        tool_batch = any(
+            isinstance(element, dict) and element.get("method") in TOOL_METHODS
+            for element in document
+        )
+        return RpcInfo(
+            method=None, id=None, tool=None, target=None, kind=BodyKind.ARRAY, tool_batch=tool_batch
+        )
+    return UNPARSABLE
+
+
+def declares_non_utf8_charset(headers: Iterable[tuple[str, str]]) -> bool:
+    """True when a ``Content-Type`` header names a charset other than UTF-8 (any spelling).
+
+    A body in another encoding may carry a tool name the UTF-8 reading never sees. An absent
+    charset is fine: JSON is UTF-8 by definition.
+    """
+    for name, value in headers:
+        if name.lower() != "content-type":
+            continue
+        message = Message()
+        message["content-type"] = value
+        charset = message.get_content_charset()
+        if charset is None:
+            continue
+        try:
+            if codecs.lookup(charset).name != "utf-8":
+                return True
+        except LookupError:
+            return True
+    return False
 
 
 def error_body(
