@@ -33,6 +33,10 @@ SHED = "shed"
 _SETTLE_SECONDS = 10.0
 
 
+class ReadsClosedError(RuntimeError):
+    """A read was started after shutdown began."""
+
+
 class ReadHandle[T]:
     """One owned read: lets the request side hand it over, and the read see that it was."""
 
@@ -149,7 +153,7 @@ class DetachedReads:
         is cancelled instead (``shed``). ``body`` closes the upstream response itself, in every case.
         """
         if self._closed:
-            raise RuntimeError("the upstream reads are closed")
+            raise ReadsClosedError("the upstream reads are closed")
         handle = ReadHandle[T](
             upstream=upstream,
             ceiling_seconds=ceiling_seconds,

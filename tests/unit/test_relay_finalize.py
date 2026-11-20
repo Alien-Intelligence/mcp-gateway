@@ -17,7 +17,7 @@ from starlette.types import Message
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.config import UpstreamConfig
-from mcp_gateway.detached import DetachedReads
+from mcp_gateway.detached import DetachedReads, ReadsClosedError
 from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import BodyKind, RpcInfo
 from mcp_gateway.proxy import RelayResponse, UpstreamProxy, build_client
@@ -306,3 +306,20 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
             tool_policy=None,
         )
     assert stream.closed
+
+
+async def test_a_relay_whose_reader_cannot_start_closes_the_response(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = TrackedStream([EVENT])
+    harness = await Harness.create(stream, caplog, detachable=True)
+    await harness.reads.aclose(1)
+
+    async def receive() -> Message:
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")
+
+    with pytest.raises(ReadsClosedError):
+        await run(harness, receive=receive, send=yielding_send)
+    assert stream.closed
+    assert await harness.session_survives_after_the_clock_moves()

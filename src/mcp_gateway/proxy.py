@@ -18,7 +18,7 @@ from starlette.types import Receive, Scope, Send
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.config import UpstreamConfig
-from mcp_gateway.detached import DetachedReads, ReadHandle
+from mcp_gateway.detached import DetachedReads, ReadHandle, ReadsClosedError
 from mcp_gateway.headers import (
     build_upstream_headers,
     filter_response_headers,
@@ -374,7 +374,13 @@ class RelayResponse(StreamingResponse):
         self._release = release
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        reader = self._start_reader()
+        try:
+            reader = self._start_reader()
+        except ReadsClosedError:
+            # Shutting down: no reader will read this response, so it is released here.
+            self._source.close()
+            await self._release.release_response()
+            raise
         failure: list[Exception] = []
         delivered = False
         try:
@@ -463,7 +469,7 @@ class UpstreamProxy:
             return None
         return response
 
-    def _own_response[T](
+    async def _own_response[T](
         self,
         response: httpx.Response,
         ownership: _Ownership,
@@ -471,7 +477,12 @@ class UpstreamProxy:
         body: Callable[[ReadHandle[T]], Awaitable[T]],
     ) -> ReadHandle[T]:
         """Start the read that takes the response over (its body closes it)."""
-        read = self._own(detachable, body)
+        try:
+            read = self._own(detachable, body)
+        except ReadsClosedError:
+            # Shutting down: nobody will read this response, so it is closed here.
+            await _close(response)
+            raise
         ownership.taken = True
         return read
 
@@ -633,12 +644,10 @@ class UpstreamProxy:
         upstream_status = response.status_code
         gone = False
         try:
-            _, gone = await await_read(
-                self._own_response(
-                    response, ownership, detachable, lambda _handle: _drain_and_close(response)
-                ),
-                receive,
+            read = await self._own_response(
+                response, ownership, detachable, lambda _handle: _drain_and_close(response)
             )
+            _, gone = await await_read(read, receive)
         except httpx.HTTPError as exc:
             logger.warning(
                 "draining upstream %d body failed (%s)", upstream_status, type(exc).__name__
@@ -689,15 +698,13 @@ class UpstreamProxy:
         status = response.status_code
         gone = False
         try:
-            _, gone = await await_read(
-                self._own_response(
-                    response,
-                    ownership,
-                    detachable,
-                    lambda _handle: self._drain_within_read_timeout(response),
-                ),
-                receive,
+            read = await self._own_response(
+                response,
+                ownership,
+                detachable,
+                lambda _handle: self._drain_within_read_timeout(response),
             )
+            _, gone = await await_read(read, receive)
         except (httpx.HTTPError, TimeoutError) as exc:
             logger.warning("draining upstream %d body failed (%s)", status, type(exc).__name__)
         if gone:
@@ -768,15 +775,13 @@ class UpstreamProxy:
         headers.pop("content-length", None)
         try:
             try:
-                raw, gone = await await_read(
-                    self._own_response(
-                        response,
-                        ownership,
-                        detachable,
-                        lambda handle: self._read_filterable_body(response, handle, release),
-                    ),
-                    receive,
+                read = await self._own_response(
+                    response,
+                    ownership,
+                    detachable,
+                    lambda handle: self._read_filterable_body(response, handle, release),
                 )
+                raw, gone = await await_read(read, receive)
                 if gone or raw is None:
                     return self._client_gone(audit)
                 content = filter_json_reply(raw, reply_id, policy)

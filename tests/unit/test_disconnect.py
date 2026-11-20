@@ -21,7 +21,7 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from starlette.applications import Starlette
 
 from mcp_gateway.app import create_app
-from mcp_gateway.detached import DetachedReads
+from mcp_gateway.detached import DetachedReads, ReadsClosedError
 from mcp_gateway.resolver import StaticResolver
 from mcp_gateway.state import MemorySessionStore
 
@@ -597,3 +597,30 @@ async def test_cancelling_the_request_task_leaves_the_read_it_started_to_finish(
     assert not stream.closed, "the response belongs to the read, not to the cancelled request"
     await finish_and_check(rig, stream)
     assert rig.detached() == {"completed": 1}
+
+
+async def test_a_read_refused_after_shutdown_began_closes_the_upstream_response(
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stream = GatedStream([LIST_REPLY])
+    stream.gate.set()
+    original = DetachedReads.start
+    starts = 0
+
+    def refusing_after_the_send(self: DetachedReads, **kwargs: Any) -> Any:
+        nonlocal starts
+        starts += 1
+        if starts > 1:
+            raise ReadsClosedError("the upstream reads are closed")
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(DetachedReads, "start", refusing_after_the_send)
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=JSON_TYPE, stream=stream)
+
+    rig = Rig(mapping_dir, idp, upstream, token, policy=ALLOW_ALL)
+    call = rig.call(LIST)
+    await call.run()
+    assert stream.closed, "the response whose read could not start is closed, not leaked"
+    assert [m["status"] for m in call.sent if m["type"] == "http.response.start"] == [500]
