@@ -6,11 +6,17 @@ from typing import Any
 import httpx
 import pytest
 
-from e2e.harness import Provider, audiences, initialize_payload, obtain_grant, parse_challenge
+from e2e.harness import (
+    CHAIN,
+    Provider,
+    audiences,
+    initialize_payload,
+    obtain_grant,
+    parse_challenge,
+)
 from e2e.stub.stack import (
     ADVERTISED_SCOPE,
     ALLOWED_ORIGIN,
-    CHAIN,
     FOREIGN_ORIGIN,
     PERSONAS,
     STATIC_PROVIDERS,

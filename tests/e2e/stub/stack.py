@@ -25,7 +25,7 @@ STUB_URL = "http://127.0.0.1:14000"
 WEBHOOK_URL = "http://127.0.0.1:18090"
 KEYCLOAK_ISSUER = "http://localhost:18080/realms/alien-gateway-dev"
 HYDRA_ISSUER = "http://localhost:14444"
-REQUIRED_ENV = ("E2E_USER_PASSWORD", "E2E_RUN_DIR")
+REQUIRED_ENV = ("E2E_USER_PASSWORD", "E2E_RUN_DIR", "E2E_STATE_DIR", "E2E_OTEL_DIR")
 
 KEYCLOAK = Provider(
     name="keycloak",
@@ -38,13 +38,6 @@ HYDRA = Provider(
     gateway_url="http://localhost:18001/mcp",
     issuer=HYDRA_ISSUER,
     wrong_audience={"resource": "http://localhost:18999/mcp"},
-)
-# Keycloak, resolver chain [store_redis, store_sql, webhook] behind a cache, scope mcp-write required.
-CHAIN = Provider(
-    name="chain",
-    gateway_url="http://localhost:18002/mcp",
-    issuer=KEYCLOAK_ISSUER,
-    wrong_audience={"scope": "openid"},
 )
 # Keycloak, a webhook resolver whose endpoint nobody listens to.
 UNREACHABLE = Provider(
@@ -84,13 +77,27 @@ PERSONAS = {
 class StubSettings:
     user_password: str = field(repr=False)
     run_dir: Path
+    # The stack's state volume (the personas' API key files) and the test collector's output.
+    state_dir: Path
+    otel_dir: Path
+
+    def read_key(self, persona: str) -> str:
+        key = (self.state_dir / f"{persona}.key").read_text(encoding="utf-8").strip()
+        if not key:
+            raise ValueError(f"key file of {persona} is empty")
+        return key
 
 
 def load_stub_settings() -> StubSettings:
     missing = [name for name in REQUIRED_ENV if not os.environ.get(name)]
     if missing:
         pytest.fail("stub harness is not configured, missing: " + ", ".join(missing), pytrace=False)
-    return StubSettings(os.environ["E2E_USER_PASSWORD"], Path(os.environ["E2E_RUN_DIR"]))
+    return StubSettings(
+        os.environ["E2E_USER_PASSWORD"],
+        Path(os.environ["E2E_RUN_DIR"]),
+        Path(os.environ["E2E_STATE_DIR"]),
+        Path(os.environ["E2E_OTEL_DIR"]),
+    )
 
 
 def prm_url(provider: Provider) -> str:

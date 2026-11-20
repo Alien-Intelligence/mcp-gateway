@@ -14,7 +14,8 @@ Keys come from a JSON file (``STUB_KEYS_FILE``): ``{"<key>": {"persona", "revoke
 ``payment_required`` gets 402. Raw keys never appear in anything the stub returns or records.
 
 Tools (``tools/call`` by name)
-- ``echo``: the headers received, with ``authorization`` replaced by ``persona:<name>``.
+- ``echo``: the headers received, with ``authorization`` replaced by ``persona:<name>``, and the
+  arguments of the call.
 - ``slow_sse {count, delay_seconds, hold}``: SSE with ``count`` progress events spaced by the delay,
   then the reply; with ``hold`` it idles (no reply) until the client goes away.
 - ``fail_midstream_sse {before, reply_first}``: ``before`` whole events, optionally the reply, a
@@ -313,6 +314,7 @@ class StubApp:
                 "mode": "stateful" if stateful else "stateless",
                 "persona": key.persona,
                 "headers": entry["headers"],
+                "arguments": arguments,
             }
             return JSONResponse(rpc_result(request_id, tool_text(echoed)))
         if name == "slow_sse":

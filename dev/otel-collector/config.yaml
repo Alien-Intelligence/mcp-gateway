@@ -1,0 +1,29 @@
+# Test collector: receives the gateway's OTLP over HTTP and writes every batch, as one JSON
+# document per line, into files the end-to-end harness reads. TEST FIXTURE ONLY.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+exporters:
+  file/traces:
+    path: /otel-out/traces.jsonl
+    format: json
+    flush_interval: 1s
+  file/metrics:
+    path: /otel-out/metrics.jsonl
+    format: json
+    flush_interval: 1s
+
+service:
+  telemetry:
+    metrics:
+      level: none
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file/traces]
+    metrics:
+      receivers: [otlp]
+      exporters: [file/metrics]

@@ -7,9 +7,8 @@ from typing import Any
 import httpx
 import pytest
 
-from e2e.harness import obtain_grant
+from e2e.harness import CHAIN, obtain_grant
 from e2e.stub.stack import (
-    CHAIN,
     PERSONAS,
     UNREACHABLE,
     StubControl,

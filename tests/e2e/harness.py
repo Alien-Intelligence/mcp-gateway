@@ -194,6 +194,18 @@ PROVIDERS = (
 )
 
 
+# Keycloak, resolver chain [store_redis, store_sql, webhook] behind a cache, scope mcp-write
+# required. Not in PROVIDERS: the per-provider tests run on the two static gateways.
+CHAIN = Provider(
+    name="chain",
+    gateway_url="http://localhost:18002/mcp",
+    issuer="http://localhost:18080/realms/alien-gateway-dev",
+    wrong_audience={"scope": "openid"},
+)
+# Which store of the chain resolves each persona (see scripts/state_layout.py).
+CHAIN_STORE = {"alice": "redis", "bob": "postgres", "carol": "webhook"}
+
+
 # ---------------------------------------------------------------------------------------------
 # Raw MCP requests (status codes and headers matter, so no SDK here)
 # ---------------------------------------------------------------------------------------------

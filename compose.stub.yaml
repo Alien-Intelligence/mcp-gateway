@@ -74,9 +74,15 @@ services:
     image: mcp-gateway-e2e:local
     profiles: [harness]
     network_mode: host
+    volumes:
+      # The stub personas' API keys (to prove none reaches the telemetry) and the collector output.
+      - state:/run/gateway/state:ro
+      - otel:/otel:ro
     environment:
       E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
       E2E_RUN_DIR: /out
+      E2E_STATE_DIR: /run/gateway/state
+      E2E_OTEL_DIR: /otel
       MCP_GATEWAY_TEST_PG_DSN: postgresql://gateway:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:15432/gateway
       MCP_GATEWAY_TEST_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:16379/0
     command:
