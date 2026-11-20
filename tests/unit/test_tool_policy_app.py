@@ -734,3 +734,109 @@ async def test_without_a_policy_nothing_is_refused(
         await client.post("/mcp", json=call(None), headers=alice)
         await client.post("/mcp", json=batch, headers=alice)
     assert len(upstream.requests) == 3
+
+
+# --- SSE filter: every response-shaped event, nothing unreadable ------------------------
+
+
+async def post_list(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream, chunks: list[bytes]
+) -> bytes:
+    respond_sse(upstream, chunks)
+    response = await http.post("/mcp", json=LIST, headers=alice)
+    assert response.status_code == 200
+    return response.content
+
+
+def gateway_error_event(request_id: Any) -> bytes:
+    body = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32005, "message": GAP}}
+    return b"event: message\ndata: " + json.dumps(body, separators=(",", ":")).encode() + b"\n\n"
+
+
+@pytest.mark.parametrize("reply_id", ["5", 5.0, 99, None, "abc"])
+async def test_a_reply_event_is_filtered_whatever_its_id(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    reply_id: Any,
+) -> None:
+    raw = await post_list(http, alice, upstream, [event(tools_reply(reply_id))])
+    (reply,) = sse_documents(raw)
+    assert tool_names(reply) == ["search"]
+    assert b"delete_all" not in raw
+
+
+async def test_every_reply_event_of_the_stream_is_filtered_not_only_the_first(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    raw = await post_list(
+        http, alice, upstream, [event(tools_reply(5)), event(tools_reply(5)), event(tools_reply(8))]
+    )
+    replies = sse_documents(raw)
+    assert [tool_names(reply) for reply in replies] == [["search"]] * 3
+    assert b"delete_all" not in raw
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"jsonrpc":"2.0","id":5,"result":{"tools":[{"name":"delete_all","x":"\xff"}]}}',
+        b"not json at all",
+        b'{"jsonrpc":"2.0","id":5,"result":{"tools":[{"name":"delete_all"}',
+        b'[{"jsonrpc":"2.0","id":5,"result":{"tools":[{"name":"delete_all"}]}}]',
+        b'{"jsonrpc":"2.0","id":5,"result":{"tools":[{"name":"delete_all","s":'
+        + b"[" * 10_000
+        + b"]" * 10_000
+        + b"}]}}",
+    ],
+    ids=["invalid_utf8", "not_json", "truncated", "array", "deep_nesting"],
+)
+async def test_an_event_the_gateway_cannot_parse_becomes_the_error_event(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    data: bytes,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        raw = await post_list(http, alice, upstream, [b"data: " + data + b"\n\n"])
+    assert raw == gateway_error_event(5)
+    assert b"delete_all" not in raw
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["status"]) == ("tool_policy_failed", 200)
+
+
+async def test_two_unreadable_events_are_audited_once(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        raw = await post_list(http, alice, upstream, [b"data: x\n\n", b"data: y\n\n"])
+    assert raw == gateway_error_event(5) * 2
+    assert len(audit_lines(caplog)) == 1
+
+
+async def test_a_leading_byte_order_mark_does_not_hide_the_first_event(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    first = b"\xef\xbb\xbfdata: " + json.dumps(tools_reply()).encode() + b"\n\n"
+    raw = await post_list(http, alice, upstream, [first])
+    (reply,) = sse_documents(raw.removeprefix(b"\xef\xbb\xbf"))
+    assert tool_names(reply) == ["search"]
+    assert b"delete_all" not in raw
+
+
+async def test_events_that_carry_no_message_pass_byte_identical(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    chunks = [
+        b": keep-alive\n\n",
+        b"retry: 1000\n\n",
+        b"id: 4\ndata:\n\n",
+        b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n',
+        b'data: {"jsonrpc":"2.0","id":3,"method":"sampling/createMessage"}\n\n',
+        b'data: {"jsonrpc":"2.0","id":5,"error":{"code":-1,"message":"x"}}\n\n',
+    ]
+    assert await post_list(http, alice, upstream, chunks) == b"".join(chunks)

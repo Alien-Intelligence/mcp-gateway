@@ -8,6 +8,7 @@ from mcp_gateway.sse import (
     EventTooLargeError,
     SseEventSplitter,
     TruncatedEventError,
+    data_of,
     is_reply_to,
     stream_failed_event,
 )
@@ -187,3 +188,21 @@ def test_one_long_unterminated_line_is_scanned_once_not_per_chunk(
     assert events == [stream]
     # A rescan from the line start would look at ~size**2 / 2 (33 million) bytes.
     assert counter.scanned < 4 * len(stream)
+
+
+def test_a_byte_order_mark_does_not_hide_the_reply_from_the_tracking() -> None:
+    splitter = SseEventSplitter(1024, 5)
+    reply = b'\xef\xbb\xbfdata: {"jsonrpc":"2.0","id":5,"result":{}}\n\n'
+    assert list(splitter.feed(reply)) == [reply]
+    assert splitter.reply_relayed is True
+
+
+def test_a_data_line_without_a_colon_is_an_empty_field_value() -> None:
+    assert data_of(b"data\ndata: {}\n\n") == b"\n{}"
+
+
+def test_a_deeply_nested_event_is_not_a_reply_and_does_not_crash_the_relay() -> None:
+    nested = b'data: {"result":' + b"[" * 100_000 + b"]" * 100_000 + b"}\n\n"
+    splitter = SseEventSplitter(1 << 22, 5)
+    assert list(splitter.feed(nested)) == [nested]
+    assert splitter.reply_relayed is False

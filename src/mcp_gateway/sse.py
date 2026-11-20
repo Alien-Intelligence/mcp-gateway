@@ -41,11 +41,24 @@ class TruncatedEventError(SseError):
 _LINE_BREAK = re.compile(rb"\r\n|\r|\n")
 
 
+UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def without_bom(event: bytes) -> bytes:
+    """The first event of a stream with the byte order mark the SSE spec says to ignore removed."""
+    return event.removeprefix(UTF8_BOM)
+
+
 def data_of(event: bytes) -> bytes:
-    """The joined ``data`` field values of one event (SSE field parsing, simplified)."""
+    """The joined ``data`` field values of one event (SSE field parsing, simplified).
+
+    A ``data`` line without a colon is a field with an empty value, as the spec has it.
+    """
     values: list[bytes] = []
     for line in event.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n"):
-        if line.startswith(b"data:"):
+        if line == b"data":
+            values.append(b"")
+        elif line.startswith(b"data:"):
             value = line[5:]
             values.append(value[1:] if value.startswith(b" ") else value)
     return b"\n".join(values)
@@ -57,7 +70,8 @@ def parse_reply(data: bytes, request_id: str | int) -> dict[str, Any] | None:
         return None
     try:
         document: Any = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Not JSON, or nested past the interpreter's limit: not a reply the relay can track.
         return None
     if not isinstance(document, dict) or ("result" not in document and "error" not in document):
         return None
@@ -88,6 +102,7 @@ class SseEventSplitter:
         # Where the search for a line break resumes inside that unterminated line, so a long
         # line is searched once however many chunks it arrives in.
         self._search_from = 0
+        self._first_event = True
 
     def feed(self, chunk: bytes) -> Iterator[bytes]:
         self._buffer.extend(chunk)
@@ -142,10 +157,13 @@ class SseEventSplitter:
             del self._buffer[:end]
             self._scan_from, self._scan_has_field = 0, False
             self._search_from = 0
+            # Only the first event of a stream may start with a byte order mark.
+            readable = without_bom(event) if self._first_event else event
+            self._first_event = False
             if (
                 self._request_id is not None
                 and not self.reply_relayed
-                and is_reply_to(event, self._request_id)
+                and is_reply_to(readable, self._request_id)
             ):
                 self.reply_relayed = True
             yield event

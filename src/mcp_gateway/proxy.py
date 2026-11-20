@@ -38,7 +38,7 @@ from mcp_gateway.sse import (
 )
 from mcp_gateway.state import SessionStore, StateUnavailableError
 from mcp_gateway.tool_filter import (
-    SseReplyFilter,
+    SseListFilter,
     ToolPolicyError,
     filter_json_reply,
     policy_failed_body,
@@ -529,7 +529,7 @@ class UpstreamProxy:
                 headers.pop("content-encoding", None)
         reply_id = rpc.id if rpc.expects_reply else None
         reply_filter = (
-            SseReplyFilter(reply_id, list_policy, self._max_event_bytes)
+            SseListFilter(reply_id, list_policy, self._max_event_bytes, answers_tools_list=True)
             if list_policy is not None and reply_id is not None
             else None
         )
@@ -543,7 +543,7 @@ class UpstreamProxy:
     def _filtered_event(
         self,
         event: bytes,
-        reply_filter: SseReplyFilter | None,
+        reply_filter: SseListFilter | None,
         status: int,
         audit: AuditRecord,
     ) -> bytes:
@@ -564,7 +564,7 @@ class UpstreamProxy:
         reply_id: str | int | None,
         release: _Release,
         audit: AuditRecord,
-        reply_filter: SseReplyFilter | None,
+        reply_filter: SseListFilter | None,
     ) -> AsyncGenerator[bytes, None]:
         status = response.status_code
         events = (
