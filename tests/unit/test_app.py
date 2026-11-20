@@ -1092,3 +1092,17 @@ async def test_non_ascii_header_bytes_are_forwarded_verbatim(
     (start,) = [m for m in sent if m["type"] == "http.response.start"]
     assert start["status"] == 200
     assert (b"user-agent", "café-client".encode()) in upstream.requests[0].headers.raw
+
+
+async def test_a_refusal_of_a_client_response_has_a_null_id(
+    client: httpx.AsyncClient, token: str, upstream: FakeUpstream
+) -> None:
+    """A JSON-RPC response from the client is not a request: nothing can answer its id."""
+    response = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 3, "result": {}},
+        headers={**bearer(token), "Mcp-Session-Id": "unknown"},
+    )
+    assert response.status_code == 404
+    assert response.json()["id"] is None
+    assert upstream.requests == []

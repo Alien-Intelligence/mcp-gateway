@@ -118,3 +118,16 @@ def test_name_header_on_a_method_without_a_name_is_ignored() -> None:
 
 def test_non_rpc_bodies_are_not_inspected() -> None:
     assert check_mcp_headers([("mcp-method", "tools/list")], NO_RPC) is None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"jsonrpc":"2.0","id":3,"result":{}}',
+        b'{"jsonrpc":"2.0","id":"a","error":{"code":-1,"message":"x"}}',
+    ],
+)
+def test_a_client_response_is_not_a_request_that_expects_a_reply(body: bytes) -> None:
+    info = parse_request(body)
+    assert info.method is None
+    assert info.expects_reply is False

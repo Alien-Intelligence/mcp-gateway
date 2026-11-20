@@ -81,7 +81,7 @@ def build_relay(
         }
     )
     proxy = UpstreamProxy(UPSTREAM, config, build_client(config, None), sessions, 65536, 65536)
-    request_with_id = RpcInfo(method="tools/call", id=7, tool="x", target="x", expects_reply=True)
+    request_with_id = RpcInfo(method="tools/call", id=7, tool="x", target="x")
     response = proxy.stream(upstream, request_with_id, SESSION, audit, None)
     assert isinstance(response, RelayResponse)
     return response
@@ -230,7 +230,7 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
             inbound_headers=[],
             body=b"{}",
             receive=receive,
-            rpc=RpcInfo(method="initialize", id=1, tool=None, target=None, expects_reply=True),
+            rpc=RpcInfo(method="initialize", id=1, tool=None, target=None),
             credential=Credential(api_key=SecretStr("k"), upstream=UPSTREAM, labels={}),
             identity=identity,
             resolver=NoResolver(),

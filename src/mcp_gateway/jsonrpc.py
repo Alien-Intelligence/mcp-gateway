@@ -50,11 +50,17 @@ class RpcInfo:
     # What ``Mcp-Name`` mirrors: ``params.name`` (tools/call, prompts/get) or ``params.uri``
     # (resources/read). None for other methods or when the body lacks it.
     target: str | None
-    # True only for a single JSON-RPC request carrying an id (a reply can be correlated).
-    expects_reply: bool
+
+    @property
+    def expects_reply(self) -> bool:
+        """True only for a single JSON-RPC request carrying an id (a reply can be correlated).
+
+        A response from the client has an id too, but nothing answers it.
+        """
+        return self.method is not None and self.id is not None
 
 
-NO_RPC = RpcInfo(method=None, id=None, tool=None, target=None, expects_reply=False)
+NO_RPC = RpcInfo(method=None, id=None, tool=None, target=None)
 
 
 def parse_request(body: bytes) -> RpcInfo:
@@ -80,9 +86,7 @@ def parse_request(body: bytes) -> RpcInfo:
         value = params.get(_NAMED_BY_FIELD[method])
         target = value if isinstance(value, str) else None
     tool = target if method == "tools/call" else None
-    return RpcInfo(
-        method=method, id=rpc_id, tool=tool, target=target, expects_reply=rpc_id is not None
-    )
+    return RpcInfo(method=method, id=rpc_id, tool=tool, target=target)
 
 
 # Methods whose answer or arguments the tool policy governs.
