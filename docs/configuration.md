@@ -249,9 +249,9 @@ A response that arrives after the client left, during the wait for the headers, 
 
 The request's audit line is written when the client leaves: status `499`, outcome `client_disconnected`. What the upstream does afterwards is not a second audit line, it is the metric and the log line below.
 
-**Ceiling.** The part of a request that runs on after its client left is bounded by the upstream's `read_timeout_seconds` as a wall-clock total, on top of the per-read timeouts (the clock starts when the client leaves). When it expires the upstream response is closed and the request is counted as `timeout`. The reads are owned by the application: at shutdown the lifespan cancels what is left and waits for it to close its responses (10 s at most).
+**Ceiling.** The part of a request that runs on after its client left is bounded by the upstream's `read_timeout_seconds` as a wall-clock total, on top of the per-read timeouts (the clock starts when the client leaves). When it expires the upstream response is closed and the request is counted as `timeout`. The reads are owned by the application: at shutdown the lifespan first lets the reads in progress finish (10 s at most), then cancels what is left and waits for it to close its responses (10 s more at most).
 
-**Metrics.** `mcp_gateway.upstream.detached` counts upstream requests that ran on after their client left, by `upstream` and `result`: `completed` (the response was read to its end), `timeout` (the ceiling, or an upstream read timeout), `failed` (the upstream broke the stream or the read was cancelled at shutdown) or `shed` (the upstream already had `max_detached_reads` such requests, so this one was cancelled and closed, with a WARNING log). `mcp_gateway.upstream.detached.active` is the number running now. Each one also logs one INFO line (`detached upstream read ended`) with the upstream name, the result and the duration.
+**Metrics.** `mcp_gateway.upstream.detached` counts upstream requests that ran on after their client left, by `upstream` and `result`: `completed` (the response was read to its end), `timeout` (the ceiling, or an upstream read timeout), `failed` (the upstream broke the stream), `shutdown` (still running when the gateway stopped, so it was cancelled) or `shed` (the upstream already had `max_detached_reads` such requests, so this one was cancelled and closed, with a WARNING log). `mcp_gateway.upstream.detached.active` is the number running now. Each one also logs one INFO line (`detached upstream read ended`) with the upstream name, the result and the duration.
 
 ## `limits`
 
@@ -493,7 +493,7 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.request.duration` | histogram | `s` | same as `mcp_gateway.requests` |
 | `mcp_gateway.upstream.duration` | histogram | `s` | `upstream`, `status_class` (`error` when no response came). Time to the response headers. |
 | `mcp_gateway.resolver.lookups` | counter | `{lookup}` | `resolver_type`, `cache`, `result` (values as in the resolver span) |
-| `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`, `shed`). Upstream requests that ran on after their client left. |
+| `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`, `shed`, `shutdown`). Upstream requests that ran on after their client left. |
 | `mcp_gateway.upstream.detached.active` | observable gauge | `{request}` | none |
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
 | `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |

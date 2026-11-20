@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from starlette.applications import Starlette
 
+from mcp_gateway import app as app_module
 from mcp_gateway.app import create_app
 from mcp_gateway.detached import DetachedReads, ReadsClosedError
 from mcp_gateway.resolver import StaticResolver
@@ -437,8 +438,9 @@ async def test_notifications_cancelled_is_forwarded_like_any_notification(
 
 
 async def test_closing_the_application_cancels_and_awaits_the_detached_reads(
-    mapping_dir: Path, idp: Any, token: str
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(app_module, "DETACHED_READS_SHUTDOWN_SECONDS", 0.2)
     stream = GatedStream([EVENT], never_ends=True)
 
     async def upstream(request: httpx.Request) -> httpx.Response:
@@ -455,7 +457,7 @@ async def test_closing_the_application_cancels_and_awaits_the_detached_reads(
         assert not stream.closed
     assert stream.closed, "the lifespan closed the response of the read it cancelled"
     assert len(rig.reads) == 0
-    assert rig.detached() == {"failed": 1}
+    assert rig.detached() == {"shutdown": 1}
 
 
 # --- a request that was fully delivered is not a detached one ---------------------------------

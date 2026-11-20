@@ -28,6 +28,7 @@ COMPLETED = "completed"
 TIMEOUT = "timeout"
 FAILED = "failed"
 SHED = "shed"
+SHUTDOWN = "shutdown"
 
 # How long a cancelled read gets to close its upstream response and finish.
 _SETTLE_SECONDS = 10.0
@@ -182,7 +183,7 @@ class DetachedReads:
             if handle.shed:
                 self._finish(handle, SHED, None)
             elif handle.detached:
-                self._finish(handle, FAILED, "cancelled")
+                self._finish(handle, SHUTDOWN, None)
             raise
         except Exception as exc:
             if handle.detached:
@@ -217,14 +218,21 @@ class DetachedReads:
         )
 
     async def aclose(self, deadline_seconds: float) -> None:
-        """Cancel what is left and wait for it, within ``deadline_seconds``."""
+        """Let the reads in progress finish for ``deadline_seconds``, then cancel what is left.
+
+        The cancelled reads get ``deadline_seconds`` more to close their responses, so shutdown
+        takes twice the deadline at most. A detached read cancelled here is counted ``shutdown``.
+        """
         self._closed = True
         tasks = {handle.task for handle in self._handles}
-        for task in tasks:
-            task.cancel()
         if not tasks:
             return
-        _, pending = await asyncio.wait(tasks, timeout=deadline_seconds)
+        _, unfinished = await asyncio.wait(tasks, timeout=deadline_seconds)
+        for task in unfinished:
+            task.cancel()
+        if not unfinished:
+            return
+        _, pending = await asyncio.wait(unfinished, timeout=deadline_seconds)
         if pending:
             logger.error(
                 "%d upstream reads did not stop within %.0f s of shutdown",

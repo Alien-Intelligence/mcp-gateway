@@ -193,15 +193,30 @@ async def test_closing_cancels_what_is_left_and_awaits_it(rig: Rig) -> None:
     async def body(handle: ReadHandle[Any]) -> None:
         await asyncio.Event().wait()
 
-    detached = await rig.start(body)
+    detached = await rig.start(body, ceiling=60)
     detached.leave()
-    attached = await rig.start(body)
+    attached = await rig.start(body, ceiling=60)
     assert len(rig.reads) == 2
-    await rig.reads.aclose(5)
+    await rig.reads.aclose(0.1)
     assert len(rig.reads) == 0
     assert detached.task.cancelled()
     assert attached.task.cancelled()
-    assert rig.counted() == {"failed": 1}, "only the one whose client left is a detached read"
+    assert rig.counted() == {"shutdown": 1}, "only the one whose client left is a detached read"
+
+
+async def test_closing_first_lets_reads_in_progress_finish_within_the_deadline(rig: Rig) -> None:
+    go = asyncio.Event()
+
+    async def body(handle: ReadHandle[Any]) -> str:
+        await go.wait()
+        return "done"
+
+    read = await rig.start(body)
+    read.leave()
+    asyncio.get_running_loop().call_later(0.05, go.set)
+    await rig.reads.aclose(5)
+    assert await read.task == "done", "it was given time, not cancelled"
+    assert rig.counted() == {"completed": 1}
 
 
 async def test_closing_gives_up_on_a_read_that_will_not_stop_at_its_deadline(
@@ -220,7 +235,7 @@ async def test_closing_gives_up_on_a_read_that_will_not_stop_at_its_deadline(
     started = asyncio.get_running_loop().time()
     with caplog.at_level(logging.ERROR, logger="mcp_gateway.detached"):
         await rig.reads.aclose(0.1)
-    assert asyncio.get_running_loop().time() - started < 2
+    assert asyncio.get_running_loop().time() - started < 2, "twice the deadline at most"
     assert "did not stop" in caplog.text
     release.set()
     await read.task
