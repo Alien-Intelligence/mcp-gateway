@@ -4,13 +4,14 @@ worker loop over a mock transport, the output files and the container-stats summ
 import asyncio
 import csv
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
+from e2e.harness import Grant, Persona, Provider
 from load import loadtest, stats_summary
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
@@ -168,8 +169,18 @@ class Upstream:
 
 
 class FixedAuth:
+    def __init__(self) -> None:
+        self.primed: list[str] = []
+
     async def header(self, persona: str) -> str:
         return f"Bearer key-of-{persona}"
+
+    async def prime(self, personas: Sequence[str]) -> None:
+        self.primed.extend(personas)
+
+    @property
+    def grants_obtained(self) -> int:
+        return 0
 
 
 def workload(**overrides: Any) -> loadtest.Workload:
@@ -209,6 +220,143 @@ async def test_workers_run_the_workload_and_carry_the_session() -> None:
         "Bearer key-of-bob",
     }
     assert all("text/event-stream" in r.headers["accept"] for r in upstream.seen)
+
+
+class Clock:
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class GrantIssuer:
+    """Stands in for the OAuth journey: issues tokens of a fixed lifetime, stamped by the clock,
+    and records the order and the overlap of the grants."""
+
+    def __init__(self, clock: Clock, lifetime: float, log: list[str] | None = None) -> None:
+        self.clock = clock
+        self.lifetime = lifetime
+        self.personas: list[str] = []
+        self.running = 0
+        self.max_running = 0
+        self.log = log if log is not None else []
+
+    async def __call__(self, persona: str) -> Grant:
+        self.running += 1
+        self.max_running = max(self.max_running, self.running)
+        await asyncio.sleep(0)
+        self.running -= 1
+        self.personas.append(persona)
+        self.log.append(f"grant:{persona}")
+        return grant_with_claims(
+            persona,
+            {"iat": self.clock.now, "exp": self.clock.now + self.lifetime},
+            token=f"token-{len(self.personas)}",
+        )
+
+
+def grant_with_claims(persona: str, claims: dict[str, Any], token: str = "t") -> Grant:
+    return Grant(
+        provider=Provider(
+            name="p", gateway_url="http://gw/mcp", issuer="http://idp", wrong_audience={}
+        ),
+        persona=Persona(
+            name=persona, email=f"{persona}@x", org_id=None, user_id=None, key_file=None
+        ),
+        token=token,
+        claims=claims,
+        challenge={},
+    )
+
+
+@pytest.mark.parametrize(("lifetime", "margin"), [(60.0, 12.0), (3600.0, 720.0), (10.0, 5.0)])
+async def test_the_refresh_margin_is_relative_to_the_token_lifetime(
+    lifetime: float, margin: float
+) -> None:
+    clock = Clock(1_000_000.0)
+    issuer = GrantIssuer(clock, lifetime)
+    auth = loadtest.OAuthAuth(issuer, clock)
+    first = await auth.header("alice")
+    # Right after obtaining it, and while more than the margin is left: no new login.
+    assert await auth.header("alice") == first
+    clock.now += lifetime - margin - 0.5
+    assert await auth.header("alice") == first
+    assert auth.grants_obtained == 1
+    # Less than the margin left: a new token.
+    clock.now += 1.0
+    assert await auth.header("alice") != first
+    assert auth.grants_obtained == 2
+
+
+async def test_each_persona_has_its_own_token_and_grant() -> None:
+    clock = Clock(1_000_000.0)
+    issuer = GrantIssuer(clock, 3600.0)
+    auth = loadtest.OAuthAuth(issuer, clock)
+    assert await auth.header("alice") != await auth.header("bob")
+    assert issuer.personas == ["alice", "bob"]
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"exp": 2_000_000},
+        {"iat": 1_000_000},
+        {"iat": "1000000", "exp": 2_000_000},
+        {"iat": 1_000_000, "exp": None},
+        {"iat": 1_000_000, "exp": 1_000_000},
+        {"iat": 1_000_000, "exp": 999_000},
+    ],
+)
+async def test_a_token_without_a_usable_lifetime_is_refused(claims: dict[str, Any]) -> None:
+    async def fetch(persona: str) -> Grant:
+        return grant_with_claims(persona, claims)
+
+    auth = loadtest.OAuthAuth(fetch, Clock(1_000_000.0))
+    with pytest.raises(ValueError, match="exp|iat|lifetime"):
+        await auth.header("alice")
+    assert auth.grants_obtained == 0
+
+
+async def test_prime_obtains_one_grant_per_persona_sequentially() -> None:
+    clock = Clock(1_000_000.0)
+    issuer = GrantIssuer(clock, 60.0)
+    auth = loadtest.OAuthAuth(issuer, clock)
+    await auth.prime(["alice", "bob", "carol"])
+    assert issuer.personas == ["alice", "bob", "carol"]
+    assert issuer.max_running == 1
+    assert auth.grants_obtained == 3
+
+
+async def test_run_target_logs_every_persona_in_before_the_first_request() -> None:
+    clock = Clock(1_000_000.0)
+    log: list[str] = []
+    issuer = GrantIssuer(clock, 3600.0, log)
+    auth = loadtest.OAuthAuth(issuer, clock)
+    upstream = Upstream()
+
+    def recording(request: httpx.Request) -> httpx.Response:
+        log.append("request")
+        return upstream(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as client:
+        samples = await loadtest.run_target(
+            client, "gateway", "http://up/mcp", auth, workload(concurrency=4)
+        )
+    assert all(s.ok for s in samples)
+    # One grant per persona, all done before the workers made any request, and no grant
+    # afterwards: the measurement contains no login.
+    assert log[:2] == ["grant:alice", "grant:bob"]
+    assert log.count("request") == len(upstream.seen) > 0
+    assert [entry for entry in log if entry.startswith("grant")] == log[:2]
+    assert auth.grants_obtained == 2
+
+
+async def test_run_target_primes_the_auth_with_the_workload_personas() -> None:
+    auth = FixedAuth()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(Upstream())) as client:
+        await loadtest.run_target(client, "gateway", "http://up/mcp", auth, workload())
+    assert auth.primed == ["alice", "bob"]
 
 
 async def test_a_wrong_event_count_is_an_error() -> None:
@@ -282,7 +430,9 @@ def test_build_summary_computes_overhead_against_the_baseline_only() -> None:
             sample("gateway", total=1.25, first=0.3),
         ],
     }
-    summary = loadtest.build_summary(per_target, "direct", {"k": 1}, START, START, "abc123")
+    summary = loadtest.build_summary(
+        per_target, "direct", {"k": 1}, START, START, "abc123", {"direct": 0, "gateway": 4}
+    )
     assert list(summary["overhead"]) == ["gateway"]
     assert summary["overhead"]["gateway"]["total_seconds"]["p95"] == pytest.approx(0.25)
     assert summary["overhead"]["gateway"]["first_event_seconds"]["p50"] == pytest.approx(0.2)
@@ -290,7 +440,8 @@ def test_build_summary_computes_overhead_against_the_baseline_only() -> None:
     assert "not a per-request pairing" in summary["overhead_note"]
     assert summary["git_commit"] == "abc123"
     assert summary["started_utc"] == "2026-01-01T00:00:00+00:00"
-    assert loadtest.build_summary(per_target, None, {}, START, START, None)["overhead"] == {}
+    assert summary["oauth_grants"] == {"direct": 0, "gateway": 4}
+    assert loadtest.build_summary(per_target, None, {}, START, START, None, {})["overhead"] == {}
 
 
 def test_write_raw_csv_has_one_row_per_sample(tmp_path: Path) -> None:
@@ -306,7 +457,7 @@ def test_write_raw_csv_has_one_row_per_sample(tmp_path: Path) -> None:
 def test_format_table_prints_targets_overhead_and_the_caveat() -> None:
     per_target = {"direct": [sample("direct")], "gateway": [sample("gateway", total=1.5)]}
     text = loadtest.format_table(
-        loadtest.build_summary(per_target, "direct", {}, START, START, None)
+        loadtest.build_summary(per_target, "direct", {}, START, START, None, {})
     )
     assert "direct" in text
     assert "overhead gateway vs direct" in text

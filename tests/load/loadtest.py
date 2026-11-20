@@ -24,21 +24,24 @@ import math
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 import httpx
-from e2e.harness import MCP_ACCEPT, MCP_PROTOCOL_VERSION, Provider, obtain_grant
+from e2e.harness import MCP_ACCEPT, MCP_PROTOCOL_VERSION, Grant, Provider, obtain_grant
 from e2e.stub.stack import PERSONAS
 
 PASSWORD_VARIABLE = "E2E_USER_PASSWORD"
 GIT_COMMIT_VARIABLE = "LOADTEST_GIT_COMMIT"
 PERCENTILES = (50.0, 95.0, 99.0)
-# A token is re-obtained when it has less than this left, so no request starts with a stale one.
-TOKEN_REFRESH_MARGIN_SECONDS = 60.0
+# A token is re-obtained when less than max(MIN, FRACTION x its own lifetime) is left, so no
+# request starts with a stale one. The margin follows the token's lifetime: a fixed margin as long
+# as the lifetime itself would log in again on every request.
+TOKEN_REFRESH_MIN_MARGIN_SECONDS = 5.0
+TOKEN_REFRESH_LIFETIME_FRACTION = 0.2
 OVERHEAD_NOTE = (
     "overhead = percentile of the target minus the same percentile of the baseline target. It is "
     "a difference of two distributions measured one after the other, not a per-request pairing."
@@ -255,6 +258,16 @@ class AuthSource(Protocol):
         """The ``Authorization`` header value for ``persona``, fresh enough to start a request."""
         ...
 
+    async def prime(self, personas: Sequence[str]) -> None:
+        """Obtain every persona's first credential, one after the other, before any worker starts,
+        so the measurement never includes a login and the workers never race to obtain one."""
+        ...
+
+    @property
+    def grants_obtained(self) -> int:
+        """How many OAuth grants (full logins) this source has run so far."""
+        ...
+
 
 @dataclass(frozen=True)
 class PasswordSettings:
@@ -276,26 +289,82 @@ class StubKeyAuth:
     async def header(self, persona: str) -> str:
         return f"Bearer {self._keys[persona]}"
 
+    async def prime(self, personas: Sequence[str]) -> None:
+        missing = [name for name in personas if name not in self._keys]
+        if missing:
+            raise ValueError(f"no stub key loaded for {missing}")
+
+    @property
+    def grants_obtained(self) -> int:
+        return 0
+
+
+@dataclass(frozen=True)
+class CachedToken:
+    token: str = field(repr=False)
+    expires_at: float
+    refresh_margin: float
+
+
+def token_refresh_margin(lifetime_seconds: float) -> float:
+    return max(TOKEN_REFRESH_MIN_MARGIN_SECONDS, TOKEN_REFRESH_LIFETIME_FRACTION * lifetime_seconds)
+
+
+def _numeric_claim(claims: dict[str, Any], name: str) -> float:
+    value = claims.get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(
+            f"the access token has no numeric {name!r} claim; the refresh margin is relative to "
+            "the token's own lifetime (exp - iat), so both are required"
+        )
+    return float(value)
+
+
+def cache_token(grant: Grant) -> CachedToken:
+    """The token with its expiry and the margin derived from its own lifetime (``exp - iat``)."""
+    expires_at = _numeric_claim(grant.claims, "exp")
+    lifetime = expires_at - _numeric_claim(grant.claims, "iat")
+    if lifetime <= 0:
+        raise ValueError(f"the access token's lifetime (exp - iat) is {lifetime:g} s, not positive")
+    return CachedToken(grant.token, expires_at, token_refresh_margin(lifetime))
+
 
 class OAuthAuth:
     """Real OAuth tokens (DCR, PKCE, the provider's login form) obtained through the e2e
-    harness once per persona, and obtained again when one is about to expire."""
+    harness once per persona, and obtained again when one is about to expire.
 
-    def __init__(self, provider: Provider, settings: PasswordSettings) -> None:
-        self._provider = provider
-        self._settings = settings
-        self._tokens: dict[str, tuple[str, float]] = {}
+    ``fetch_grant`` runs one full grant for a persona; ``clock`` is the wall clock (unix seconds,
+    as the token's ``exp``), both injected so the refresh logic is testable without a provider.
+    """
+
+    def __init__(
+        self,
+        fetch_grant: Callable[[str], Awaitable[Grant]],
+        clock: Callable[[], float],
+    ) -> None:
+        self._fetch_grant = fetch_grant
+        self._clock = clock
+        self._tokens: dict[str, CachedToken] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._grants = 0
+
+    @property
+    def grants_obtained(self) -> int:
+        return self._grants
+
+    async def prime(self, personas: Sequence[str]) -> None:
+        for persona in personas:
+            await self.header(persona)
 
     async def header(self, persona: str) -> str:
         lock = self._locks.setdefault(persona, asyncio.Lock())
         async with lock:
             cached = self._tokens.get(persona)
-            if cached is None or cached[1] - time.time() < TOKEN_REFRESH_MARGIN_SECONDS:
-                grant = await obtain_grant(self._settings, self._provider, PERSONAS[persona])
-                cached = (grant.token, float(grant.claims["exp"]))
+            if cached is None or cached.expires_at - self._clock() < cached.refresh_margin:
+                cached = cache_token(await self._fetch_grant(persona))
+                self._grants += 1
                 self._tokens[persona] = cached
-        return f"Bearer {cached[0]}"
+        return f"Bearer {cached.token}"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -504,6 +573,8 @@ async def run_target(
     client: httpx.AsyncClient, name: str, url: str, auth: AuthSource, workload: Workload
 ) -> list[Sample]:
     """Run the whole workload against one target and return every sample (warmup included)."""
+    # Every persona's first token before the workers start: the measurement has no login in it.
+    await auth.prime(workload.personas)
     samples: list[Sample] = []
     gate = StartGate(workload.concurrency)
     await asyncio.gather(
@@ -561,7 +632,10 @@ def build_summary(
     started: datetime,
     ended: datetime,
     git_commit: str | None,
+    oauth_grants: dict[str, int],
 ) -> dict[str, Any]:
+    """``oauth_grants``: per target, how many full OAuth logins the run made. More than one per
+    persona means tokens expired during the run and were obtained again."""
     targets = {name: summarise_target(samples) for name, samples in per_target.items()}
     overheads: dict[str, Any] = {}
     if baseline is not None:
@@ -583,6 +657,7 @@ def build_summary(
         "ended_utc": ended.isoformat(timespec="seconds"),
         "git_commit": git_commit,
         "overhead_note": OVERHEAD_NOTE,
+        "oauth_grants": oauth_grants,
         "targets": targets,
         "overhead": overheads,
     }
@@ -746,7 +821,12 @@ def make_auth(target: Target, workload: Workload, state_dir: Path | None) -> Aut
         issuer=target.auth.removeprefix("oauth:"),
         wrong_audience={},
     )
-    return OAuthAuth(provider, PasswordSettings(os.environ[PASSWORD_VARIABLE]))
+    settings = PasswordSettings(os.environ[PASSWORD_VARIABLE])
+
+    async def fetch_grant(persona: str) -> Grant:
+        return await obtain_grant(settings, provider, PERSONAS[persona])
+
+    return OAuthAuth(fetch_grant, time.time)
 
 
 def make_client(concurrency: int, timeout_seconds: float) -> httpx.AsyncClient:
@@ -774,15 +854,17 @@ async def run_all(
     to ``out_dir``."""
     started = datetime.now(UTC)
     per_target: dict[str, list[Sample]] = {}
+    oauth_grants: dict[str, int] = {}
     for target in targets:
         auth = make_auth(target, workload, state_dir)
         print(f"== {target.name}: {workload.concurrency} workers", flush=True)
         async with make_client(workload.concurrency, workload.timeout_seconds) as client:
             samples = await run_target(client, target.name, target.url, auth, workload)
         per_target[target.name] = samples
+        oauth_grants[target.name] = auth.grants_obtained
         write_raw_csv(out_dir / f"raw-{target.name}.csv", samples)
     summary = build_summary(
-        per_target, baseline, parameters, started, datetime.now(UTC), git_commit
+        per_target, baseline, parameters, started, datetime.now(UTC), git_commit, oauth_grants
     )
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     return summary
