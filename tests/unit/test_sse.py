@@ -1,7 +1,9 @@
 import json
+import re
 
 import pytest
 
+from mcp_gateway import sse as sse_module
 from mcp_gateway.sse import (
     EventTooLargeError,
     SseEventSplitter,
@@ -118,3 +120,44 @@ def test_failure_event_is_a_whole_jsonrpc_error_message_event() -> None:
             "message": "The service stream failed before the response was complete.",
         },
     }
+
+
+class CountingPattern:
+    """Stands in for the line-break regex and counts how often the buffer is scanned."""
+
+    def __init__(self, inner: re.Pattern[bytes]) -> None:
+        self._inner = inner
+        self.searches = 0
+
+    def search(self, buffer: bytes | bytearray, start: int = 0) -> re.Match[bytes] | None:
+        self.searches += 1
+        return self._inner.search(buffer, start)
+
+
+def test_scanning_a_long_event_is_linear_not_quadratic(monkeypatch: pytest.MonkeyPatch) -> None:
+    counter = CountingPattern(sse_module._LINE_BREAK)
+    monkeypatch.setattr(sse_module, "_LINE_BREAK", counter)
+    lines = 2000
+    stream = b"data: x\n" * lines + b"\n"
+    splitter = SseEventSplitter(len(stream) + 1, None)
+    # Chunks that end mid-line, so every feed has an unterminated tail to resume from.
+    chunks = [stream[i : i + 11] for i in range(0, len(stream), 11)]
+    events = drain(splitter, chunks)
+    assert events == [stream]
+    assert counter.searches < 3 * (lines + len(chunks))
+
+
+def test_mixed_line_endings_split_the_same_at_every_chunk_size() -> None:
+    stream = b"id: 1\r\ndata: a\r\n\r\nid: 2\rdata: b\r\r: c\n\nid: 3\ndata: d\n\n"
+    expected = [
+        b"id: 1\r\ndata: a\r\n\r\n",
+        b"id: 2\rdata: b\r\r",
+        b": c\n\n",
+        b"id: 3\ndata: d\n\n",
+    ]
+    for size in (1, 2, 3, 5, len(stream)):
+        splitter = SseEventSplitter(1024, None)
+        chunks = [stream[i : i + size] for i in range(0, len(stream), size)]
+        events = drain(splitter, chunks)
+        events.extend(splitter.finish())
+        assert events == expected, size

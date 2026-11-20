@@ -54,23 +54,6 @@ def _line_end(buffer: bytes | bytearray, start: int, *, at_end: bool) -> tuple[i
     return found.start(), found.end()
 
 
-def _event_end(buffer: bytes | bytearray, *, at_end: bool = False) -> int | None:
-    """Index just past the first complete event (ending in a blank line), or None."""
-    position = 0
-    has_field = False
-    while True:
-        located = _line_end(buffer, position, at_end=at_end)
-        if located is None:
-            return None
-        content_end, next_start = located
-        if content_end == position:
-            if has_field:
-                return next_start
-        else:
-            has_field = True
-        position = next_start
-
-
 def _data_of(event: bytes) -> bytes:
     """The joined ``data`` field values of one event (SSE field parsing, simplified)."""
     values: list[bytes] = []
@@ -104,6 +87,11 @@ class SseEventSplitter:
         self._request_id = request_id
         self._buffer = bytearray()
         self.reply_relayed = False
+        # Where the scan for the end of the pending event resumes: the start of its first
+        # unterminated line, and whether it already holds a field line. Without it every chunk
+        # would rescan the whole buffer (quadratic in the event size).
+        self._scan_from = 0
+        self._scan_has_field = False
 
     def feed(self, chunk: bytes) -> Iterator[bytes]:
         self._buffer.extend(chunk)
@@ -118,12 +106,28 @@ class SseEventSplitter:
             raise TruncatedEventError
         self._buffer.clear()
 
+    def _event_end(self, *, at_end: bool) -> int | None:
+        """Index just past the pending event (ending in a blank line), or None if incomplete."""
+        position = self._scan_from
+        has_field = self._scan_has_field
+        while (located := _line_end(self._buffer, position, at_end=at_end)) is not None:
+            content_end, next_start = located
+            if content_end == position:
+                if has_field:
+                    return next_start
+            else:
+                has_field = True
+            position = next_start
+            self._scan_from, self._scan_has_field = position, has_field
+        return None
+
     def _events(self, *, at_end: bool) -> Iterator[bytes]:
-        while (end := _event_end(self._buffer, at_end=at_end)) is not None:
+        while (end := self._event_end(at_end=at_end)) is not None:
             if end > self._max:
                 raise EventTooLargeError
             event = bytes(self._buffer[:end])
             del self._buffer[:end]
+            self._scan_from, self._scan_has_field = 0, False
             if (
                 self._request_id is not None
                 and not self.reply_relayed
