@@ -25,7 +25,15 @@ from mcp_gateway.detached import DetachedReads
 from mcp_gateway.resolver import StaticResolver
 from mcp_gateway.state import MemorySessionStore
 
-from .conftest import GatedStream, TrackedStream, base_config_dict, config_from, mint, until
+from .conftest import (
+    FailingStream,
+    GatedStream,
+    TrackedStream,
+    base_config_dict,
+    config_from,
+    mint,
+    until,
+)
 from .test_app import (
     RPC_BODY,
     SpyResolver,
@@ -478,3 +486,28 @@ async def test_a_request_whose_client_stayed_to_the_end_is_not_counted_as_detach
     await rig.idle()
     assert touched.is_set(), "the session binding was refreshed"
     assert rig.detached() == {}
+
+
+@pytest.mark.parametrize(
+    ("error", "result"),
+    [(httpx.ReadError("reset"), "failed"), (httpx.ReadTimeout("silent"), "timeout")],
+)
+@pytest.mark.parametrize("kind", ["sse", "json"])
+async def test_an_upstream_that_breaks_after_the_client_left_is_not_counted_completed(
+    mapping_dir: Path, idp: Any, token: str, kind: str, error: Exception, result: str
+) -> None:
+    stream = FailingStream([EVENT if kind == "sse" else b'{"jsonrpc":'], error)
+    headers = SSE if kind == "sse" else JSON_TYPE
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    rig = Rig(mapping_dir, idp, upstream, token)
+    call = rig.call(RPC_BODY)
+    running = call.start()
+    await call.first_body.wait()
+    call.leave.set()
+    await running
+    stream.gate.set()
+    await rig.idle()
+    assert rig.detached() == {result: 1}

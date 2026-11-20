@@ -204,6 +204,21 @@ class GatedStream(httpx.AsyncByteStream):
         self.closed = True
 
 
+class FailingStream(GatedStream):
+    """Like ``GatedStream`` but the body breaks with ``error`` once the gate opens."""
+
+    def __init__(self, chunks: list[bytes], error: Exception) -> None:
+        super().__init__(chunks)
+        self._error = error
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.started.set()
+        for chunk in self._chunks:
+            yield chunk
+        await self.gate.wait()
+        raise self._error
+
+
 async def until(condition: Callable[[], bool], *, seconds: float = 5.0) -> None:
     """Wait, within a bound, for ``condition``; fail with a timeout instead of hanging."""
     async with asyncio.timeout(seconds):

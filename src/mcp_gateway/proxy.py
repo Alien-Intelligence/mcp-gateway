@@ -824,6 +824,10 @@ class UpstreamProxy:
         """Read the whole upstream response, handing it to the client while the client is there."""
         try:
             await self._relay(response, out, reply_id, audit, reply_filter, release)
+        except (httpx.HTTPError, SseError):
+            # An upstream failure: audited and reported to the client by ``_relay`` while it is
+            # there; once it left, the failure is the read's result.
+            raise
         except Exception:
             logger.exception("relaying the upstream response failed")
             await out.put(_Abort("internal_error"))
@@ -869,6 +873,9 @@ class UpstreamProxy:
             logger.error("upstream %s stream failed (%s)", self._name, reason)
             audit.reason = reason
             audit.emit(status=status, outcome="upstream_stream_failed")
+            if not out.open:
+                # Nobody to tell: the failure is the detached read's result (`failed`/`timeout`).
+                raise
             if events is not None and reply_id is not None and events.can_report_failure:
                 # The partial event is discarded; the client learns the request failed.
                 await out.put(stream_failed_event(reply_id))
