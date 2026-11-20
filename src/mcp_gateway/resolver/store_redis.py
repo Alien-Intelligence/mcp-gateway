@@ -11,7 +11,10 @@ import logging
 import re
 from collections.abc import Collection
 
+import anyio
 import redis.asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.exceptions import AuthenticationError, RedisError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
@@ -68,6 +71,9 @@ class RedisStoreResolver:
                 socket_timeout=config.socket_timeout_seconds,
                 max_connections=config.max_connections,
                 decode_responses=True,
+                # redis-py retries three times with backoff by default, which would make a
+                # lookup outlast the configured timeouts.
+                retry=Retry(NoBackoff(), 0),
             )
         except (ValueError, RedisError) as exc:
             raise ResolverError("store_redis url is not a valid redis URL") from exc
@@ -77,7 +83,10 @@ class RedisStoreResolver:
         if key is None:
             return Denied("no_mapping")
         try:
-            value = await self._client.get(key)
+            with anyio.fail_after(
+                self._config.connect_timeout_seconds + self._config.socket_timeout_seconds
+            ):
+                value = await self._client.get(key)
         except AuthenticationError as exc:
             raise ResolverError("store_redis authentication failed") from exc
         except (RedisConnectionError, RedisTimeoutError, TimeoutError, OSError) as exc:
