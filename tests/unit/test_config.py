@@ -274,3 +274,43 @@ def test_new_numeric_limits_must_be_positive(
     config_dict[section][key] = value
     with pytest.raises(ConfigError, match=key):
         _parse(config_dict)
+
+
+def test_rate_limits_null_is_accepted_and_both_scopes_parse(config_dict: dict[str, Any]) -> None:
+    assert config_from(config_dict).policies.rate_limits is None
+    config_dict["policies"]["rate_limits"] = {
+        "per_subject": {"burst": 5, "per_minute": 12.5},
+        "per_organization": None,
+    }
+    limits = config_from(config_dict).policies.rate_limits
+    assert limits is not None
+    assert limits.per_subject is not None
+    assert (limits.per_subject.burst, limits.per_subject.per_minute) == (5, 12.5)
+    assert limits.per_organization is None
+
+
+@pytest.mark.parametrize(
+    "rate_limits",
+    [
+        {"per_subject": None, "per_organization": None},
+        {"per_subject": {"burst": 0, "per_minute": 1}, "per_organization": None},
+        {"per_subject": {"burst": 1, "per_minute": 0}, "per_organization": None},
+        {"per_subject": {"burst": 1, "per_minute": -3}, "per_organization": None},
+        {"per_subject": {"burst": 1, "per_minute": float("inf")}, "per_organization": None},
+        {"per_subject": {"burst": 1}, "per_organization": None},
+        {"per_subject": {"burst": 1, "per_minute": 1}},
+        {"per_subject": {"burst": 1, "per_minute": 1, "x": 1}, "per_organization": None},
+    ],
+)
+def test_invalid_rate_limits_are_refused(
+    config_dict: dict[str, Any], rate_limits: dict[str, Any]
+) -> None:
+    config_dict["policies"]["rate_limits"] = rate_limits
+    with pytest.raises(ConfigError, match="rate_limits"):
+        _parse(config_dict)
+
+
+def test_rate_limits_key_is_required(config_dict: dict[str, Any]) -> None:
+    del config_dict["policies"]["rate_limits"]
+    with pytest.raises(ConfigError, match="rate_limits"):
+        _parse(config_dict)
