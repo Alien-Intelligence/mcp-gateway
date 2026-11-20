@@ -60,8 +60,10 @@ class SpyResolver:
 class FixedResolver:
     def __init__(self, outcome: Credential | Denied | Exception) -> None:
         self.outcome = outcome
+        self.calls = 0
 
     async def resolve(self, identity: Identity) -> Credential | Denied:
+        self.calls += 1
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome

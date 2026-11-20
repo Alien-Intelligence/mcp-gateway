@@ -33,6 +33,8 @@ OUTCOMES = frozenset(
         "resolver_unavailable",
         "gateway_error",
         "denied",
+        "rate_limited",
+        "state_unavailable",
         "session_not_found",
         "upstream_error",
         "upstream_auth_rejected",

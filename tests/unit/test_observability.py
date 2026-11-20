@@ -41,6 +41,7 @@ from .test_app import (
     client_for,
     routed_transport,
 )
+from .test_app_ratelimit import Broken, Refusing
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "mcp_gateway"
 TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
@@ -61,6 +62,7 @@ def build_observed(
     resolver: Any = None,
     spans: InMemorySpanExporter | None = None,
     reader: InMemoryMetricReader | None = None,
+    rate_limiter: Any = None,
     **overrides: Any,
 ) -> Observed:
     data = base_config_dict(str(mapping_dir / "mapping.json"))
@@ -75,6 +77,7 @@ def build_observed(
     app = create_app(
         config_from(data),
         resolver=resolver,
+        rate_limiter=rate_limiter,
         http_transport=transport,
         span_exporter=span_exporter,
         metric_reader=metric_reader,
@@ -457,6 +460,8 @@ class Env:
             return await http.post("/mcp", **kwargs)
 
 
+ONE_BUCKET = {"per_subject": {"burst": 1, "per_minute": 1.0}, "per_organization": None}
+
 type Scenario = Callable[[Env], Awaitable[None]]
 
 
@@ -529,6 +534,14 @@ async def _denied(env: Env) -> None:
     await env.post(env.rebuild(resolver=FixedResolver(Denied("no_mapping"))))
 
 
+async def _rate_limited(env: Env) -> None:
+    await env.post(env.rebuild(policies__rate_limits=ONE_BUCKET, rate_limiter=Refusing()))
+
+
+async def _state_unavailable(env: Env) -> None:
+    await env.post(env.rebuild(policies__rate_limits=ONE_BUCKET, rate_limiter=Broken()))
+
+
 async def _session_not_found(env: Env) -> None:
     await env.post(env.rebuild(), headers={**bearer(env.token), "Mcp-Session-Id": "nope"})
 
@@ -585,6 +598,8 @@ SCENARIOS: dict[str, Scenario] = {
     "resolver_unavailable": _resolver_unavailable,
     "gateway_error": _gateway_error,
     "denied": _denied,
+    "rate_limited": _rate_limited,
+    "state_unavailable": _state_unavailable,
     "session_not_found": _session_not_found,
     "upstream_error": _upstream_error,
     "upstream_auth_rejected": _upstream_auth_rejected,

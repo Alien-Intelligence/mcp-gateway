@@ -20,6 +20,8 @@ RESOLVER_UNAVAILABLE = -32009
 NO_MAPPING = -32010
 AMBIGUOUS_MAPPING = -32011
 DENIED = -32012
+STATE_UNAVAILABLE = -32013
+RATE_LIMITED = -32014
 # Allocated by the MCP 2026-07-28 transport spec for a header that disagrees with the body.
 HEADER_MISMATCH = -32020
 INVALID_REQUEST = -32600
@@ -89,6 +91,16 @@ def error_body(
     if data is not None:
         error["data"] = data
     return {"jsonrpc": "2.0", "id": rpc_id, "error": error}
+
+
+def tool_error_result(
+    rpc_id: str | int, text: str, meta: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """A ``tools/call`` result flagged ``isError``: the one failure shape every client hands to the model."""
+    result: dict[str, Any] = {"content": [{"type": "text", "text": text}], "isError": True}
+    if meta is not None:
+        result["_meta"] = meta
+    return {"jsonrpc": "2.0", "id": rpc_id, "result": result}
 
 
 def _decode_header_value(value: str) -> str | None:
