@@ -32,6 +32,9 @@ second. Each page carries ``"cacheScope": "public"`` and ``"ttlMs": 60000`` (the
 fields, so a tool policy's rewrite of them can be seen). A request whose ``params._meta`` has
 ``"stub/sse": true`` gets the list as a one-event SSE stream instead of a JSON body (the gateway
 forwards the body, not custom headers).
+Every recorded request carries ``completed`` (the stub sent the whole response) and
+``disconnected`` (the client went away first): a streaming tool sets exactly one of them once it
+ends, so a test can tell an upstream request that ran to its end from one that was aborted.
 Control: ``GET /_stub/requests``, ``POST /_stub/reset``, ``POST /_stub/sessions/{id}/expire``.
 """
 
@@ -115,6 +118,7 @@ class Stub:
             "rpc_method": None,
             "tool": None,
             "status": None,
+            "completed": False,
             "disconnected": False,
         }
         if len(self.requests) < MAX_RECORDED_REQUESTS:
@@ -180,7 +184,7 @@ def streaming(
                 yield chunk
             entry["completed"] = True
         finally:
-            if not entry.get("completed"):
+            if not entry["completed"]:
                 entry["disconnected"] = True
 
     return StreamingResponse(watched(), **kwargs)
