@@ -7,8 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.16.0",
     "httpx>=0.28.1",
+    "psycopg[binary,pool]>=3.2",
     "pydantic>=2.9.0",
     "pyjwt[crypto]>=2.10.0",
+    "redis>=5",
     "starlette>=0.46.0",
     "uvicorn[standard]>=0.34.0",
 ]
@@ -66,5 +68,6 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
 markers = [
+    "integration: needs real PostgreSQL and Redis servers (MCP_GATEWAY_TEST_PG_DSN, MCP_GATEWAY_TEST_REDIS_URL)",
     "e2e: runs against the docker compose dev stack, the real dev Alien platform and a real dev MCP server",
 ]

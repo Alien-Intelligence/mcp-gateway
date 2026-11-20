@@ -17,7 +17,7 @@ import anyio
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from mcp_gateway.identity import Identity
-from mcp_gateway.resolver.base import Credential, Denied, ResolverError
+from mcp_gateway.resolver.base import Credential, Denied, ResolverError, clean_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -210,8 +210,8 @@ class StaticResolver:
                 "api key file unreadable for mapping entry %d (%s)", rule.index, type(exc).__name__
             )
             raise ResolverError(f"api key file unreadable for entry {rule.index}") from exc
-        key = text.strip()
-        if not key or not key.isascii() or any(ch.isspace() or not ch.isprintable() for ch in key):
+        key = clean_api_key(text)
+        if key is None:
             logger.error("api key file empty or malformed for mapping entry %d", rule.index)
             raise ResolverError(f"api key file empty or malformed for entry {rule.index}")
         return key
@@ -219,6 +219,9 @@ class StaticResolver:
     async def invalidate(self, identity: Identity) -> None:
         """Nothing is cached (keys are read per request), so there is nothing to drop."""
         del identity
+
+    async def aclose(self) -> None:
+        """No connections to release."""
 
 
 def _count(index: _Index) -> int:

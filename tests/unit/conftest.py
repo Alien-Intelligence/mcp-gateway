@@ -48,6 +48,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
             },
         },
         "resolver": {"type": "static", "mapping_file": mapping_file},
+        "resolver_cache": None,
         "upstreams": {
             "primary": {
                 "url": UPSTREAM_URL,

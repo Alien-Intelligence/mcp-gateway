@@ -53,6 +53,9 @@ class SpyResolver:
         self.invalidated.append(identity)
         await self.inner.invalidate(identity)
 
+    async def aclose(self) -> None:
+        await self.inner.aclose()
+
 
 class FixedResolver:
     def __init__(self, outcome: Credential | Denied | Exception) -> None:
@@ -64,6 +67,9 @@ class FixedResolver:
         return self.outcome
 
     async def invalidate(self, identity: Identity) -> None:
+        return None
+
+    async def aclose(self) -> None:
         return None
 
 

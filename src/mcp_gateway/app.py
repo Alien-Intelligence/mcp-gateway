@@ -5,7 +5,6 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import anyio
 import httpx
@@ -31,6 +30,7 @@ from mcp_gateway.jsonrpc import (
     INVALID_REQUEST,
     NO_RPC,
     ORIGIN_REFUSED,
+    RESOLVER_UNAVAILABLE,
     SESSION_NOT_FOUND,
     RpcInfo,
     check_mcp_headers,
@@ -43,7 +43,9 @@ from mcp_gateway.resolver import (
     CredentialResolver,
     Denied,
     ResolverError,
-    StaticResolver,
+    ResolverUnavailableError,
+    build_resolver,
+    with_cache,
 )
 from mcp_gateway.sessions import SessionRegistry
 
@@ -62,6 +64,10 @@ _QUOTED_UNSAFE = re.compile(r"[^\x20\x21\x23-\x5b\x5d-\x7e]")
 def _quoted(value: str) -> str:
     """Make ``value`` safe inside a quoted WWW-Authenticate parameter (no quote, backslash, controls)."""
     return _QUOTED_UNSAFE.sub(" ", value)
+
+
+RESOLVER_UNAVAILABLE_MESSAGE = "Credentials are temporarily unavailable. Retry shortly."
+RESOLVER_RETRY_AFTER_SECONDS = 5
 
 
 async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
@@ -172,6 +178,14 @@ class Gateway:
         reply_id = rpc.id if rpc.expects_reply else None
         try:
             outcome = await self._resolver.resolve(identity)
+        except ResolverUnavailableError as exc:
+            logger.error("credential backend unavailable: %s", exc)
+            audit.emit(status=503, outcome="resolver_unavailable")
+            response = json_rpc_response(
+                503, RESOLVER_UNAVAILABLE, RESOLVER_UNAVAILABLE_MESSAGE, reply_id
+            )
+            response.headers["Retry-After"] = str(RESOLVER_RETRY_AFTER_SECONDS)
+            return response
         except ResolverError as exc:
             logger.error("credential resolution failed: %s", exc)
             audit.emit(status=500, outcome="gateway_error")
@@ -265,13 +279,16 @@ def create_app(
 ) -> Starlette:
     """Build the app. HTTP clients are created here and closed by the lifespan."""
     if resolver is None:
-        resolver = StaticResolver(
-            Path(config.resolver.mapping_file),
-            config.upstreams.keys(),
-            email_matching=(
-                config.auth.identity.email is not None
-                and config.auth.identity.email_verified is not None
+        resolver = with_cache(
+            build_resolver(
+                config.resolver,
+                config.upstreams.keys(),
+                email_matching=(
+                    config.auth.identity.email is not None
+                    and config.auth.identity.email_verified is not None
+                ),
             ),
+            config.resolver_cache,
         )
 
     jwks_client = httpx.AsyncClient(
@@ -314,6 +331,7 @@ def create_app(
         try:
             yield
         finally:
+            await resolver.aclose()
             await jwks_client.aclose()
             for client in clients.values():
                 await client.aclose()
