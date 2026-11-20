@@ -11,7 +11,6 @@ from pydantic import SecretStr
 FORWARD_REQUEST_HEADERS = frozenset(
     {
         "accept",
-        "accept-encoding",
         "content-type",
         "mcp-session-id",
         "mcp-protocol-version",
@@ -70,14 +69,24 @@ def build_upstream_headers(
 ) -> list[tuple[str, str]]:
     """Allow-listed client headers plus the injected Alien API key.
 
-    ``accept-encoding`` is forwarded when present and pinned to ``identity`` otherwise, so the
-    HTTP client's own default never makes upstream compress a body the caller did not ask for.
+    ``accept-encoding`` is always ``identity``, whatever the client sent: the relay cuts SSE
+    into whole events and reads the JSON-RPC ids inside them, which a compressed body would
+    make impossible. The client's value is dropped, never forwarded.
     """
     headers = [(name.lower(), value) for name, value in inbound if _is_forwardable(name.lower())]
-    if not any(name == "accept-encoding" for name, _ in headers):
-        headers.append(("accept-encoding", "identity"))
+    headers.append(("accept-encoding", "identity"))
     headers.append(("authorization", f"Bearer {api_key.get_secret_value()}"))
     return headers
+
+
+def has_content_encoding(upstream: Iterable[tuple[str, str]]) -> bool:
+    """True when the response declares any encoding other than ``identity``."""
+    return any(
+        token.strip() not in ("", "identity")
+        for name, value in upstream
+        if name.lower() == "content-encoding"
+        for token in value.lower().split(",")
+    )
 
 
 def filter_response_headers(upstream: Iterable[tuple[str, str]]) -> dict[str, str]:

@@ -26,6 +26,13 @@ class EventTooLargeError(SseError):
         super().__init__("event_too_large")
 
 
+class EncodedStreamError(SseError):
+    """The upstream compressed an event stream although the gateway asked for identity."""
+
+    def __init__(self) -> None:
+        super().__init__("encoded_event_stream")
+
+
 class TruncatedEventError(SseError):
     def __init__(self) -> None:
         super().__init__("truncated_event")

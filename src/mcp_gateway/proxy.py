@@ -11,7 +11,11 @@ from starlette.types import Receive, Scope, Send
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.config import UpstreamConfig
-from mcp_gateway.headers import build_upstream_headers, filter_response_headers
+from mcp_gateway.headers import (
+    build_upstream_headers,
+    filter_response_headers,
+    has_content_encoding,
+)
 from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import (
     UPSTREAM_PAYMENT_REQUIRED,
@@ -24,6 +28,7 @@ from mcp_gateway.jsonrpc import (
 from mcp_gateway.resolver import Credential, CredentialResolver, ResolverError
 from mcp_gateway.sessions import SessionRegistry
 from mcp_gateway.sse import (
+    EncodedStreamError,
     SseError,
     SseEventSplitter,
     stream_failed_event,
@@ -377,11 +382,15 @@ class UpstreamProxy:
         audit: AuditRecord,
     ) -> Response:
         release = _Release(response, self._sessions, self._name, session_id, audit)
+        headers = filter_response_headers(response.headers.multi_items())
+        if _is_event_stream(response) and has_content_encoding(response.headers.multi_items()):
+            # Never relayed: the gateway reports the failure in the clear instead.
+            headers.pop("content-encoding", None)
         return RelayResponse(
             self._relay(response, rpc.id if rpc.expects_reply else None, release, audit),
             release,
             status_code=response.status_code,
-            headers=filter_response_headers(response.headers.multi_items()),
+            headers=headers,
         )
 
     async def _relay(
@@ -399,6 +408,8 @@ class UpstreamProxy:
         )
         try:
             try:
+                if events is not None and has_content_encoding(response.headers.multi_items()):
+                    raise EncodedStreamError
                 async for chunk in response.aiter_raw():
                     if events is None:
                         yield chunk

@@ -466,7 +466,7 @@ async def test_upstream_content_encoding_is_not_decoded(
     )
     assert response.headers["content-encoding"] == "gzip"
     assert response.json()["id"] == 7
-    assert upstream.requests[0].headers["accept-encoding"] == "gzip"
+    assert upstream.requests[0].headers["accept-encoding"] == "identity"
 
 
 async def test_midstream_failure_after_the_reply_is_aborted_not_ended_cleanly(

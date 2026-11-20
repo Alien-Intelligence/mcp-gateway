@@ -1,5 +1,6 @@
 """Gateway-level protocol rules through ``create_app``: origin, Mcp-* mirror, sessions, streams."""
 
+import gzip
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -554,3 +555,30 @@ async def test_event_over_the_cap_after_the_reply_aborts(
         with pytest.raises(UpstreamStreamAbortedError):
             await client.post("/mcp", json=RPC_BODY, headers=alice)
     assert stream.closed
+
+
+async def test_client_accept_encoding_never_reaches_the_upstream(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    sse_responder(upstream, TrackedStream([REPLY]))
+    await http.post("/mcp", json=RPC_BODY, headers={**alice, "Accept-Encoding": "gzip, br"})
+    assert upstream.requests[0].headers.get_list("accept-encoding") == ["identity"]
+
+
+async def test_compressed_event_stream_is_a_stream_failure(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stream = TrackedStream([gzip.compress(REPLY)])
+    upstream.responder = lambda _r: httpx.Response(
+        200, headers={**SSE, "Content-Encoding": "gzip"}, stream=stream
+    )
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=RPC_BODY, headers=alice)
+    assert "content-encoding" not in response.headers
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
+    assert stream.closed
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "encoded_event_stream")
