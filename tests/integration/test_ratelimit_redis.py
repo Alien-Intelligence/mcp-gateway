@@ -54,7 +54,7 @@ async def make_redis(tmp_path: Path, prefix: str) -> AsyncIterator[MakeRedis]:
                 key_prefix=prefix,
                 connect_timeout_seconds=1,
                 operation_timeout_seconds=operation_timeout,
-                max_connections=64,
+                max_connections=4,
                 encryption_key_file=str(tmp_path / "unused-key"),
             )
         )

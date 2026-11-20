@@ -10,11 +10,14 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import anyio
+import httpx
 import pytest
 import redis.asyncio as aioredis
 from pydantic import SecretStr
 from unit.conftest import base_config_dict, config_from
+from unit.test_app import client_for
 
+from mcp_gateway.app import create_app
 from mcp_gateway.config import ResolverCacheConfig
 from mcp_gateway.identity import Identity
 from mcp_gateway.resolver import CachingResolver, Credential, Denied
@@ -78,6 +81,7 @@ async def make_state(tmp_path: Path, redis_url: str, prefix: str) -> AsyncIterat
         idle_ttl: float = 600,
         per_subject: int = 20,
         operation_timeout: float = 2,
+        max_connections: int = 4,
     ) -> State:
         index = len(built)
         (tmp_path / f"url-{index}").write_text((url or redis_url) + "\n")
@@ -95,7 +99,7 @@ async def make_state(tmp_path: Path, redis_url: str, prefix: str) -> AsyncIterat
             "key_prefix": prefix,
             "connect_timeout_seconds": 1,
             "operation_timeout_seconds": operation_timeout,
-            "max_connections": 4,
+            "max_connections": max_connections,
             "encryption_key_file": str(tmp_path / f"key-{index}"),
         }
         state = build_state(config_from(data))
@@ -484,3 +488,47 @@ async def test_the_inner_resolver_is_not_called_when_the_cache_is_down(
     with pytest.raises(StateUnavailableError):
         await dead.resolve(identity())
     assert backend.calls == 0
+
+
+# --- the connection pool ----------------------------------------------------------------
+
+
+async def test_commands_beyond_the_pool_size_wait_for_a_connection(
+    make_state: MakeState, prefix: str
+) -> None:
+    state = make_state(max_connections=2, operation_timeout=5)
+    redis = state.redis
+    assert redis is not None
+    replies = await asyncio.gather(
+        *(redis.run(redis.client.blpop([f"{prefix}missing"], timeout=0.1)) for _ in range(6))
+    )
+    assert replies == [None] * 6
+
+
+async def test_readyz_waits_for_a_connection_while_the_pool_is_saturated(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    state = make_state(max_connections=2, operation_timeout=5)
+    redis = state.redis
+    assert redis is not None
+    data = base_config_dict()
+    app = create_app(
+        config_from(data),
+        resolver=Backend(credential()),
+        http_transport=httpx.MockTransport(lambda request: httpx.Response(500)),
+        state=state,
+    )
+    holders = [
+        asyncio.create_task(redis.run(redis.client.blpop([f"{prefix}held"], timeout=1.0)))
+        for _ in range(2)
+    ]
+
+    async def pool_is_saturated() -> bool:
+        listing = await admin.execute_command("CLIENT", "LIST")
+        return str(listing).count("cmd=blpop") >= 2
+
+    await eventually(pool_is_saturated, "both pooled connections to block")
+    async with client_for(app) as http:
+        response = await http.get("/readyz")
+    assert (response.status_code, response.json()) == (200, {"status": "ready"})
+    await asyncio.gather(*holders)

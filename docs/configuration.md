@@ -281,7 +281,7 @@ State that must agree between replicas lives here: the session bindings (`sessio
 | `key_prefix` | string | 1 to 64 characters of `A-Z a-z 0-9 _ : . -` | Prepended to every key, so several gateways can share one Redis. |
 | `connect_timeout_seconds` | number | gt 0 | Socket connect timeout. |
 | `operation_timeout_seconds` | number | gt 0 | Ceiling for every Redis operation, a script and the readiness ping included. There are no retries. |
-| `max_connections` | integer | >= 1 | Connection pool size. |
+| `max_connections` | integer | >= 1 | Connection pool size. When every connection is busy a command waits for one instead of failing; that wait consumes the same `operation_timeout_seconds` as the command itself, so a saturated pool surfaces as a timeout (`503`), never as an immediate refusal. |
 | `encryption_key_file` | string | non-empty | File holding the base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials. Generate it with `head -c 32 /dev/urandom \| base64`. A missing, empty, non-base64 or wrongly sized file stops the process at start; the message never echoes the content. |
 
 With `redis`, `sessions.max_entries` and `resolver_cache.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
