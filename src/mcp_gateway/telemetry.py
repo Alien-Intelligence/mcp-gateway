@@ -72,7 +72,7 @@ _MAX_TEXT = 256
 _SHUTDOWN_SLACK_SECONDS = 2.0
 
 # Outcomes that are failures of the gateway or of the service behind it, whatever the status.
-_ERROR_OUTCOMES = frozenset({"upstream_stream_failed", "internal_error"})
+_ERROR_OUTCOMES = frozenset({"upstream_stream_failed", "tool_policy_failed", "internal_error"})
 
 # JSON-RPC methods are client-chosen text: only these become a metric attribute value.
 KNOWN_RPC_METHODS = frozenset(

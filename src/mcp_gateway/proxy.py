@@ -1,4 +1,8 @@
-"""Streaming reverse proxy to one upstream MCP server. Responses are never rewritten."""
+"""Streaming reverse proxy to one upstream MCP server.
+
+Responses are relayed as they come. The one exception is a ``tools/list`` reply while a tool
+policy is active: it is filtered by ``tool_filter`` (the relay mechanics stay here).
+"""
 
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -33,6 +37,14 @@ from mcp_gateway.sse import (
     SseEventSplitter,
     stream_failed_event,
 )
+from mcp_gateway.tool_filter import (
+    SseReplyFilter,
+    ToolPolicyError,
+    filter_json_reply,
+    policy_failed_body,
+    policy_failed_event,
+)
+from mcp_gateway.tool_policy import EffectivePolicy
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +153,11 @@ class UpstreamStreamAbortedError(Exception):
 def _is_event_stream(response: httpx.Response) -> bool:
     content_type = response.headers.get("content-type", "")
     return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
+
+
+def _is_json(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    return content_type.split(";", 1)[0].strip().lower() == "application/json"
 
 
 def _request_session_id(headers: list[tuple[str, str]]) -> str | None:
@@ -254,12 +271,15 @@ class UpstreamProxy:
         client: httpx.AsyncClient,
         sessions: SessionRegistry,
         max_event_bytes: int,
+        max_filtered_bytes: int,
     ) -> None:
         self._name = name
         self._url = config.url
         self._client = client
         self._sessions = sessions
         self._max_event_bytes = max_event_bytes
+        self._max_filtered_bytes = max_filtered_bytes
+        self._read_timeout = config.read_timeout_seconds
 
     async def forward(
         self,
@@ -274,7 +294,12 @@ class UpstreamProxy:
         resolver: CredentialResolver,
         subject_key: str,
         audit: AuditRecord,
+        tool_policy: EffectivePolicy | None,
     ) -> Response:
+        """Send the request upstream and relay the answer.
+
+        ``tool_policy`` is the caller's effective tool policy, None when no policy is configured.
+        """
         request = self._client.build_request(
             method,
             self._url,
@@ -323,7 +348,16 @@ class UpstreamProxy:
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(response, receive, rpc, identity, resolver, audit)
             self._track_session(method, session_id, response, subject_key)
-            return self.stream(response, rpc, session_id, audit)
+            list_policy = (
+                tool_policy
+                if rpc.method == "tools/list" and rpc.expects_reply and response.is_success
+                else None
+            )
+            if list_policy is not None and not _is_event_stream(response):
+                return await self._respond_filtered(
+                    response, rpc, list_policy, session_id, receive, audit
+                )
+            return self.stream(response, rpc, session_id, audit, list_policy)
         except BaseException:
             # Nothing owns the response yet: close it rather than leak the connection.
             await _close(response)
@@ -389,12 +423,81 @@ class UpstreamProxy:
             {"upstream_status": upstream_status},
         )
 
+    async def _read_filterable_body(self, response: httpx.Response) -> bytes:
+        """The whole upstream body, within ``max_filtered_response_bytes`` and the read timeout."""
+        if not _is_json(response):
+            raise ToolPolicyError("unexpected_content_type")
+        if has_content_encoding(response.headers.multi_items()):
+            raise ToolPolicyError("encoded_reply")
+        declared = response.headers.get("content-length")
+        if declared is not None and declared.isdigit() and int(declared) > self._max_filtered_bytes:
+            raise ToolPolicyError("reply_too_large")
+        chunks: list[bytes] = []
+        total = 0
+        # The httpx read timeout bounds each silence; this bounds a body that trickles in.
+        with anyio.fail_after(self._read_timeout):
+            async for chunk in response.aiter_raw():
+                total += len(chunk)
+                if total > self._max_filtered_bytes:
+                    raise ToolPolicyError("reply_too_large")
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+    async def _respond_filtered(
+        self,
+        response: httpx.Response,
+        rpc: RpcInfo,
+        policy: EffectivePolicy,
+        session_id: str | None,
+        receive: Receive,
+        audit: AuditRecord,
+    ) -> Response:
+        """Answer a ``tools/list`` with the upstream's JSON reply, filtered; never unfiltered."""
+        reply_id = rpc.id
+        if reply_id is None:
+            raise RuntimeError("a filtered tools/list always carries a request id")
+        release = _Release(response, self._sessions, self._name, session_id, audit)
+        headers = filter_response_headers(response.headers.multi_items())
+        headers.pop("x-request-id", None)
+        # The body is rewritten, so the upstream's length is not true: Starlette sets the new one.
+        headers.pop("content-length", None)
+        try:
+            try:
+                raw, gone = await watching_disconnect(
+                    receive, lambda: self._read_filterable_body(response)
+                )
+                if gone or raw is None:
+                    return self._client_gone(audit)
+                content = filter_json_reply(raw, reply_id, policy)
+            except ToolPolicyError as exc:
+                logger.error("upstream %s reply could not be filtered (%s)", self._name, exc.reason)
+                audit.reason = exc.reason
+                audit.emit(status=200, outcome="tool_policy_failed")
+                return JSONResponse(policy_failed_body(reply_id))
+            except (httpx.TimeoutException, TimeoutError) as exc:
+                logger.error("upstream %s timed out (%s)", self._name, type(exc).__name__)
+                audit.emit(status=504, outcome="upstream_error")
+                return json_rpc_response(
+                    504, UPSTREAM_TIMEOUT, "The service did not answer in time.", reply_id
+                )
+            except httpx.HTTPError as exc:
+                logger.error("upstream %s unreachable (%s)", self._name, type(exc).__name__)
+                audit.emit(status=502, outcome="upstream_error")
+                return json_rpc_response(
+                    502, UPSTREAM_UNREACHABLE, "The service could not be reached.", reply_id
+                )
+            release.completed = True
+            return Response(content, status_code=response.status_code, headers=headers)
+        finally:
+            await release.finalize()
+
     def stream(
         self,
         response: httpx.Response,
         rpc: RpcInfo,
         session_id: str | None,
         audit: AuditRecord,
+        list_policy: EffectivePolicy | None,
     ) -> Response:
         release = _Release(response, self._sessions, self._name, session_id, audit)
         headers = filter_response_headers(response.headers.multi_items())
@@ -407,12 +510,36 @@ class UpstreamProxy:
             if has_content_encoding(response.headers.multi_items()):
                 # Never relayed: the gateway reports the failure in the clear instead.
                 headers.pop("content-encoding", None)
+        reply_id = rpc.id if rpc.expects_reply else None
+        reply_filter = (
+            SseReplyFilter(reply_id, list_policy, self._max_event_bytes)
+            if list_policy is not None and reply_id is not None
+            else None
+        )
         return RelayResponse(
-            self._relay(response, rpc.id if rpc.expects_reply else None, release, audit),
+            self._relay(response, reply_id, release, audit, reply_filter),
             release,
             status_code=response.status_code,
             headers=headers,
         )
+
+    def _filtered_event(
+        self,
+        event: bytes,
+        reply_filter: SseReplyFilter | None,
+        status: int,
+        audit: AuditRecord,
+    ) -> bytes:
+        """The event to send: filtered when it is the reply, the error event when it cannot be."""
+        if reply_filter is None:
+            return event
+        try:
+            return reply_filter.apply(event)
+        except ToolPolicyError as exc:
+            logger.error("upstream %s reply could not be filtered (%s)", self._name, exc.reason)
+            audit.reason = exc.reason
+            audit.emit(status=status, outcome="tool_policy_failed")
+            return policy_failed_event(reply_filter.request_id)
 
     async def _relay(
         self,
@@ -420,6 +547,7 @@ class UpstreamProxy:
         reply_id: str | int | None,
         release: _Release,
         audit: AuditRecord,
+        reply_filter: SseReplyFilter | None,
     ) -> AsyncGenerator[bytes, None]:
         status = response.status_code
         events = (
@@ -436,10 +564,10 @@ class UpstreamProxy:
                         yield chunk
                         continue
                     for event in events.feed(chunk):
-                        yield event
+                        yield self._filtered_event(event, reply_filter, status, audit)
                 if events is not None:
                     for event in events.finish():
-                        yield event
+                        yield self._filtered_event(event, reply_filter, status, audit)
                 release.completed = True
             except (httpx.HTTPError, SseError) as exc:
                 reason = exc.reason if isinstance(exc, SseError) else type(exc).__name__

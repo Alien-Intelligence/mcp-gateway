@@ -322,7 +322,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 
 Text values are clipped to 256 characters. The line never holds request or response content, arguments, tokens, API keys or session ids.
 
-`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `gateway_error`, `denied`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `forwarded`, `client_disconnected`, `internal_error`.
+`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `gateway_error`, `denied`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`.
 
 Example:
 

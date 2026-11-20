@@ -41,7 +41,7 @@ class TruncatedEventError(SseError):
 _LINE_BREAK = re.compile(rb"\r\n|\r|\n")
 
 
-def _data_of(event: bytes) -> bytes:
+def data_of(event: bytes) -> bytes:
     """The joined ``data`` field values of one event (SSE field parsing, simplified)."""
     values: list[bytes] = []
     for line in event.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n"):
@@ -51,19 +51,25 @@ def _data_of(event: bytes) -> bytes:
     return b"\n".join(values)
 
 
-def is_reply_to(event: bytes, request_id: str | int) -> bool:
-    """True when the event carries the JSON-RPC response (result or error) for ``request_id``."""
-    data = _data_of(event)
+def parse_reply(data: bytes, request_id: str | int) -> dict[str, Any] | None:
+    """The JSON-RPC response (result or error) for ``request_id`` held in ``data``, else None."""
     if b'"result"' not in data and b'"error"' not in data:
-        return False
+        return None
     try:
         document: Any = json.loads(data)
     except ValueError:
-        return False
+        return None
     if not isinstance(document, dict) or ("result" not in document and "error" not in document):
-        return False
+        return None
     reply_id = document.get("id")
-    return type(reply_id) is type(request_id) and reply_id == request_id
+    if type(reply_id) is type(request_id) and reply_id == request_id:
+        return document
+    return None
+
+
+def is_reply_to(event: bytes, request_id: str | int) -> bool:
+    """True when the event carries the JSON-RPC response (result or error) for ``request_id``."""
+    return parse_reply(data_of(event), request_id) is not None
 
 
 class SseEventSplitter:

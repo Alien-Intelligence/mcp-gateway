@@ -556,6 +556,27 @@ async def _upstream_stream_failed(env: Env) -> None:
         await env.post(env.rebuild())
 
 
+DENY_BLOCKED = {"default": {"allow": None, "deny": ["blocked"]}, "rules": []}
+
+
+async def _tool_denied(env: Env) -> None:
+    call = {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "blocked"}}
+    await env.post(env.rebuild(policies__tools=DENY_BLOCKED), json=call)
+
+
+async def _batch_refused(env: Env) -> None:
+    batch = [{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}]
+    await env.post(env.rebuild(policies__tools=DENY_BLOCKED), json=batch)
+
+
+async def _tool_policy_failed(env: Env) -> None:
+    env.upstream.responder = lambda _r: httpx.Response(
+        200, headers={"Content-Type": "application/json"}, content=b"not json"
+    )
+    listing = {"jsonrpc": "2.0", "id": 7, "method": "tools/list"}
+    await env.post(env.rebuild(policies__tools=DENY_BLOCKED), json=listing)
+
+
 async def _forwarded(env: Env) -> None:
     await env.post(env.rebuild())
 
@@ -589,6 +610,9 @@ SCENARIOS: dict[str, Scenario] = {
     "upstream_error": _upstream_error,
     "upstream_auth_rejected": _upstream_auth_rejected,
     "upstream_stream_failed": _upstream_stream_failed,
+    "tool_denied": _tool_denied,
+    "batch_refused": _batch_refused,
+    "tool_policy_failed": _tool_policy_failed,
     "forwarded": _forwarded,
     "client_disconnected": _client_disconnected,
     "internal_error": _internal_error,
