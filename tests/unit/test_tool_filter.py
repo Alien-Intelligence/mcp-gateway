@@ -5,10 +5,9 @@ from typing import Any
 
 import pytest
 
-from mcp_gateway.jsonrpc import is_tool_batch
 from mcp_gateway.tool_filter import (
     POLICY_FAILED_MESSAGE,
-    SseReplyFilter,
+    SseListFilter,
     ToolPolicyError,
     filter_json_reply,
     policy_failed_event,
@@ -108,8 +107,8 @@ def event(document: Any, *, prefix: bytes = b"") -> bytes:
     return prefix + b"data: " + json.dumps(document).encode() + b"\n\n"
 
 
-def sse_filter(max_bytes: int = 65536) -> SseReplyFilter:
-    return SseReplyFilter(3, POLICY, max_bytes)
+def sse_filter(max_bytes: int = 65536) -> SseListFilter:
+    return SseListFilter(3, POLICY, max_bytes, answers_tools_list=True)
 
 
 def data_json(raw: bytes) -> dict[str, Any]:
@@ -148,10 +147,10 @@ def test_events_before_the_reply_pass_byte_identical() -> None:
     progress = b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
     server_request = b'data: {"jsonrpc":"2.0","id":3,"method":"sampling/createMessage"}\n\n'
     comment = b": keep-alive\n\n"
-    plain = b"data: not json\n\n"
-    other_response = event(reply({"tools": []}, 99))
+    empty_data = b"id: 4\ndata:\n\n"
+    other_response = event(reply({"content": []}, 99))
     flow = sse_filter()
-    for raw in (progress, server_request, comment, plain, other_response):
+    for raw in (progress, server_request, comment, empty_data, other_response):
         assert flow.apply(raw) == raw
 
 
@@ -160,11 +159,53 @@ def test_an_error_reply_event_passes_unchanged() -> None:
     assert sse_filter().apply(raw) == raw
 
 
-def test_events_after_the_reply_pass_unchanged() -> None:
+def test_a_tool_list_is_filtered_whatever_its_id_and_however_often_it_comes() -> None:
     flow = sse_filter()
-    flow.apply(event(reply(listing())))
-    later = event(reply(listing()))
-    assert flow.apply(later) == later
+    for request_id in (3, 3, "3", 99, None):
+        assert names(data_json(flow.apply(event(reply(listing(), request_id))))) == [
+            "keep_a",
+            "keep_c",
+        ]
+
+
+def test_a_result_without_a_tool_list_under_another_id_passes() -> None:
+    raw = event(reply({"content": [{"type": "text", "text": "x"}]}, 99))
+    assert sse_filter().apply(raw) == raw
+
+
+def test_a_stream_that_answers_something_else_does_not_need_a_tool_list_in_its_reply() -> None:
+    call_reply = event(reply({"content": []}, 3))
+    flow = SseListFilter(3, POLICY, 65536, answers_tools_list=False)
+    assert flow.apply(call_reply) == call_reply
+
+
+def test_a_byte_order_mark_is_ignored_on_the_first_event_only() -> None:
+    flow = sse_filter()
+    first = flow.apply(b"\xef\xbb\xbf" + event(reply(listing())))
+    assert names(data_json(first)) == ["keep_a", "keep_c"]
+    second = b"\xef\xbb\xbfdata: " + json.dumps(reply(listing())).encode() + b"\n\n"
+    # Later it is part of the field name, so the line is an unknown field no client reads.
+    assert flow.apply(second) == second
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"not json", b'{"a":', b"\xff", b'{"id":3,"result":{"tools":[{"name":"x\xff"}]}}'],
+)
+def test_an_event_with_unreadable_data_raises(data: bytes) -> None:
+    with pytest.raises(ToolPolicyError, match="unparsable"):
+        sse_filter().apply(b"data: " + data + b"\n\n")
+
+
+def test_deeply_nested_data_raises_instead_of_recursing() -> None:
+    deep = b"[" * 100_000 + b"]" * 100_000
+    raw = b'data: {"id":3,"result":{"tools":[{"name":"x","s":' + deep + b"}]}}\n\n"
+    with pytest.raises(ToolPolicyError):
+        sse_filter().apply(raw)
+
+
+def test_the_failure_event_without_a_request_id_answers_null() -> None:
+    assert data_json(policy_failed_event(None))["id"] is None
 
 
 @pytest.mark.parametrize(
@@ -197,23 +238,3 @@ def test_the_failure_event_is_a_gateway_error_reply() -> None:
         "id": 3,
         "error": {"code": -32005, "message": POLICY_FAILED_MESSAGE},
     }
-
-
-# --- batches ----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("body", "expected"),
-    [
-        (b'[{"jsonrpc":"2.0","id":1,"method":"tools/call"}]', True),
-        (b'[{"jsonrpc":"2.0","id":1,"method":"ping"},{"id":2,"method":"tools/list"}]', True),
-        (b'[{"jsonrpc":"2.0","id":1,"method":"ping"}]', False),
-        (b'[1, null, "tools/call"]', False),
-        (b"[]", False),
-        (b'{"method":"tools/call"}', False),
-        (b"not json", False),
-        (b"", False),
-    ],
-)
-def test_is_tool_batch(body: bytes, expected: bool) -> None:
-    assert is_tool_batch(body) is expected

@@ -41,6 +41,8 @@ OUTCOMES = frozenset(
         "upstream_stream_failed",
         "tool_denied",
         "batch_refused",
+        "unparsable_request",
+        "invalid_request",
         "tool_policy_failed",
         "forwarded",
         "client_disconnected",

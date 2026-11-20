@@ -22,6 +22,7 @@ from mcp_gateway.headers import (
 )
 from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import (
+    GATEWAY_ERROR,
     UPSTREAM_PAYMENT_REQUIRED,
     UPSTREAM_TIMEOUT,
     UPSTREAM_UNAUTHORIZED,
@@ -38,7 +39,7 @@ from mcp_gateway.sse import (
 )
 from mcp_gateway.state import SessionStore, StateUnavailableError
 from mcp_gateway.tool_filter import (
-    SseReplyFilter,
+    SseListFilter,
     ToolPolicyError,
     filter_json_reply,
     policy_failed_body,
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 # Upstream 401/402 bodies are drained (to free the connection) but never relayed.
 _DRAIN_LIMIT_BYTES = 64 * 1024
 _CLOSE_TIMEOUT_SECONDS = 5.0
+
+UPSTREAM_ERROR_MESSAGE = "The service returned an error for this request."
 
 _AUTH_REPLIES: dict[int, tuple[int, str]] = {
     401: (
@@ -356,16 +359,15 @@ class UpstreamProxy:
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(response, receive, rpc, identity, resolver, audit)
             await self._track_session(method, session_id, response, subject_key)
-            list_policy = (
-                tool_policy
-                if rpc.method == "tools/list" and rpc.expects_reply and response.is_success
-                else None
-            )
-            if list_policy is not None and not _is_event_stream(response):
-                return await self._respond_filtered(
-                    response, rpc, list_policy, session_id, receive, audit
-                )
-            return self.stream(response, rpc, session_id, audit, list_policy)
+            if tool_policy is not None and rpc.method == "tools/list" and rpc.expects_reply:
+                if not response.is_success:
+                    return await self._replace_failure(response, rpc, receive, audit)
+                if not _is_event_stream(response):
+                    # A JSON body answers exactly its own POST: only a tools/list one is filtered.
+                    return await self._respond_filtered(
+                        response, rpc, tool_policy, session_id, receive, audit
+                    )
+            return self.stream(response, rpc, session_id, audit, tool_policy)
         except BaseException:
             # Nothing owns the response yet: close it rather than leak the connection.
             await _close(response)
@@ -439,6 +441,37 @@ class UpstreamProxy:
             rpc.id if rpc.expects_reply else None,
             {"upstream_status": upstream_status},
         )
+
+    async def _replace_failure(
+        self, response: httpx.Response, rpc: RpcInfo, receive: Receive, audit: AuditRecord
+    ) -> Response:
+        """Answer a failed ``tools/list`` with the gateway's error: the status stays, the body goes.
+
+        A failure body is free-form text or JSON the gateway cannot vouch for, and one that
+        looks like a tool list must not reach the client. The status is kept (a ``404`` still
+        tells the client its session ended), and so is ``Retry-After``.
+        """
+        reply_id = rpc.id
+        if reply_id is None:
+            raise RuntimeError("a filtered tools/list always carries a request id")
+        status = response.status_code
+        gone = False
+        try:
+            with anyio.fail_after(self._read_timeout):
+                _, gone = await watching_disconnect(receive, lambda: _drain(response))
+        except (httpx.HTTPError, TimeoutError) as exc:
+            logger.warning("draining upstream %d body failed (%s)", status, type(exc).__name__)
+        finally:
+            await _close(response)
+        if gone:
+            return self._client_gone(audit)
+        audit.reason = "upstream_status"
+        audit.emit(status=status, outcome="upstream_error")
+        reply = json_rpc_response(status, GATEWAY_ERROR, UPSTREAM_ERROR_MESSAGE, reply_id)
+        retry_after = response.headers.get("retry-after")
+        if retry_after is not None:
+            reply.headers["Retry-After"] = retry_after
+        return reply
 
     async def _read_filterable_body(self, response: httpx.Response) -> bytes:
         """The whole upstream body, within ``max_filtered_response_bytes`` and the read timeout."""
@@ -514,8 +547,14 @@ class UpstreamProxy:
         rpc: RpcInfo,
         session_id: str | None,
         audit: AuditRecord,
-        list_policy: EffectivePolicy | None,
+        tool_policy: EffectivePolicy | None,
     ) -> Response:
+        """Relay the upstream response as it comes.
+
+        While a tool policy is active every event stream goes through ``SseListFilter``, whatever
+        method or HTTP verb opened it: a GET stream resumed with ``Last-Event-ID`` replays old
+        replies, and any stream may carry a tool list.
+        """
         release = _Release(response, self._sessions, self._name, session_id, audit)
         headers = filter_response_headers(response.headers.multi_items())
         # The client is given the gateway's request id; the upstream's is in the audit record.
@@ -529,8 +568,13 @@ class UpstreamProxy:
                 headers.pop("content-encoding", None)
         reply_id = rpc.id if rpc.expects_reply else None
         reply_filter = (
-            SseReplyFilter(reply_id, list_policy, self._max_event_bytes)
-            if list_policy is not None and reply_id is not None
+            SseListFilter(
+                reply_id,
+                tool_policy,
+                self._max_event_bytes,
+                answers_tools_list=rpc.method == "tools/list",
+            )
+            if tool_policy is not None and _is_event_stream(response)
             else None
         )
         return RelayResponse(
@@ -543,7 +587,7 @@ class UpstreamProxy:
     def _filtered_event(
         self,
         event: bytes,
-        reply_filter: SseReplyFilter | None,
+        reply_filter: SseListFilter | None,
         status: int,
         audit: AuditRecord,
     ) -> bytes:
@@ -564,7 +608,7 @@ class UpstreamProxy:
         reply_id: str | int | None,
         release: _Release,
         audit: AuditRecord,
-        reply_filter: SseReplyFilter | None,
+        reply_filter: SseListFilter | None,
     ) -> AsyncGenerator[bytes, None]:
         status = response.status_code
         events = (
