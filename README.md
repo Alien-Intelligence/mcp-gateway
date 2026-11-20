@@ -179,6 +179,31 @@ docker run --rm --link ci-dind:docker -e DOCKER_HOST=tcp://docker:2375 \
   sh -c 'tar cf - -C /src --exclude=./.git --exclude=./.venv --exclude=./.env* . | tar xf - && sh scripts/ci_e2e_stub.sh'
 ```
 
+### Load test
+
+`tests/load/loadtest.py` opens N concurrent long-lived SSE streams (N workers, each holding one stream at a time, reading it to the reply event) and measures what the gateway adds. Per target it records the time to response headers, to the first event and to the reply, the status, the JSON-RPC or tool error and the event count of every request (`raw-<target>.csv`). A request is an error when the status is not 200, the reply is a JSON-RPC error or `isError`, the event count differs from `--expected-events`, or it times out. The targets run one after the other with the same workload (warmup requests excluded from the statistics), and every measurement parameter is a required argument: there is no default that changes what is measured, so a real-dev run is explicitly small (for example `--concurrency 20 --requests-per-worker 3`).
+
+```bash
+sh scripts/loadtest_stub.sh   # needs the LOAD_* variables listed in its header
+```
+
+`scripts/loadtest_stub.sh` brings the stub stack up like `ci_e2e_stub.sh`, samples CPU and memory of the gateway containers (`LOAD_GATEWAY_SERVICES`, `scripts/loadtest_stats.sh`), runs the load client in a container on the host network (`compose.load.yaml`) against the stub directly and then against the gateway, copies the results to `ARTIFACTS_DIR` and tears everything down. Run it in a throwaway Docker daemon exactly like the stub suite above (add `-e ARTIFACTS_DIR=/artifacts -v <dir>:/artifacts -e LOAD_...=...` to the `docker run` of the CLI container to keep the results). A smoke workload:
+
+```bash
+LOAD_CONCURRENCY=20 LOAD_REQUESTS_PER_WORKER=3 LOAD_WARMUP_REQUESTS=1 LOAD_PERSONAS="alice bob carol dave" \
+LOAD_TOOL=slow_sse LOAD_ARGUMENTS_JSON='{"count": 5, "delay_seconds": 0.2}' LOAD_EXPECTED_EVENTS=6 \
+LOAD_TIMEOUT_SECONDS=30 LOAD_MAX_RUN_SECONDS=300 sh scripts/loadtest_stub.sh
+```
+
+Reading the results:
+
+- `summary.json`, `targets.<name>`: `count`, `errors` and `errors_by_reason`, `error_rate`, `total_seconds` and `first_event_seconds` (`p50`, `p95`, `p99`, `max`, over the successful requests) and `throughput_per_second`. A worker whose handshake failed counts every call it could not make as an error.
+- `summary.json`, `overhead.<name>`: the target's percentile minus the baseline's, for the same percentile. It is a difference of two distributions, not a per-request pairing, and it includes the cost of the gateway's authentication and routing as well as the proxying.
+- `stats-summary.json`: per container, peak and mean CPU (percent of one core) and memory (MiB), from `stats.jsonl`.
+- The run parameters, the start and end times (UTC) and the git commit (`LOADTEST_GIT_COMMIT`) are in `summary.json`.
+
+Against another target (the real dev MCP, any gateway) run the client directly from `tests/` with `src/` and `scripts/` on `PYTHONPATH`: `python -m load.loadtest --target-url NAME=URL --target-auth NAME=oauth:<issuer> ...` (the users' password in `E2E_USER_PASSWORD`), or `NAME=stub-key` with `--state-dir` for the stub's keys.
+
 ### `e2e`: the real-dev suite
 
 It behaves like a real MCP client against the dev target: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It reads the Alien consumption feeds back and asserts each call was billed to the expected client-managed user and client organization, with the sponsorship applied.
