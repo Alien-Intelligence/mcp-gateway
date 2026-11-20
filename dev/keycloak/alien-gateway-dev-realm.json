@@ -136,6 +136,30 @@
       ]
     },
     {
+      "username": "dave@client-x.test",
+      "email": "dave@client-x.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Dave",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-x"
+        ]
+      },
+      "groups": [
+        "/clients/client-x"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
       "username": "revoked@client-r.test",
       "email": "revoked@client-r.test",
       "emailVerified": true,

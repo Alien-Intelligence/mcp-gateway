@@ -1,7 +1,6 @@
 """The credential resolvers through gateway-chain (Redis, PostgreSQL, webhook behind a cache),
 and the gateway's answer when the webhook cannot be reached. Real users, real tokens."""
 
-import asyncio
 from typing import Any
 
 import httpx
@@ -25,10 +24,6 @@ pytestmark = pytest.mark.e2e_stub
 
 NO_MAPPING = -32010
 RESOLVER_UNAVAILABLE = -32009
-# The chain gateway keeps a positive answer 4 s (compose.yaml); wait a little longer to be sure
-# nothing cached by an earlier test is left.
-CACHE_TTL_SECONDS = 4.0
-CACHE_EXPIRY_MARGIN_SECONDS = 1.0
 
 
 @pytest.mark.parametrize(
@@ -83,18 +78,20 @@ async def test_a_cached_answer_does_not_call_the_webhook_again(
     stub: StubControl,
     evidence: dict[str, Any],
 ) -> None:
-    token = (await obtain_grant(settings, CHAIN, PERSONAS["carol"])).token
-    # Let any answer cached by an earlier test expire, so the next call must ask the webhook.
-    await asyncio.sleep(CACHE_TTL_SECONDS + CACHE_EXPIRY_MARGIN_SECONDS)
+    # Dave is behind the webhook and used by no other test, so nothing cached him before this
+    # one and no sleep is needed. The webhook is tried once per lookup (max_attempts 1 in
+    # compose.yaml), so a slow attempt cannot count twice. The positive cache lives 4 s: the
+    # second call follows the first at once.
+    token = (await obtain_grant(settings, CHAIN, PERSONAS["dave"])).token
     before = await webhook_resolve_count(http)
 
     first = await post(http, CHAIN, token, tool_call("echo"))
-    assert echoed(first)["persona"] == "carol"
+    assert echoed(first)["persona"] == "dave"
     after_first = await webhook_resolve_count(http)
     assert after_first == before + 1, "positive control: a cache miss reaches the webhook once"
 
     second = await post(http, CHAIN, token, tool_call("echo"))
-    assert echoed(second)["persona"] == "carol"
+    assert echoed(second)["persona"] == "dave"
     assert await webhook_resolve_count(http) == after_first, "a cache hit must not call it"
     evidence.update(webhook_calls=[before, after_first])
 

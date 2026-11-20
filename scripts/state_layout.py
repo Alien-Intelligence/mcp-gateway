@@ -28,9 +28,10 @@ STORES_FILE = "stores.json"
 MAPPING_FILE = "mapping.json"
 KEY_FILE_MODE = 0o600
 
-# Which resolver of gateway-chain holds each persona: alice in Redis, bob in PostgreSQL, carol
-# behind the webhook. Every other persona is known to the static gateways only.
-STORE_OF = {"alice": "redis", "bob": "postgres", "carol": "webhook"}
+# Which resolver of gateway-chain holds each persona: alice in Redis, bob in PostgreSQL, carol and
+# dave behind the webhook (dave is the resolver cache test's own persona). Every other persona is
+# known to the static gateways only.
+STORE_OF = {"alice": "redis", "bob": "postgres", "carol": "webhook", "dave": "webhook"}
 # How the static mapping recognises a persona (bob by organization keeps both kinds exercised).
 STATIC_MATCH = {"bob": "organization"}
 
@@ -63,10 +64,11 @@ STUB_ROUTING = Routing(
         "alice": STATEFUL,
         "bob": STATEFUL,
         "carol": STATELESS,
+        "dave": STATELESS,
         "revoked": STATEFUL,
         "unpaid": STATEFUL,
     },
-    store={"alice": STATELESS, "bob": STATEFUL, "carol": None},
+    store={"alice": STATELESS, "bob": STATEFUL, "carol": None, "dave": None},
 )
 # Dev target: the real dev MCP is stateless, and both upstream names point at it.
 REAL_ROUTING = Routing(

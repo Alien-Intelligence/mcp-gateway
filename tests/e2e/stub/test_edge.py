@@ -8,6 +8,7 @@ import pytest
 
 from e2e.harness import (
     CHAIN,
+    MCP_ACCEPT,
     Provider,
     audiences,
     initialize_payload,
@@ -25,6 +26,7 @@ from e2e.stub.stack import (
     bearer,
     echoed,
     error_code,
+    open_session,
     origin_of,
     post,
     prm_url,
@@ -185,3 +187,35 @@ async def test_a_session_header_is_not_needed_to_list_tools_on_a_stateless_upstr
     )
     names = [tool["name"] for tool in response.json()["result"]["tools"]]
     assert "echo" in names and "slow_sse" in names
+
+
+@static
+async def test_a_repeated_session_header_is_refused_with_400_and_not_forwarded(
+    settings: StubSettings,
+    http: httpx.AsyncClient,
+    stub: StubControl,
+    provider: Provider,
+    evidence: dict[str, Any],
+) -> None:
+    # Alice is on the stateful upstream: she has a real session to present.
+    token = (await obtain_grant(settings, provider, PERSONAS["alice"])).token
+    session = await open_session(http, provider, token)
+    # Positive control: the same request with one header is served.
+    served = await post(http, provider, token, tool_call("echo"), **{"Mcp-Session-Id": session})
+    assert served.status_code == 200, served.text[:300]
+
+    seen = len(await stub.requests())
+    repeated = await http.post(
+        provider.gateway_url,
+        json=tool_call("echo"),
+        headers=[
+            ("Authorization", f"Bearer {token}"),
+            ("Accept", MCP_ACCEPT),
+            ("Mcp-Session-Id", session),
+            ("Mcp-Session-Id", session),
+        ],
+    )
+    assert repeated.status_code == 400, repeated.text[:300]
+    assert "x-request-id" in repeated.headers
+    assert len(await stub.requests()) == seen, "a refused request must not be forwarded"
+    evidence.update(status=repeated.status_code)

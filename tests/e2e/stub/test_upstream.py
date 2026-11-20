@@ -60,6 +60,7 @@ async def test_upstream_sees_the_mapped_persona_and_none_of_the_forged_headers(
         "X-Oauth-Access-Token": "forged",
         "X-Forwarded-For": "203.0.113.9",
         "Cookie": "sid=forged",
+        "Accept-Encoding": "gzip, br",
         "Mcp-Session-Id": session,
     }
     response = await post(http, provider, token, tool_call("echo"), **forged)
@@ -76,6 +77,8 @@ async def test_upstream_sees_the_mapped_persona_and_none_of_the_forged_headers(
         "cookie",
     ):
         assert name not in headers, f"{name} reached the upstream"
+    # The gateway reads the stream as it is, so it never lets the upstream compress it.
+    assert headers["accept-encoding"] == "identity"
     assert token not in response.text
     assert headers["mcp-session-id"] == session
     evidence.update(persona=seen["persona"], stripped=sorted(forged))

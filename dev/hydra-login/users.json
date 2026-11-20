@@ -46,5 +46,13 @@
     "groups": [
       "client-p"
     ]
+  },
+  "dave@client-x.test": {
+    "subject": "usr-dave",
+    "email": "dave@client-x.test",
+    "org": "client-x",
+    "groups": [
+      "client-x"
+    ]
   }
 }

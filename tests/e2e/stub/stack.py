@@ -67,6 +67,7 @@ PERSONAS = {
     "alice": persona("alice", "client-x.test"),
     "bob": persona("bob", "client-y.test"),
     "carol": persona("carol", "client-x.test"),
+    "dave": persona("dave", "client-x.test"),
     "revoked": persona("revoked", "client-r.test"),
     "unpaid": persona("unpaid", "client-p.test"),
     "nomap": persona("nomap", "client-z.test"),
