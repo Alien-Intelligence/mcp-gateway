@@ -154,8 +154,8 @@ async def test_an_invalidation_on_one_replica_reaches_the_other(
         # answer in the shared cache, which proves B put it there, and the stub refuses the key.
         await shared_redis.set(key, original)
         stale = await post(http, HA_A, token, tool_call("echo"))
-        assert stale.status_code == 401, stale.text[:300]
         assert error_code(stale) == UPSTREAM_UNAUTHORIZED
+        assert stale.json()["error"]["data"]["upstream_status"] == 401
 
         # 5. A's 401 dropped the shared entry, so B asks the store again and gets the valid key.
         fresh = await post(http, HA_B, token, tool_call("echo"))

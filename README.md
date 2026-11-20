@@ -97,10 +97,13 @@ One compose file set (`compose.yaml` plus a target file) runs the whole thing on
 |---|---|---|
 | Keycloak 26.8 | `http://localhost:18080` | realm `alien-gateway-dev` from `dev/keycloak/` |
 | Ory Hydra v26.2 | `http://localhost:14444` | login/consent app from `dev/hydra-login/` on `:13000` |
-| `gateway-keycloak` | `http://localhost:18000/mcp` | Keycloak, `static` resolver |
-| `gateway-hydra` | `http://localhost:18001/mcp` | Hydra, `static` resolver |
+| `gateway-keycloak` | `http://localhost:18000/mcp` | Keycloak, `static` resolver, a tool policy (a rule on the `client` label) and a per-subject rate limit |
+| `gateway-hydra` | `http://localhost:18001/mcp` | Hydra, `static` resolver, same policy and limit |
 | `gateway-chain` | `http://localhost:18002/mcp` | Keycloak, `chain` of `store_redis`, `store_sql` and `webhook` (HMAC) behind a resolver cache; requires the `mcp-write` scope |
 | `gateway-unreachable` | `http://localhost:18003/mcp` | Keycloak, a `webhook` resolver nobody listens to (the resolver-down case) |
+| `gateway-ha-a`, `gateway-ha-b` | `http://localhost:18005/mcp`, `http://localhost:18006/mcp` | Two replicas of one gateway (same config, same `public_url` `http://localhost:18004/mcp`, so one token works on both): Keycloak, `store_redis` store holding every persona, `state` `redis` so sessions, the resolver cache and the rate limit buckets are shared, a tool policy denying `policy_denied_probe`, rate limits from `HA_RATE_LIMITS`; healthchecks on `/readyz` |
+| `gateway-lb` | `http://localhost:18004/mcp` | nginx round robin to the two replicas (`dev/gateway-lb/`), the address the pair's tokens are issued for |
+| `gateway-noredis` | `http://localhost:18007/mcp` | Keycloak, `static` resolver behind a cache, `state` `redis` pointing at a closed port: alive (`/healthz`) but never ready, every request is a `503` |
 | `otel-collector` | internal `:4318` | Receives the OTLP export of `gateway-chain` (the other gateways export nothing) and writes it to the `otel` volume as JSON lines; the stub harness reads it |
 | PostgreSQL, Redis | `127.0.0.1:15432`, `127.0.0.1:16379` | credential stores, refilled at every start by the `seed` service |
 | dev webhook | `127.0.0.1:18090` | `dev/webhook-resolver/`, `GET /_stats` counts the calls it served |
@@ -108,7 +111,7 @@ One compose file set (`compose.yaml` plus a target file) runs the whole thing on
 
 Every gateway has two upstreams, `stateful` and `stateless`, chosen per mapping entry. In the stub target they are the stub's `/stateful/mcp` and `/stateless/mcp`; in the dev target both are the real dev MCP (all of them are stateless). Gateway configuration is one JSON block per gateway in `compose.yaml`.
 
-Test users, the same in both identity providers: `alice@client-x.test`, `bob@client-y.test`, `carol@client-x.test`, `dave@client-x.test` (behind the webhook, stub target only: the resolver cache test's own persona), `nomap@client-z.test` (no mapping), `revoked@client-r.test` and `unpaid@client-p.test` (their keys are refused by the stub with 401 and 402; in the dev target they have no mapping). On `gateway-chain`, alice is resolved by Redis, bob by PostgreSQL and carol and dave by the webhook. Access tokens live 60 seconds. Anonymous DCR is enabled on both providers (Keycloak through Trusted Hosts covering loopback and the compose network gateway). `allowed_origins` is `https://claude.ai` and `http://localhost:6274` (the MCP Inspector).
+Test users, the same in both identity providers: `alice@client-x.test`, `bob@client-y.test`, `carol@client-x.test`, `dave@client-x.test` (behind the webhook, stub target only: the resolver cache test's own persona), `erin@client-q.test` and `frank@client-q.test` (one organization, for the per-organization rate limit; Keycloak and the stub target only), `nomap@client-z.test` (no mapping), `revoked@client-r.test` and `unpaid@client-p.test` (their keys are refused by the stub with 401 and 402; in the dev target they have no mapping). On the replica pair every persona is resolved from Redis (`mcp-gateway:ha:{email}`); bob and carol use the stateful upstream, the others the stateless one. On `gateway-chain`, alice is resolved by Redis, bob by PostgreSQL and carol and dave by the webhook. Access tokens live 60 seconds. Anonymous DCR is enabled on both providers (Keycloak through Trusted Hosts covering loopback and the compose network gateway). `allowed_origins` is `https://claude.ai` and `http://localhost:6274` (the MCP Inspector).
 
 ### Dev target
 
@@ -125,6 +128,8 @@ docker compose up -d --build --wait
 ```bash
 sh scripts/ci_e2e_stub.sh     # secrets, stack, harness, artifacts in artifacts/, stack removed
 ```
+
+`HA_RATE_LIMITS`, the `policies.rate_limits` value of the replica pair, comes from the env file: the script writes a small one (burst 8 per subject and 12 per organization, one token per minute) so tests can exhaust it, the dev target's `.env.example` documents `null`. The `seed` step writes the pair's Redis URL and a fresh encryption key (`state.key`, base64 of 32 random bytes) at every start.
 
 The script needs only a Docker daemon with the compose plugin. To keep the stack up for debugging, run the compose commands it contains by hand (`.env.stub` holds the throwaway secrets it generated).
 
@@ -163,7 +168,7 @@ uv run pytest tests/unit -q
 ### `integration` and `e2e_stub`
 
 - `integration`: the PostgreSQL and Redis resolvers against real servers (`MCP_GATEWAY_TEST_PG_DSN`, `MCP_GATEWAY_TEST_REDIS_URL`; a selected test without them fails).
-- `e2e_stub`: every test performs the real OAuth journey (challenge, resource metadata, authorization-server metadata, anonymous DCR, authorization code + PKCE S256 + `resource` through the provider's real login form) with a real test user, then calls the gateway against the stub upstream. It covers: resource metadata, challenges and `403 insufficient_scope`, the Origin policy, the `Mcp-Method`/`Mcp-Name` check and repeated headers, header stripping and key injection, session binding between two users, `DELETE` and upstream session expiry, `Last-Event-ID` replay, a stateless upstream's `405`, upstream `401`/`402`/`404`/`500`/`502`/`503`, incremental and failing streams, a client disconnect during a hanging call, each resolver of the chain, the resolver cache (counted at the webhook), an unreachable webhook (`503`, `Retry-After`), `x-request-id`, and the telemetry the collector receives (request span, metrics, and a scan proving no token, key, e-mail, subject, session id or tool argument is exported).
+- `e2e_stub`: every test performs the real OAuth journey (challenge, resource metadata, authorization-server metadata, anonymous DCR, authorization code + PKCE S256 + `resource` through the provider's real login form) with a real test user, then calls the gateway against the stub upstream. It covers: resource metadata, challenges and `403 insufficient_scope`, the Origin policy, the `Mcp-Method`/`Mcp-Name` check and repeated headers, header stripping and key injection, session binding between two users, `DELETE` and upstream session expiry, `Last-Event-ID` replay, a stateless upstream's `405`, upstream `401`/`402`/`404`/`500`/`502`/`503`, incremental and failing streams, a client disconnect during a hanging call, each resolver of the chain, the resolver cache (counted at the webhook), an unreachable webhook (`503`, `Retry-After`), the replica pair (a session opened on one replica used on the other and refused to another user, an upstream `401` on one replica invalidating the shared resolver cache for the other, the tool policy on JSON and SSE `tools/list` and on a denied call and a batch, rate limit buckets shared across replicas and across an organization with every refusal shape, a gateway without its Redis answering `503` and not ready), `x-request-id`, and the telemetry the collector receives (request span, metrics, and a scan proving no token, key, e-mail, subject, session id or tool argument is exported).
 
 `scripts/ci_e2e_stub.sh` runs both in a container on the daemon's host network (so the `localhost` issuers resolve as on a laptop) and needs only Docker with the compose plugin. To reproduce the CI job before pushing (CI minutes are paid), run it inside a privileged `docker:<version>-dind` daemon of its own, whose ports never clash with a running dev stack:
 
