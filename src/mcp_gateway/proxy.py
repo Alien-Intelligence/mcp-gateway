@@ -356,16 +356,18 @@ class UpstreamProxy:
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(response, receive, rpc, identity, resolver, audit)
             await self._track_session(method, session_id, response, subject_key)
-            list_policy = (
-                tool_policy
-                if rpc.method == "tools/list" and rpc.expects_reply and response.is_success
-                else None
-            )
-            if list_policy is not None and not _is_event_stream(response):
+            if (
+                tool_policy is not None
+                and response.is_success
+                and rpc.method == "tools/list"
+                and rpc.expects_reply
+                and not _is_event_stream(response)
+            ):
+                # A JSON body answers exactly its own POST, so only a tools/list one is filtered.
                 return await self._respond_filtered(
-                    response, rpc, list_policy, session_id, receive, audit
+                    response, rpc, tool_policy, session_id, receive, audit
                 )
-            return self.stream(response, rpc, session_id, audit, list_policy)
+            return self.stream(response, rpc, session_id, audit, tool_policy)
         except BaseException:
             # Nothing owns the response yet: close it rather than leak the connection.
             await _close(response)
@@ -514,8 +516,14 @@ class UpstreamProxy:
         rpc: RpcInfo,
         session_id: str | None,
         audit: AuditRecord,
-        list_policy: EffectivePolicy | None,
+        tool_policy: EffectivePolicy | None,
     ) -> Response:
+        """Relay the upstream response as it comes.
+
+        While a tool policy is active every event stream goes through ``SseListFilter``, whatever
+        method or HTTP verb opened it: a GET stream resumed with ``Last-Event-ID`` replays old
+        replies, and any stream may carry a tool list.
+        """
         release = _Release(response, self._sessions, self._name, session_id, audit)
         headers = filter_response_headers(response.headers.multi_items())
         # The client is given the gateway's request id; the upstream's is in the audit record.
@@ -529,8 +537,13 @@ class UpstreamProxy:
                 headers.pop("content-encoding", None)
         reply_id = rpc.id if rpc.expects_reply else None
         reply_filter = (
-            SseListFilter(reply_id, list_policy, self._max_event_bytes, answers_tools_list=True)
-            if list_policy is not None and reply_id is not None
+            SseListFilter(
+                reply_id,
+                tool_policy,
+                self._max_event_bytes,
+                answers_tools_list=rpc.method == "tools/list",
+            )
+            if tool_policy is not None and _is_event_stream(response)
             else None
         )
         return RelayResponse(

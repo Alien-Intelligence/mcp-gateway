@@ -840,3 +840,79 @@ async def test_events_that_carry_no_message_pass_byte_identical(
         b'data: {"jsonrpc":"2.0","id":5,"error":{"code":-1,"message":"x"}}\n\n',
     ]
     assert await post_list(http, alice, upstream, chunks) == b"".join(chunks)
+
+
+# --- every event stream is filtered, not only the one of a tools/list POST ---------------
+
+
+async def test_a_resumed_get_stream_that_replays_a_tool_list_is_filtered(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    notification = b'id: 1\ndata: {"jsonrpc":"2.0","method":"notifications/message"}\n\n'
+    respond_sse(upstream, [notification, event(tools_reply(5))])
+    response = await http.get(
+        "/mcp", headers={**alice, "Last-Event-ID": "0", "Accept": "text/event-stream"}
+    )
+    assert response.status_code == 200
+    assert response.content.startswith(notification)
+    (reply,) = sse_documents(response.content[len(notification) :])
+    assert tool_names(reply) == ["search"]
+    assert b"delete_all" not in response.content
+
+
+async def test_a_get_stream_event_the_gateway_cannot_read_becomes_an_error_with_a_null_id(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    respond_sse(upstream, [b"data: \xff\n\n"])
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.get("/mcp", headers={**alice, "Accept": "text/event-stream"})
+    assert response.content == gateway_error_event(None)
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "tool_policy_failed"
+
+
+async def test_a_tool_list_on_the_stream_of_another_method_is_filtered(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    respond_sse(upstream, [event(tools_reply(7))])
+    response = await http.post("/mcp", json=call("search", request_id=7), headers=alice)
+    (reply,) = sse_documents(response.content)
+    assert tool_names(reply) == ["search"]
+
+
+async def test_the_events_of_a_tool_call_stream_pass_byte_identical(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    chunks = [
+        b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n',
+        b'id: 3\nevent: message\ndata:  {"jsonrpc":"2.0",\r\ndata: "id":7,"result":{"content":[{"type":"text","text":"ok"}]}}\r\n\r\n',
+    ]
+    respond_sse(upstream, chunks)
+    response = await http.post("/mcp", json=call("search", request_id=7), headers=alice)
+    assert response.content == b"".join(chunks)
+
+
+async def test_a_json_response_to_another_method_is_not_parsed(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    """A JSON body answers exactly its own POST, so only a tools/list one is filtered."""
+    body = b'{ "jsonrpc": "2.0", "id": 7, "result": {"content": []} }'
+    upstream.responder = lambda _r: httpx.Response(200, headers=JSON_TYPE, content=body)
+    response = await http.post("/mcp", json=call("search", request_id=7), headers=alice)
+    assert response.content == body
+
+
+async def test_the_stream_of_a_request_without_a_policy_is_untouched(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+) -> None:
+    chunks = [b"data: \xff\n\n", event(tools_reply(5))]
+    respond_sse(upstream, chunks)
+    async with client_for(build(mapping_dir, transport, tools=None)) as client:
+        response = await client.get("/mcp", headers={**alice, "Accept": "text/event-stream"})
+    assert response.content == b"".join(chunks)
