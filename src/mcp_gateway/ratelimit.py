@@ -10,19 +10,16 @@ Two implementations share the algorithm. ``MemoryRateLimiter`` is exact for one 
 """
 
 import hashlib
-import logging
 import math
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
-import anyio
-import redis.asyncio as aioredis
-from redis.exceptions import RedisError
-
 from mcp_gateway.config import RateLimitsConfig
-
-logger = logging.getLogger(__name__)
+from mcp_gateway.state.errors import StateUnavailableError
+from mcp_gateway.state.redis_client import BoundedRedis
+from mcp_gateway.state.state import State
 
 type Scope = Literal["subject", "organization"]
 
@@ -32,8 +29,11 @@ _ROUNDING_DIGITS = 6
 _SECONDS_PER_MINUTE = 60.0
 
 
-class RateLimitUnavailableError(Exception):
-    """The shared bucket store failed or timed out. The request must not pass unmetered."""
+class RateLimitUnavailableError(StateUnavailableError):
+    """The bucket store answered something the limiter cannot use. The request must not pass unmetered.
+
+    A subclass of the state error so the gateway has one 503 mapping for every shared-state failure.
+    """
 
 
 @dataclass(frozen=True)
@@ -209,8 +209,6 @@ end
 return {1, 0, 0}
 """
 
-_STORE_ERRORS = (RedisError, OSError, TimeoutError)
-
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -219,25 +217,19 @@ def _digest(value: str) -> str:
 class RedisRateLimiter:
     """Buckets in Redis, shared by every replica that uses the same ``key_prefix``.
 
-    The client is built, configured and closed by the caller. Keys hold a hash of the subject or
-    organization, never the value. Every call is bounded; a failure raises
-    ``RateLimitUnavailableError`` so the caller fails closed instead of letting traffic through
+    The Redis handle is the state backend's: it is built and closed by the state, and every call
+    goes through its bounded ``run`` so the limiter shares the state's timeout and error mapping.
+    Keys hold a hash of the subject or organization, never the value. A failure raises
+    ``StateUnavailableError`` so the caller fails closed instead of letting traffic through
     unmetered.
     """
 
     _SCOPE_TAG: dict[Scope, str] = {"subject": "s", "organization": "o"}
 
-    def __init__(
-        self,
-        client: aioredis.Redis,
-        key_prefix: str,
-        operation_timeout_seconds: float,
-    ) -> None:
-        if operation_timeout_seconds <= 0:
-            raise ValueError("operation_timeout_seconds must be positive")
-        self._script = client.register_script(_ACQUIRE_LUA)
+    def __init__(self, redis: BoundedRedis, key_prefix: str) -> None:
+        self._redis = redis
+        self._script = redis.client.register_script(_ACQUIRE_LUA)
         self._prefix = key_prefix
-        self._timeout = operation_timeout_seconds
 
     def _key(self, spec: BucketSpec) -> str:
         return f"{self._prefix}rl:{self._SCOPE_TAG[spec.scope]}:{_digest(spec.key)}"
@@ -247,12 +239,7 @@ class RedisRateLimiter:
         args: list[str] = []
         for spec in buckets:
             args.extend((str(spec.burst), repr(spec.tokens_per_second / 1000.0)))
-        try:
-            with anyio.fail_after(self._timeout):
-                reply = await self._script(keys=keys, args=args)
-        except _STORE_ERRORS as exc:
-            logger.error("rate limit store failed (%s)", type(exc).__name__)
-            raise RateLimitUnavailableError(type(exc).__name__) from exc
+        reply = await self._redis.run(self._script(keys=keys, args=args))
         return self._decision(reply, buckets)
 
     @staticmethod
@@ -265,3 +252,18 @@ class RedisRateLimiter:
         if not 1 <= slowest <= len(buckets):
             raise RateLimitUnavailableError("unexpected reply from the rate limit script")
         return Decision(False, _retry_after(wait_ms / 1000.0), buckets[slowest - 1].scope)
+
+
+def build_rate_limiter(config: RateLimitsConfig | None, state: State) -> RateLimiter | None:
+    """The limiter ``policies.rate_limits`` asks for, on the same backend as the rest of the state.
+
+    Redis state: one set of buckets shared by every replica, reached through the state's bounded
+    client. Memory state: per-process buckets, exact for a single replica only.
+    """
+    if config is None:
+        return None
+    if state.redis is None:
+        return MemoryRateLimiter(clock=time.monotonic)
+    if state.key_prefix is None:
+        raise ValueError("a state with a Redis client must carry its key prefix")
+    return RedisRateLimiter(state.redis, state.key_prefix)

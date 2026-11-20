@@ -12,6 +12,7 @@ from starlette.applications import Starlette
 
 from mcp_gateway.app import create_app
 from mcp_gateway.config import GatewayConfig, ResolverCacheConfig
+from mcp_gateway.ratelimit import MemoryRateLimiter, RedisRateLimiter, build_rate_limiter
 from mcp_gateway.resolver import (
     CachingResolver,
     Credential,
@@ -228,12 +229,15 @@ async def test_a_session_survives_the_memory_store_end_to_end(
 # --- readiness ------------------------------------------------------------------------
 
 
-def dead_redis_config(tmp_path: Path, mapping_file: str) -> GatewayConfig:
+def dead_redis_config(
+    tmp_path: Path, mapping_file: str, rate_limits: dict[str, Any] | None = None
+) -> GatewayConfig:
     """A redis state whose server does not exist: nothing listens on port 1."""
     (tmp_path / "url").write_text("redis://127.0.0.1:1/0\n")
     (tmp_path / "key").write_text(base64.b64encode(bytes(32)).decode() + "\n")
     data = base_config_dict(mapping_file)
     data["sessions"]["max_entries"] = None
+    data["policies"]["rate_limits"] = rate_limits
     data["state"] = {
         "type": "redis",
         "url_file": str(tmp_path / "url"),
@@ -293,3 +297,42 @@ def test_build_state_exposes_the_redis_client_and_prefix_for_other_features(
     assert state.key_prefix == "t:"
     memory = build_state(config_from(base_config_dict()))
     assert (memory.redis, memory.key_prefix) == (None, None)
+
+
+ONE_SUBJECT_BUCKET = {"per_subject": {"burst": 5, "per_minute": 60}, "per_organization": None}
+
+
+def test_rate_limits_off_builds_no_limiter(mapping_dir: Path, tmp_path: Path) -> None:
+    config = dead_redis_config(tmp_path, str(mapping_dir / "mapping.json"))
+    assert build_rate_limiter(config.policies.rate_limits, build_state(config)) is None
+
+
+def test_a_memory_state_builds_the_in_process_limiter(mapping_dir: Path) -> None:
+    data = base_config_dict(str(mapping_dir / "mapping.json"))
+    data["policies"]["rate_limits"] = ONE_SUBJECT_BUCKET
+    config = config_from(data)
+    limiter = build_rate_limiter(config.policies.rate_limits, build_state(config))
+    assert isinstance(limiter, MemoryRateLimiter)
+
+
+def test_a_redis_state_builds_the_shared_limiter_on_the_states_client(
+    mapping_dir: Path, tmp_path: Path
+) -> None:
+    config = dead_redis_config(tmp_path, str(mapping_dir / "mapping.json"), ONE_SUBJECT_BUCKET)
+    limiter = build_rate_limiter(config.policies.rate_limits, build_state(config))
+    assert isinstance(limiter, RedisRateLimiter)
+
+
+async def test_a_dead_redis_fails_rate_limited_requests_closed(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    token: str,
+    tmp_path: Path,
+) -> None:
+    config = dead_redis_config(tmp_path, str(mapping_dir / "mapping.json"), ONE_SUBJECT_BUCKET)
+    app = create_app(config, http_transport=transport)
+    async with client_for(app) as http:
+        response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
+    assert_state_unavailable(response)
+    assert upstream.requests == []

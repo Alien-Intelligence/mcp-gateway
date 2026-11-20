@@ -55,10 +55,9 @@ from mcp_gateway.proxy import (
     watching_disconnect,
 )
 from mcp_gateway.ratelimit import (
-    MemoryRateLimiter,
     RateLimiter,
-    RateLimitUnavailableError,
     bucket_specs,
+    build_rate_limiter,
 )
 from mcp_gateway.resolver import (
     CachingResolver,
@@ -280,17 +279,9 @@ class Gateway:
             return None
         try:
             decision = await limiter.acquire(buckets)
-        except RateLimitUnavailableError as exc:
+        except StateUnavailableError as exc:
             logger.error("rate limit state unavailable: %s", exc)
-            audit.emit(status=503, outcome="state_unavailable")
-            response = json_rpc_response(
-                503,
-                STATE_UNAVAILABLE,
-                STATE_UNAVAILABLE_MESSAGE,
-                rpc.id if rpc.expects_reply else None,
-            )
-            response.headers["Retry-After"] = str(STATE_RETRY_AFTER_SECONDS)
-            return response
+            return _state_unavailable(audit, rpc.id if rpc.expects_reply else None)
         if decision.allowed:
             return None
         audit.reason = decision.limited_scope
@@ -534,8 +525,8 @@ def create_app(
     """
     if state is None:
         state = build_state(config, session_clock=session_clock)
-    if rate_limiter is None and config.policies.rate_limits is not None:
-        rate_limiter = MemoryRateLimiter(clock=time.monotonic)
+    if rate_limiter is None:
+        rate_limiter = build_rate_limiter(config.policies.rate_limits, state)
     telemetry = build_telemetry(
         config.observability, span_exporter=span_exporter, metric_reader=metric_reader
     )
