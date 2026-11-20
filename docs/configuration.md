@@ -225,13 +225,29 @@ An object from upstream name to settings. The name is what resolvers return in `
 |---|---|---|---|
 | `url` | string, http(s) URL | | The upstream MCP endpoint. Requests are forwarded to exactly this URL. |
 | `connect_timeout_seconds` | number | gt 0 | |
-| `read_timeout_seconds` | number | gt 0 | Longest silence on a response. Under `policies.tools` it is also the wall-clock total for reading a buffered `tools/list` JSON body (see `limits.max_filtered_response_bytes`): a body still arriving after that many seconds ends the request with `504` (`-32004`). |
+| `read_timeout_seconds` | number | gt 0 | Longest silence on a response. It is also the ceiling for an upstream request that runs on after its client left (see [Client disconnects](#client-disconnects)). Under `policies.tools` it is also the wall-clock total for reading a buffered `tools/list` JSON body (see `limits.max_filtered_response_bytes`): a body still arriving after that many seconds ends the request with `504` (`-32004`). |
 | `write_timeout_seconds` | number | gt 0 | |
 | `pool_timeout_seconds` | number | gt 0 | Wait for a pooled connection. |
 
 Only these client headers reach the upstream: `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` and `User-Agent`. The gateway adds `Authorization: Bearer <api key>` and `Accept-Encoding: identity`. Trace context is not propagated to the upstream. On the way back, hop-by-hop headers, `WWW-Authenticate`, `Set-Cookie` and `X-Request-Id` are removed.
 
 Gateway-made errors: an upstream `401` or `402` is never relayed; the client gets a JSON-RPC error (`-32001` or `-32002`) with HTTP `200` for a request that expects a reply and `502` otherwise. A timeout is `504` (`-32004`), an unreachable upstream `502` (`-32003`).
+
+## Client disconnects
+
+A client that disconnects does not cancel an upstream request the gateway already sent. This is a deliberate decision ("disconnect is not a cancellation"), and it departs from the 2026-07-28 MCP rule that closing the stream cancels the request: the upstream finishes its work (and meters it), and the connection goes back to its pool cleanly. The only cancellation the gateway honours is an explicit `notifications/cancelled` from the client (2025 protocol versions): it is forwarded like any other notification, and no tool policy blocks it.
+
+| Request | Client disconnects |
+|---|---|
+| `POST` carrying a JSON-RPC request (an `id` and a `method`), already sent upstream | The gateway keeps reading the upstream response and discards it (nothing is buffered), then closes it. This holds while waiting for the response headers, during an SSE or JSON relay, while a `tools/list` body is read for filtering under `policies.tools`, and while the body of an upstream `401`, `402` or failed `tools/list` is drained (the rejected credential is still invalidated). |
+| `POST` notification or client response (no reply expected), `GET` listen stream, `DELETE` | The upstream response is closed at once. There is nothing to complete. |
+| Any request not yet sent upstream (authentication, rate limit, credential lookup, session check) | Abandoned: nothing is in flight, so nothing is forwarded. |
+
+The request's audit line is written when the client leaves: status `499`, outcome `client_disconnected`. What the upstream does afterwards is not a second audit line, it is the metric and the log line below.
+
+**Ceiling.** The part of a request that runs on after its client left is bounded by the upstream's `read_timeout_seconds` as a wall-clock total, on top of the per-read timeouts (the clock starts when the client leaves). When it expires the upstream response is closed and the request is counted as `timeout`. The reads are owned by the application: at shutdown the lifespan cancels what is left and waits for it to close its responses (10 s at most).
+
+**Metrics.** `mcp_gateway.upstream.detached` counts upstream requests that ran on after their client left, by `upstream` and `result`: `completed` (the response was read to its end), `timeout` (the ceiling, or an upstream read timeout) or `failed` (the upstream broke the stream, or the read was cancelled at shutdown). `mcp_gateway.upstream.detached.active` is the number running now. Each one also logs one INFO line (`detached upstream read ended`) with the upstream name, the result and the duration.
 
 ## `limits`
 
@@ -473,6 +489,8 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.request.duration` | histogram | `s` | same as `mcp_gateway.requests` |
 | `mcp_gateway.upstream.duration` | histogram | `s` | `upstream`, `status_class` (`error` when no response came). Time to the response headers. |
 | `mcp_gateway.resolver.lookups` | counter | `{lookup}` | `resolver_type`, `cache`, `result` (values as in the resolver span) |
+| `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`). Upstream requests that ran on after their client left. |
+| `mcp_gateway.upstream.detached.active` | observable gauge | `{request}` | none |
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
 | `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |
 
