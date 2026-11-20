@@ -42,7 +42,7 @@ def resolver_for(tmp_path: Path, port: int) -> RedisStoreResolver:
                 "type": "store_redis",
                 "url_file": str(url_file),
                 "key_pattern": "k:{subject}",
-                "default_upstream": "primary",
+                "default_upstream": "main",
                 "connect_timeout_seconds": 0.3,
                 "socket_timeout_seconds": 0.3,
                 "max_connections": 2,
@@ -50,7 +50,7 @@ def resolver_for(tmp_path: Path, port: int) -> RedisStoreResolver:
         ),
         strict=True,
     )
-    return RedisStoreResolver(config, ["primary"])
+    return RedisStoreResolver(config, ["main"])
 
 
 async def test_a_dropped_connection_is_not_retried_by_the_client(tmp_path: Path) -> None:

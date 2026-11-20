@@ -20,7 +20,7 @@ from .conftest import TrackedStream
 
 SSE = {"Content-Type": "text/event-stream"}
 EVENT = b'data: {"jsonrpc":"2.0","method":"notifications/progress"}\n\n'
-UPSTREAM = "primary"
+UPSTREAM = "main"
 SESSION = "sess-1"
 
 

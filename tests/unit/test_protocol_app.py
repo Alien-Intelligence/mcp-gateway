@@ -42,7 +42,7 @@ def two_user_dir(tmp_path: Path) -> Path:
             {
                 "match": {"email": f"{who}@client-x.example"},
                 "api_key_file": f"{who}.key",
-                "upstream": "primary",
+                "upstream": "main",
                 "labels": {"client": who},
             }
         )

@@ -5,7 +5,7 @@ from mcp_gateway.identity import Identity
 from mcp_gateway.resolver import ChainResolver, Credential, Denied, ResolverError
 
 ID = Identity(subject="u", email=None, organization=None, groups=(), claims={})
-KEY = Credential(api_key=SecretStr("fake-alien-key-k"), upstream="primary", labels={})
+KEY = Credential(api_key=SecretStr("fake-alien-key-k"), upstream="main", labels={})
 
 
 class Member:

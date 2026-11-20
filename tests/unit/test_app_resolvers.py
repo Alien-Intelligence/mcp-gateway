@@ -163,7 +163,7 @@ async def test_config_builds_the_cached_resolver_and_the_lifespan_closes_it(
         "url": server.url(),
         "auth": {"type": "hmac", "secret_file": secret_file},
         "ca_file": None,
-        "default_upstream": "primary",
+        "default_upstream": "main",
         "allow_insecure_http": True,
         "timeout_seconds": 2,
         "total_timeout_seconds": 10,

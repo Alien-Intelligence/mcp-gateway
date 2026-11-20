@@ -650,7 +650,7 @@ async def test_upstream_auth_failure_becomes_jsonrpc_error_with_http_200(
     upstream_status: int,
     code: int,
 ) -> None:
-    spy = SpyResolver(StaticResolver(mapping_dir / "mapping.json", ["primary"], email_matching=True))
+    spy = SpyResolver(StaticResolver(mapping_dir / "mapping.json", ["main"], email_matching=True))
     upstream.responder = lambda _r: httpx.Response(
         upstream_status,
         json={"detail": "internal upstream detail"},
@@ -831,7 +831,7 @@ async def test_audit_line_for_a_forwarded_tool_call(
     assert line["tool"] == "search"
     assert line["status"] == 200
     assert line["outcome"] == "forwarded"
-    assert line["upstream"] == "primary"
+    assert line["upstream"] == "main"
     assert line["upstream_status"] == 200
     assert line["latency_ms"] >= 0
 

@@ -50,7 +50,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
         "resolver": {"type": "static", "mapping_file": mapping_file},
         "resolver_cache": None,
         "upstreams": {
-            "primary": {
+            "main": {
                 "url": UPSTREAM_URL,
                 "connect_timeout_seconds": 10,
                 "read_timeout_seconds": 130,
@@ -225,7 +225,7 @@ def mapping_dir(tmp_path: Path) -> Path:
                     {
                         "match": {"email": "alice@client-x.example"},
                         "api_key_file": "alice.key",
-                        "upstream": "primary",
+                        "upstream": "main",
                         "labels": {"client": "client-x"},
                     }
                 ]

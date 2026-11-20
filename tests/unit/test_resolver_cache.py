@@ -14,7 +14,7 @@ def identity(subject: str = "u1", groups: tuple[str, ...] = ()) -> Identity:
 
 
 def credential(ttl: float | None = None, key: str = "fake-alien-key-one") -> Credential:
-    return Credential(api_key=SecretStr(key), upstream="primary", labels={}, ttl_seconds=ttl)
+    return Credential(api_key=SecretStr(key), upstream="main", labels={}, ttl_seconds=ttl)
 
 
 class Clock:

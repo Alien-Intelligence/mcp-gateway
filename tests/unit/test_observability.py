@@ -156,7 +156,7 @@ async def test_a_forwarded_tool_call_has_a_span_tree_metrics_and_matching_ids(
         "mcp_gateway.session.present": False,
         "mcp.method.name": "tools/call",
         "mcp.tool.name": "search",
-        "mcp_gateway.upstream": "primary",
+        "mcp_gateway.upstream": "main",
         "mcp_gateway.upstream.status_code": 200,
         "mcp_gateway.label.client": "client-x",
     }
@@ -172,7 +172,7 @@ async def test_a_forwarded_tool_call_has_a_span_tree_metrics_and_matching_ids(
     }
     assert upstream_span.kind == SpanKind.CLIENT
     assert attributes_of(upstream_span) == {
-        "mcp_gateway.upstream": "primary",
+        "mcp_gateway.upstream": "main",
         "http.response.status_code": 200,
     }
 
@@ -182,12 +182,12 @@ async def test_a_forwarded_tool_call_has_a_span_tree_metrics_and_matching_ids(
         "outcome": "forwarded",
         "status_class": "2xx",
         "rpc_method": "tools/call",
-        "upstream": "primary",
+        "upstream": "main",
     }
     (duration,) = metric_points(observed.reader, "mcp_gateway.request.duration")
     assert duration.count == 1
     (up_duration,) = metric_points(observed.reader, "mcp_gateway.upstream.duration")
-    assert dict(up_duration.attributes) == {"upstream": "primary", "status_class": "2xx"}
+    assert dict(up_duration.attributes) == {"upstream": "main", "status_class": "2xx"}
     (lookup,) = metric_points(observed.reader, "mcp_gateway.resolver.lookups")
     assert dict(lookup.attributes) == {
         "resolver_type": "static",
@@ -283,7 +283,7 @@ async def test_an_unreachable_upstream_is_an_error_span_without_a_message(
     assert attributes_of(upstream_span)["mcp_gateway.upstream.error"] == "unreachable"
     assert "secret-host-detail" not in request_span.to_json() + upstream_span.to_json()
     (up_duration,) = metric_points(observed.reader, "mcp_gateway.upstream.duration")
-    assert dict(up_duration.attributes) == {"upstream": "primary", "status_class": "error"}
+    assert dict(up_duration.attributes) == {"upstream": "main", "status_class": "error"}
 
 
 # --- request ids ----------------------------------------------------------------------------
@@ -673,7 +673,7 @@ async def test_no_secret_or_identifier_reaches_a_span_a_metric_or_the_audit_line
                     {
                         "match": {"email": EMAIL},
                         "api_key_file": "carol.key",
-                        "upstream": "primary",
+                        "upstream": "main",
                         "labels": {"tier": "gold"},
                     }
                 ]
