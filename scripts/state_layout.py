@@ -75,11 +75,12 @@ STUB_ROUTING = Routing(
         "unpaid": STATEFUL,
     },
     store={"alice": STATELESS, "bob": STATEFUL, "carol": None, "dave": None},
-    # Only bob is stateful: the shared-session tests need a session on the replicas.
+    # Bob and carol are stateful (the shared-session tests: bob owns a session, carol tries to use
+    # it), everyone else stateless.
     ha={
         "alice": None,
         "bob": STATEFUL,
-        "carol": None,
+        "carol": STATEFUL,
         "dave": None,
         "erin": None,
         "frank": None,
