@@ -535,18 +535,26 @@ class TokenBucketConfig(_Model):
 
 
 class RateLimitsConfig(_Model):
-    """Token buckets per subject and per organization; each null scope is not limited."""
+    """Token buckets per subject and, optionally, per organization.
 
-    per_subject: TokenBucketConfig | None
+    ``per_subject`` is required: a subject whose token carries no organization is charged to no
+    organization bucket, so without a subject bucket it would be unlimited.
+    """
+
+    per_subject: TokenBucketConfig
+    # null does not limit organizations.
     per_organization: TokenBucketConfig | None
 
-    @model_validator(mode="after")
-    def _at_least_one_scope(self) -> Self:
-        if self.per_subject is None and self.per_organization is None:
+    @field_validator("per_subject", mode="before")
+    @classmethod
+    def _per_subject_is_required(cls, value: object) -> object:
+        if value is None:
             raise ValueError(
-                "rate_limits needs per_subject or per_organization (use null to disable limiting)"
+                "per_subject is required when rate_limits is set: a subject without an "
+                "organization would otherwise be unlimited (use rate_limits null to turn "
+                "limiting off)"
             )
-        return self
+        return value
 
 
 class PoliciesConfig(_Model):
@@ -616,6 +624,27 @@ class GatewayConfig(_Model):
                 raise ValueError(f"{name} is required when state.type is memory")
             if self.state.type == "redis" and value is not None:
                 raise ValueError(f"{name} must be null when state.type is redis")
+        return self
+
+    @model_validator(mode="after")
+    def _organization_policies_need_an_organization_claim(self) -> Self:
+        """Policies keyed on the organization cannot work when no claim carries one."""
+        if self.auth.identity.organization is not None:
+            return self
+        limits = self.policies.rate_limits
+        if limits is not None and limits.per_organization is not None:
+            raise ValueError(
+                "policies.rate_limits.per_organization needs auth.identity.organization "
+                "(no organization claim is read, so no request has an organization)"
+            )
+        tools = self.policies.tools
+        if tools is not None and any(
+            isinstance(rule.match, OrganizationMatchConfig) for rule in tools.rules
+        ):
+            raise ValueError(
+                "a policies.tools rule matching on organization needs auth.identity.organization "
+                "(no organization claim is read, so the rule could never match)"
+            )
         return self
 
     @property

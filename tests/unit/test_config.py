@@ -295,6 +295,7 @@ def test_rate_limits_null_is_accepted_and_both_scopes_parse(config_dict: dict[st
     "rate_limits",
     [
         {"per_subject": None, "per_organization": None},
+        {"per_subject": None, "per_organization": {"burst": 1, "per_minute": 1}},
         {"per_subject": {"burst": 0, "per_minute": 1}, "per_organization": None},
         {"per_subject": {"burst": 1, "per_minute": 0}, "per_organization": None},
         {"per_subject": {"burst": 1, "per_minute": -3}, "per_organization": None},
@@ -316,6 +317,49 @@ def test_invalid_rate_limits_are_refused(
     config_dict["policies"]["rate_limits"] = rate_limits
     with pytest.raises(ConfigError, match="rate_limits"):
         _parse(config_dict)
+
+
+def test_a_null_per_subject_says_why_it_is_refused(config_dict: dict[str, Any]) -> None:
+    config_dict["policies"]["rate_limits"] = {
+        "per_subject": None,
+        "per_organization": {"burst": 1, "per_minute": 1},
+    }
+    with pytest.raises(ConfigError, match="per_subject is required.*without an organization"):
+        _parse(config_dict)
+
+
+def test_per_organization_is_optional_and_needs_an_organization_claim(
+    config_dict: dict[str, Any],
+) -> None:
+    both = {
+        "per_subject": {"burst": 1, "per_minute": 1},
+        "per_organization": {"burst": 2, "per_minute": 2},
+    }
+    config_dict["policies"]["rate_limits"] = both
+    assert config_from(config_dict).policies.rate_limits is not None
+    config_dict["auth"]["identity"]["organization"] = None
+    with pytest.raises(ConfigError, match="per_organization.*auth.identity.organization"):
+        _parse(config_dict)
+    config_dict["policies"]["rate_limits"] = {**both, "per_organization": None}
+    assert config_from(config_dict).policies.rate_limits is not None
+
+
+def test_an_organization_tool_rule_needs_an_organization_claim(
+    config_dict: dict[str, Any],
+) -> None:
+    config_dict["policies"]["tools"] = {
+        "default": {"allow": None, "deny": []},
+        "rules": [{"match": {"organization": "client-x"}, "allow": None, "deny": ["delete_*"]}],
+    }
+    assert config_from(config_dict).policies.tools is not None
+    config_dict["auth"]["identity"]["organization"] = None
+    with pytest.raises(ConfigError, match="organization.*auth.identity.organization"):
+        _parse(config_dict)
+    # A label rule never reads the organization.
+    config_dict["policies"]["tools"]["rules"] = [
+        {"match": {"label": {"name": "tier", "value": "basic"}}, "allow": None, "deny": []}
+    ]
+    assert config_from(config_dict).policies.tools is not None
 
 
 def test_rate_limits_accept_the_documented_extremes(config_dict: dict[str, Any]) -> None:

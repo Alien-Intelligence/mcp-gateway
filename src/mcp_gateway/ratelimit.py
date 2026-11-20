@@ -75,16 +75,12 @@ def bucket_specs(
 ) -> list[BucketSpec]:
     """The buckets one request draws from.
 
-    A subject whose token carries no organization is limited per subject only: there is no
-    organization to charge.
+    The subject bucket is always drawn. A subject whose token carries no organization is charged
+    to no organization bucket: there is none to charge, and the subject bucket still limits it.
     """
-    specs: list[BucketSpec] = []
-    if limits.per_subject is not None:
-        specs.append(
-            BucketSpec(
-                "subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute
-            )
-        )
+    specs = [
+        BucketSpec("subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute)
+    ]
     if limits.per_organization is not None and organization is not None:
         specs.append(
             BucketSpec(

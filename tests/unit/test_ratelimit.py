@@ -177,31 +177,29 @@ async def test_memory_stays_bounded_under_a_stream_of_one_shot_subjects(
     assert limiter.tracked_buckets <= 2 * MemoryRateLimiter._MIN_SWEEP_SIZE
 
 
-def _limits(per_subject: bool, per_organization: bool) -> RateLimitsConfig:
+def _limits(per_organization: bool) -> RateLimitsConfig:
     return RateLimitsConfig(
-        per_subject=TokenBucketConfig(burst=3, per_minute=6.0) if per_subject else None,
+        per_subject=TokenBucketConfig(burst=3, per_minute=6.0),
         per_organization=TokenBucketConfig(burst=9, per_minute=12.0) if per_organization else None,
     )
 
 
 def test_bucket_specs_with_an_organization_draw_from_both() -> None:
-    specs = bucket_specs(_limits(True, True), subject_key="iss\x1fu1", organization="acme")
+    specs = bucket_specs(_limits(True), subject_key="iss\x1fu1", organization="acme")
     assert specs == [
         BucketSpec("subject", "iss\x1fu1", 3, 6.0),
         BucketSpec("organization", "acme", 9, 12.0),
     ]
 
 
-def test_bucket_specs_without_an_organization_limit_the_subject_only() -> None:
-    specs = bucket_specs(_limits(True, True), subject_key="iss\x1fu1", organization=None)
+def test_a_subject_without_an_organization_is_still_limited_per_subject() -> None:
+    specs = bucket_specs(_limits(True), subject_key="iss\x1fu1", organization=None)
     assert [spec.scope for spec in specs] == ["subject"]
 
 
-def test_bucket_specs_skip_a_scope_configured_null() -> None:
-    assert [
-        s.scope for s in bucket_specs(_limits(False, True), subject_key="k", organization="o")
-    ] == ["organization"]
-    assert bucket_specs(_limits(False, True), subject_key="k", organization=None) == []
+def test_bucket_specs_skip_an_organization_scope_configured_null() -> None:
+    specs = bucket_specs(_limits(False), subject_key="k", organization="o")
+    assert [spec.scope for spec in specs] == ["subject"]
 
 
 async def test_the_memory_limiter_caps_an_enormous_wait(limiter: MemoryRateLimiter) -> None:

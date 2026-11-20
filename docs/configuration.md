@@ -356,10 +356,10 @@ The policy runs after the credential is resolved and the session checked, before
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
-| `per_subject` | object or null | | One bucket per subject (the issuer and the subject claim together). `null` does not limit subjects. |
-| `per_organization` | object or null | | One bucket shared by every subject whose token carries the same organization. `null` does not limit organizations. |
+| `per_subject` | object | required, never `null` | One bucket per subject (the issuer and the subject claim together). It is required because a subject whose token carries no organization is charged to no organization bucket: without a subject bucket it would be unlimited. |
+| `per_organization` | object or `null` | needs `auth.identity.organization` when set | One bucket shared by every subject whose token carries the same organization. `null` does not limit organizations. The config is refused when it is set but `auth.identity.organization` is `null`: no request would carry an organization. |
 
-At least one of the two must be non-null (use `"rate_limits": null` to turn the feature off). A bucket has two keys, both required:
+`per_subject` must be present (use `"rate_limits": null` to turn the feature off). A bucket has two keys, both required:
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
@@ -370,7 +370,7 @@ What a token is: every authenticated request to the MCP endpoint (any method: `P
 
 Burst against rate, worked example with `{"burst": 30, "per_minute": 60}`: a new subject can send 30 requests at once, then one per second. After 30 s of silence it has 30 tokens back. A subject sending steadily 1.5 requests per second drains the bucket at 0.5 tokens per second and is refused after about 60 s, then gets through one request per second. `burst` sets how large a spike is tolerated; `per_minute` sets the sustained rate.
 
-Subject and organization: with both set, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (`auth.identity.organization` is `null` or the claim is absent) is limited per subject only.
+Subject and organization: with both set, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (the claim is absent) is charged to its subject bucket only. A `policies.tools` rule matching on `organization` is likewise refused when `auth.identity.organization` is `null`: it could never match.
 
 The refusal has three shapes, chosen so that the sender can read it:
 
