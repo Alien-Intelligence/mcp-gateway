@@ -2,7 +2,13 @@ import json
 
 import pytest
 
-from mcp_gateway.jsonrpc import NO_RPC, check_mcp_headers, error_body, parse_request
+from mcp_gateway.jsonrpc import (
+    NO_RPC,
+    check_mcp_headers,
+    error_body,
+    is_tool_batch,
+    parse_request,
+)
 
 
 def test_single_request_with_id() -> None:
@@ -131,3 +137,11 @@ def test_a_client_response_is_not_a_request_that_expects_a_reply(body: bytes) ->
     info = parse_request(body)
     assert info.method is None
     assert info.expects_reply is False
+
+
+DEEP = b"[" * 10_000 + b"]" * 10_000
+
+
+def test_a_deeply_nested_body_is_unreadable_not_a_crash() -> None:
+    assert parse_request(DEEP) == NO_RPC
+    assert is_tool_batch(DEEP) is False

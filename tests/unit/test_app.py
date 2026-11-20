@@ -1106,3 +1106,21 @@ async def test_a_refusal_of_a_client_response_has_a_null_id(
     assert response.status_code == 404
     assert response.json()["id"] is None
     assert upstream.requests == []
+
+
+async def test_a_deeply_nested_body_is_forwarded_like_any_unreadable_body(
+    client: httpx.AsyncClient,
+    token: str,
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Parsing must not recurse past the interpreter limit into a 500 with a traceback."""
+    body = b"[" * 10_000 + b"]" * 10_000
+    with caplog.at_level(logging.INFO):
+        response = await client.post(
+            "/mcp", content=body, headers={**bearer(token), "Content-Type": "application/json"}
+        )
+    assert response.status_code == 200
+    (sent,) = upstream.requests
+    assert sent.content == body
+    assert not [r for r in caplog.records if r.exc_info]

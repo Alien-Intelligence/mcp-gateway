@@ -69,8 +69,9 @@ def parse_request(body: bytes) -> RpcInfo:
         return NO_RPC
     try:
         document: Any = json.loads(body)
-    except ValueError:
-        # Not JSON (or not UTF-8): forwarded untouched, method unknown.
+    except (ValueError, RecursionError):
+        # Not JSON, not UTF-8, or nested past the interpreter's limit: forwarded untouched,
+        # method unknown.
         return NO_RPC
     if not isinstance(document, dict):
         return NO_RPC
@@ -101,7 +102,7 @@ def is_tool_batch(body: bytes) -> bool:
     """
     try:
         document: Any = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     return isinstance(document, list) and any(
         isinstance(element, dict) and element.get("method") in TOOL_METHODS for element in document
