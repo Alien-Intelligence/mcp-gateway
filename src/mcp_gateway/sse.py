@@ -41,19 +41,6 @@ class TruncatedEventError(SseError):
 _LINE_BREAK = re.compile(rb"\r\n|\r|\n")
 
 
-def _line_end(buffer: bytes | bytearray, start: int, *, at_end: bool) -> tuple[int, int] | None:
-    """Locate the line starting at ``start``: ``(content end, next line start)``.
-
-    None when the line is not terminated yet. A lone ``\\r`` at the very end of the buffer is
-    ambiguous (it may be the first half of ``\\r\\n``) so it counts as unterminated, unless
-    the upstream has ended (``at_end``). Only a CR-only server is delayed by this.
-    """
-    found = _LINE_BREAK.search(buffer, start)
-    if found is None or (found.group() == b"\r" and found.end() == len(buffer) and not at_end):
-        return None
-    return found.start(), found.end()
-
-
 def _data_of(event: bytes) -> bytes:
     """The joined ``data`` field values of one event (SSE field parsing, simplified)."""
     values: list[bytes] = []
@@ -92,6 +79,9 @@ class SseEventSplitter:
         # would rescan the whole buffer (quadratic in the event size).
         self._scan_from = 0
         self._scan_has_field = False
+        # Where the search for a line break resumes inside that unterminated line, so a long
+        # line is searched once however many chunks it arrives in.
+        self._search_from = 0
 
     def feed(self, chunk: bytes) -> Iterator[bytes]:
         self._buffer.extend(chunk)
@@ -110,7 +100,7 @@ class SseEventSplitter:
         """Index just past the pending event (ending in a blank line), or None if incomplete."""
         position = self._scan_from
         has_field = self._scan_has_field
-        while (located := _line_end(self._buffer, position, at_end=at_end)) is not None:
+        while (located := self._line_end(position, at_end=at_end)) is not None:
             content_end, next_start = located
             if content_end == position:
                 if has_field:
@@ -121,6 +111,23 @@ class SseEventSplitter:
             self._scan_from, self._scan_has_field = position, has_field
         return None
 
+    def _line_end(self, start: int, *, at_end: bool) -> tuple[int, int] | None:
+        """Locate the line starting at ``start``: ``(content end, next line start)``.
+
+        None when the line is not terminated yet. A lone ``\\r`` at the very end of the buffer
+        is ambiguous (it may be the first half of ``\\r\\n``) so it counts as unterminated,
+        unless the upstream has ended (``at_end``). Only a CR-only server is delayed by this.
+        """
+        found = _LINE_BREAK.search(self._buffer, max(start, self._search_from))
+        if found is None:
+            # Nothing searched so far holds a break, a trailing CR included.
+            self._search_from = len(self._buffer)
+            return None
+        if found.group() == b"\r" and found.end() == len(self._buffer) and not at_end:
+            self._search_from = found.start()
+            return None
+        return found.start(), found.end()
+
     def _events(self, *, at_end: bool) -> Iterator[bytes]:
         while (end := self._event_end(at_end=at_end)) is not None:
             if end > self._max:
@@ -128,6 +135,7 @@ class SseEventSplitter:
             event = bytes(self._buffer[:end])
             del self._buffer[:end]
             self._scan_from, self._scan_has_field = 0, False
+            self._search_from = 0
             if (
                 self._request_id is not None
                 and not self.reply_relayed
