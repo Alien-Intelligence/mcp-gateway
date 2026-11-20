@@ -6,7 +6,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -14,16 +14,33 @@ from typing import Any
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import (
+    OTLPMetricExporter as HttpMetricExporter,
+)
 from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import (
     ExportMetricsServiceRequest,
 )
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
 from opentelemetry.proto.common.v1.common_pb2 import KeyValue
+from opentelemetry.sdk.metrics import Counter, Histogram
+from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
+    MetricExporter,
+    MetricExportResult,
+    MetricsData,
+)
+from opentelemetry.sdk.metrics.view import DropAggregation
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from mcp_gateway.app import create_app
-from mcp_gateway.config import ConfigError, parse_config
+from mcp_gateway.config import ConfigError, OtlpConfig, parse_config
 from mcp_gateway.telemetry import (
     REQUEST_SPAN,
+    TelemetryFailures,
+    _CountingMetricExporter,
+    _CountingSpanExporter,
+    _exporters,
     bounded_shutdown,
     build_telemetry,
     read_headers_file,
@@ -368,3 +385,119 @@ def test_the_allow_insecure_http_key_is_required() -> None:
 )
 def test_the_auth_header_travels_in_clear_only_when_allowed(changes: dict[str, Any]) -> None:
     parse_config(json.dumps(with_otlp(**changes)))
+
+
+# --- exporter failures are counted, never changed ---------------------------------------------
+
+
+class _ScriptedSpanExporter(SpanExporter):
+    def __init__(self, outcome: SpanExportResult | Exception) -> None:
+        self.outcome = outcome
+        self.calls = 0
+
+    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+        self.calls += 1
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+
+class _ScriptedMetricExporter(MetricExporter):
+    def __init__(self, outcome: MetricExportResult | Exception) -> None:
+        super().__init__(
+            preferred_temporality={Counter: AggregationTemporality.DELTA},
+            preferred_aggregation={Histogram: DropAggregation()},
+        )
+        self.outcome = outcome
+        self.flushed: list[float] = []
+        self.shut_down: list[float] = []
+
+    def export(
+        self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: object
+    ) -> MetricExportResult:
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    def force_flush(self, timeout_millis: float = 10_000) -> bool:
+        self.flushed.append(timeout_millis)
+        return True
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        self.shut_down.append(timeout_millis)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "counted"),
+    [(SpanExportResult.SUCCESS, 0), (SpanExportResult.FAILURE, 1)],
+)
+def test_a_span_export_result_is_returned_unchanged_and_failures_counted(
+    outcome: SpanExportResult, counted: int
+) -> None:
+    failures = TelemetryFailures()
+    wrapper = _CountingSpanExporter(_ScriptedSpanExporter(outcome), failures)
+    assert wrapper.export([]) is outcome
+    assert failures.snapshot() == {"record": 0, "traces": counted, "metrics": 0}
+
+
+def test_a_span_export_that_raises_is_counted_and_reraised_as_is() -> None:
+    failures = TelemetryFailures()
+    boom = ConnectionError("collector down")
+    wrapper = _CountingSpanExporter(_ScriptedSpanExporter(boom), failures)
+    with pytest.raises(ConnectionError) as raised:
+        wrapper.export([])
+    assert raised.value is boom
+    assert failures.snapshot()["traces"] == 1
+
+
+@pytest.mark.parametrize(
+    ("outcome", "counted"),
+    [(MetricExportResult.SUCCESS, 0), (MetricExportResult.FAILURE, 1)],
+)
+def test_a_metric_export_result_is_returned_unchanged_and_failures_counted(
+    outcome: MetricExportResult, counted: int
+) -> None:
+    failures = TelemetryFailures()
+    wrapper = _CountingMetricExporter(_ScriptedMetricExporter(outcome), failures)
+    assert wrapper.export(MetricsData(resource_metrics=[])) is outcome
+    assert failures.snapshot() == {"record": 0, "traces": 0, "metrics": counted}
+
+
+def test_a_metric_export_that_raises_is_counted_and_reraised_as_is() -> None:
+    failures = TelemetryFailures()
+    boom = TimeoutError("collector slow")
+    wrapper = _CountingMetricExporter(_ScriptedMetricExporter(boom), failures)
+    with pytest.raises(TimeoutError) as raised:
+        wrapper.export(MetricsData(resource_metrics=[]))
+    assert raised.value is boom
+    assert failures.snapshot()["metrics"] == 1
+
+
+def test_the_wrappers_delegate_everything_else_to_the_wrapped_exporter() -> None:
+    inner = _ScriptedMetricExporter(MetricExportResult.SUCCESS)
+    wrapper = _CountingMetricExporter(inner, TelemetryFailures())
+    assert wrapper._preferred_temporality == inner._preferred_temporality
+    assert wrapper._preferred_aggregation == inner._preferred_aggregation
+    assert wrapper.force_flush(123) is True
+    wrapper.shutdown(456)
+    assert (inner.flushed, inner.shut_down) == ([123], [456])
+    # and the real OTLP exporter, as built from the config, keeps its own settings
+    built_span, built_metric = _exporters(OtlpConfig.model_validate(OTLP), TelemetryFailures())
+    assert isinstance(built_span, _CountingSpanExporter)
+    assert isinstance(built_metric, _CountingMetricExporter)
+    real = HttpMetricExporter(endpoint="http://collector.example.com:4318/v1/metrics")
+    assert built_metric._preferred_temporality == real._preferred_temporality
+    assert set(built_metric._preferred_aggregation or {}) == set(real._preferred_aggregation or {})
+
+
+def test_the_failure_counts_are_exact_under_concurrent_exporters() -> None:
+    failures = TelemetryFailures()
+    threads = [
+        threading.Thread(target=lambda: [failures.increment("traces") for _ in range(500)])
+        for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures.snapshot()["traces"] == 4000

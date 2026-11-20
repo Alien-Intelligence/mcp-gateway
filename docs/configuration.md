@@ -468,6 +468,9 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.upstream.duration` | histogram | `s` | `upstream`, `status_class` (`error` when no response came). Time to the response headers. |
 | `mcp_gateway.resolver.lookups` | counter | `{lookup}` | `resolver_type`, `cache`, `result` (values as in the resolver span) |
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
+| `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |
+
+Telemetry is best effort: it never changes a response that is already decided or sent. A failure while recording a request is logged at ERROR (exception type only) and counted under `signal="record"`, and the audit line is still written. OTLP export failures happen in the SDK's background threads, which only log them; the gateway counts them under `traces` and `metrics` without altering what the SDK sees. Alert on a rising `mcp_gateway.telemetry.failures`: a collector that is down is otherwise visible only in the logs.
 
 `rpc_method` is one of the standard MCP methods or `other` (and `none` for a body that is not JSON-RPC): the method is client-chosen text, so it is bounded. Tool names and resolver labels are never metric attributes (their values come from clients and backends, not from this file); they are span attributes only.
 
