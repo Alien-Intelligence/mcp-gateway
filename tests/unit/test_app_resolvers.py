@@ -166,6 +166,7 @@ async def test_config_builds_the_cached_resolver_and_the_lifespan_closes_it(
         "default_upstream": "primary",
         "allow_insecure_http": True,
         "timeout_seconds": 2,
+        "total_timeout_seconds": 10,
         "max_attempts": 2,
         "backoff_base_seconds": 0.01,
         "backoff_max_seconds": 0.02,

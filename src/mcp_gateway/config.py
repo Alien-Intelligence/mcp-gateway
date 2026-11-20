@@ -163,6 +163,8 @@ class WebhookResolverConfig(_Model):
     # Per attempt, covering connect, send and read.
     timeout_seconds: float = Field(gt=0)
     max_attempts: int = Field(ge=1, le=10)
+    # Wall-clock ceiling for the whole resolution: every attempt and every backoff pause.
+    total_timeout_seconds: float = Field(gt=0)
     backoff_base_seconds: float = Field(gt=0)
     backoff_max_seconds: float = Field(gt=0)
     # Upper bound applied to the ttl_seconds an allow answer asks for.
@@ -189,6 +191,8 @@ class WebhookResolverConfig(_Model):
             )
         if isinstance(self.auth, MtlsAuthConfig) and scheme != "https":
             raise ValueError("mtls auth needs an https webhook url")
+        if self.total_timeout_seconds <= self.timeout_seconds:
+            raise ValueError("total_timeout_seconds must be > timeout_seconds")
         if self.backoff_max_seconds < self.backoff_base_seconds:
             raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")
         return self

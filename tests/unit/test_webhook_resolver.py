@@ -53,6 +53,7 @@ def webhook_config(url: str, auth: dict[str, Any], **overrides: Any) -> WebhookR
         "default_upstream": "primary",
         "allow_insecure_http": True,
         "timeout_seconds": 2,
+        "total_timeout_seconds": 10,
         "max_attempts": 3,
         "backoff_base_seconds": 0.01,
         "backoff_max_seconds": 0.05,
@@ -233,6 +234,27 @@ async def test_timeout_is_transient_and_bounded(secret_file: str, server: Webhoo
             await resolver.resolve(identity())
     assert time.monotonic() - started < 2
     assert len(server.seen) == 2
+
+
+async def test_total_timeout_bounds_the_whole_retry_loop(
+    secret_file: str, server: WebhookServer
+) -> None:
+    server.responders = [slow_responder(5, ALLOW)]
+    # Ten attempts of up to 0.2 s plus pauses would take over two seconds.
+    async for resolver in make_resolver(
+        server,
+        secret_file,
+        timeout_seconds=0.2,
+        total_timeout_seconds=0.5,
+        max_attempts=10,
+        backoff_base_seconds=0.05,
+        backoff_max_seconds=0.1,
+    ):
+        started = time.monotonic()
+        with pytest.raises(ResolverUnavailableError, match="within"):
+            await resolver.resolve(identity())
+    assert time.monotonic() - started < 1.2
+    assert 1 <= len(server.seen) < 10
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 500])

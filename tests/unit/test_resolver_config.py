@@ -18,6 +18,7 @@ WEBHOOK: dict[str, Any] = {
     "default_upstream": "primary",
     "allow_insecure_http": False,
     "timeout_seconds": 3,
+    "total_timeout_seconds": 20,
     "max_attempts": 3,
     "backoff_base_seconds": 0.2,
     "backoff_max_seconds": 2,
@@ -161,6 +162,12 @@ def test_plain_http_webhook_needs_the_explicit_dev_flag() -> None:
         parse({**plain, "url": "http://127.0.0.1:9/resolve"})  # loopback gets no exemption
     parse({**plain, "allow_insecure_http": True})
     parse(WEBHOOK)
+
+
+@pytest.mark.parametrize("total", [3, 2.9, 0])
+def test_total_timeout_must_exceed_the_attempt_timeout(total: float) -> None:
+    with pytest.raises(ConfigError, match="total_timeout_seconds"):
+        parse({**WEBHOOK, "total_timeout_seconds": total})
 
 
 def test_allow_insecure_http_is_required() -> None:

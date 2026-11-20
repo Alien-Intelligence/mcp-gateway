@@ -541,6 +541,78 @@ async def test_client_disconnect_aborts_the_upstream_request(
     assert audit_lines(caplog)[0]["outcome"] == "client_disconnected"
 
 
+class HangingResolver:
+    """Never answers; records being cancelled."""
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def resolve(self, identity: Identity) -> Credential | Denied:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def invalidate(self, identity: Identity) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_client_leaving_during_resolution_cancels_it(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    token: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolver = HangingResolver()
+    app = build_app(mapping_dir, transport, resolver=resolver)
+    body = json.dumps(RPC_BODY).encode()
+    body_sent = False
+
+    async def receive() -> dict[str, Any]:
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        await asyncio.sleep(0.05)  # the client gives up while the lookup is running
+        return {"type": "http.disconnect"}
+
+    sent: list[dict[str, Any]] = []
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "https",
+        "path": "/mcp",
+        "raw_path": b"/mcp",
+        "query_string": b"",
+        "headers": [
+            (b"host", b"gw.example.com"),
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+        "server": ("gw.example.com", 443),
+        "client": ("203.0.113.9", 1234),
+    }
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        await asyncio.wait_for(app(scope, receive, send), timeout=5)
+    assert resolver.cancelled
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["status"], line["outcome"]) == (499, "client_disconnected")
+
+
 # --- upstream auth failures -----------------------------------------------------------
 
 

@@ -87,7 +87,7 @@ async def _close(response: httpx.Response) -> None:
         logger.warning("closing the upstream response timed out")
 
 
-async def _watching_disconnect[T](
+async def watching_disconnect[T](
     receive: Receive, operation: Callable[[], Awaitable[T]]
 ) -> tuple[T | None, bool]:
     """Run ``operation`` while listening for the client going away.
@@ -284,7 +284,7 @@ class UpstreamProxy:
         audit.upstream = self._name
         reply_id = rpc.id if rpc.expects_reply else None
         try:
-            response, gone = await _watching_disconnect(
+            response, gone = await watching_disconnect(
                 receive, lambda: self._client.send(request, stream=True)
             )
         except httpx.TimeoutException as exc:
@@ -350,7 +350,7 @@ class UpstreamProxy:
         upstream_status = response.status_code
         gone = False
         try:
-            _, gone = await _watching_disconnect(receive, lambda: _drain(response))
+            _, gone = await watching_disconnect(receive, lambda: _drain(response))
         except httpx.HTTPError as exc:
             logger.warning(
                 "draining upstream %d body failed (%s)", upstream_status, type(exc).__name__

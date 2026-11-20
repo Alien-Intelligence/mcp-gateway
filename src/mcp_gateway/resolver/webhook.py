@@ -29,9 +29,12 @@ Anything else (other status, extra or missing keys, wrong types) is a resolver e
 The URL must be ``https`` (the answer carries the API key). ``allow_insecure_http`` lifts that
 for dev and test stacks only.
 
-Failure handling: each attempt has a timeout. Connection errors, timeouts, 429, 502, 503 and
+Failure handling: each attempt has a timeout and the whole resolution (attempts and backoff
+pauses) has ``total_timeout_seconds``, after which the resolver raises
+``ResolverUnavailableError``. Connection errors, timeouts, 429, 502, 503 and
 504 are retried with exponential backoff and jitter up to ``max_attempts``; after the last one
-the resolver raises ``ResolverUnavailableError`` (the request fails closed). Any other
+(or the total timeout) the resolver raises ``ResolverUnavailableError`` (the request fails
+closed). Any other
 status is a ``ResolverError`` immediately.
 """
 
@@ -192,6 +195,15 @@ class WebhookResolver:
             raise ResolverError(f"webhook request failed ({type(exc).__name__})") from exc
 
     async def _post(self, body: bytes) -> bytes:
+        try:
+            with anyio.fail_after(self._config.total_timeout_seconds):
+                return await self._retrying(body)
+        except TimeoutError as exc:
+            raise ResolverUnavailableError(
+                f"webhook unavailable: no answer within {self._config.total_timeout_seconds}s"
+            ) from exc
+
+    async def _retrying(self, body: bytes) -> bytes:
         attempts = self._config.max_attempts
         why = "no attempt made"
         for attempt in range(1, attempts + 1):

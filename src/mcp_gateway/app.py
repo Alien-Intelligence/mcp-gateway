@@ -12,6 +12,7 @@ from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
+from starlette.types import Receive
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.auth import (
@@ -37,7 +38,12 @@ from mcp_gateway.jsonrpc import (
     parse_request,
 )
 from mcp_gateway.origin import OriginPolicy
-from mcp_gateway.proxy import UpstreamProxy, build_client, json_rpc_response
+from mcp_gateway.proxy import (
+    UpstreamProxy,
+    build_client,
+    json_rpc_response,
+    watching_disconnect,
+)
 from mcp_gateway.resolver import (
     Credential,
     CredentialResolver,
@@ -183,11 +189,14 @@ class Gateway:
             )
 
     async def _resolve(
-        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord
+        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, receive: Receive
     ) -> Credential | Response:
         reply_id = rpc.id if rpc.expects_reply else None
         try:
-            outcome = await self._resolver.resolve(identity)
+            # A client that leaves must not keep a (possibly slow) lookup running.
+            outcome, gone = await watching_disconnect(
+                receive, lambda: self._resolver.resolve(identity)
+            )
         except ResolverUnavailableError as exc:
             logger.error("credential backend unavailable: %s", exc)
             audit.emit(status=503, outcome="resolver_unavailable")
@@ -200,6 +209,10 @@ class Gateway:
             logger.error("credential resolution failed: %s", exc)
             audit.emit(status=500, outcome="gateway_error")
             return json_rpc_response(500, GATEWAY_ERROR, GATEWAY_ERROR_MESSAGE, reply_id)
+        if gone or outcome is None:
+            logger.info("client disconnected while the credential was being resolved")
+            audit.emit(status=499, outcome="client_disconnected")
+            return Response(status_code=499)
         if isinstance(outcome, Denied):
             audit.reason = outcome.reason
             audit.emit(status=403, outcome="denied")
@@ -260,7 +273,7 @@ class Gateway:
                 400, INVALID_REQUEST, f"The {repeated} header must appear once.", reply_id
             )
 
-        credential = await self._resolve(identity, rpc, audit)
+        credential = await self._resolve(identity, rpc, audit, request.receive)
         if isinstance(credential, Response):
             return credential
         audit.labels = dict(credential.labels)
