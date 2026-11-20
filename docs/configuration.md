@@ -229,7 +229,7 @@ An object from upstream name to settings. The name is what resolvers return in `
 | `write_timeout_seconds` | number | gt 0 | |
 | `pool_timeout_seconds` | number | gt 0 | Wait for a pooled connection. |
 
-Only these client headers reach the upstream: `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` and `User-Agent`. The gateway adds `Authorization: Bearer <api key>` and `Accept-Encoding: identity`. Trace context is not propagated to the upstream. On the way back, hop-by-hop headers, `WWW-Authenticate`, `Set-Cookie` and `X-Request-Id` are removed.
+Only these client headers reach the upstream: `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` and `User-Agent`. The gateway adds `Authorization: Bearer <api key>` and `Accept-Encoding: identity`. Trace context is not propagated to the upstream. On the way back, hop-by-hop headers, `WWW-Authenticate`, `Set-Cookie`, `Date`, `Server` and `X-Request-Id` are removed.
 
 Gateway-made errors: an upstream `401` or `402` is never relayed; the client gets a JSON-RPC error (`-32001` or `-32002`) with HTTP `200` for a request that expects a reply and `502` otherwise. A timeout is `504` (`-32004`), an unreachable upstream `502` (`-32003`).
 
