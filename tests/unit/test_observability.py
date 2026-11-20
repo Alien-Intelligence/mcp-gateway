@@ -23,6 +23,7 @@ from mcp_gateway.app import create_app
 from mcp_gateway.audit import OUTCOMES
 from mcp_gateway.proxy import UpstreamStreamAbortedError
 from mcp_gateway.resolver import Denied, ResolverError, ResolverUnavailableError
+from mcp_gateway.state import State
 from mcp_gateway.telemetry import (
     REQUEST_SPAN,
     RESOLVE_SPAN,
@@ -32,6 +33,7 @@ from mcp_gateway.telemetry import (
 )
 
 from .conftest import FakeIdp, FakeUpstream, TrackedStream, base_config_dict, config_from, mint
+from .state_fakes import state_with
 from .test_app import (
     RPC_BODY,
     FixedResolver,
@@ -59,6 +61,7 @@ def build_observed(
     transport: httpx.MockTransport,
     *,
     resolver: Any = None,
+    state: State | None = None,
     spans: InMemorySpanExporter | None = None,
     reader: InMemoryMetricReader | None = None,
     **overrides: Any,
@@ -75,6 +78,7 @@ def build_observed(
     app = create_app(
         config_from(data),
         resolver=resolver,
+        state=state,
         http_transport=transport,
         span_exporter=span_exporter,
         metric_reader=metric_reader,
@@ -521,6 +525,13 @@ async def _resolver_unavailable(env: Env) -> None:
     await env.post(env.rebuild(resolver=FixedResolver(ResolverUnavailableError("down"))))
 
 
+async def _state_unavailable(env: Env) -> None:
+    state, _ = state_with("check")
+    await env.post(
+        env.rebuild(state=state), headers={**bearer(env.token), "Mcp-Session-Id": "session-1"}
+    )
+
+
 async def _gateway_error(env: Env) -> None:
     await env.post(env.rebuild(resolver=FixedResolver(ResolverError("broken"))))
 
@@ -583,6 +594,7 @@ SCENARIOS: dict[str, Scenario] = {
     "mcp_header_mismatch": _mcp_header_mismatch,
     "duplicate_header": _duplicate_header,
     "resolver_unavailable": _resolver_unavailable,
+    "state_unavailable": _state_unavailable,
     "gateway_error": _gateway_error,
     "denied": _denied,
     "session_not_found": _session_not_found,

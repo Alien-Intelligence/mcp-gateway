@@ -31,6 +31,7 @@ OUTCOMES = frozenset(
         "mcp_header_mismatch",
         "duplicate_header",
         "resolver_unavailable",
+        "state_unavailable",
         "gateway_error",
         "denied",
         "session_not_found",

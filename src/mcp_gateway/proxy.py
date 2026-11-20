@@ -26,13 +26,13 @@ from mcp_gateway.jsonrpc import (
     error_body,
 )
 from mcp_gateway.resolver import Credential, CredentialResolver, ResolverError
-from mcp_gateway.sessions import SessionRegistry
 from mcp_gateway.sse import (
     EncodedStreamError,
     SseError,
     SseEventSplitter,
     stream_failed_event,
 )
+from mcp_gateway.state import SessionStore, StateUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +159,7 @@ class _Release:
     def __init__(
         self,
         response: httpx.Response,
-        sessions: SessionRegistry,
+        sessions: SessionStore,
         upstream: str,
         session_id: str | None,
         audit: AuditRecord,
@@ -173,6 +173,14 @@ class _Release:
         # Set by the relay when the upstream body was relayed to its end.
         self.completed = False
 
+    async def _touch_session(self, session_id: str) -> None:
+        try:
+            await self._sessions.touch(self._upstream, session_id)
+        except StateUnavailableError:
+            # The client already has its answer, so there is nothing to fail: the binding is
+            # simply not refreshed and expires on its idle TTL.
+            logger.error("session binding not refreshed: shared state unavailable")
+
     async def finalize(self) -> None:
         if self._finalized:
             return
@@ -181,7 +189,7 @@ class _Release:
             await _close(self._response)
         finally:
             if self._session_id is not None:
-                self._sessions.touch(self._upstream, self._session_id)
+                await self._touch_session(self._session_id)
             if self.completed:
                 self._audit.emit(status=self._response.status_code, outcome="forwarded")
             else:
@@ -252,7 +260,7 @@ class UpstreamProxy:
         name: str,
         config: UpstreamConfig,
         client: httpx.AsyncClient,
-        sessions: SessionRegistry,
+        sessions: SessionStore,
         max_event_bytes: int,
     ) -> None:
         self._name = name
@@ -322,30 +330,39 @@ class UpstreamProxy:
             session_id = _request_session_id(inbound_headers)
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(response, receive, rpc, identity, resolver, audit)
-            self._track_session(method, session_id, response, subject_key)
+            await self._track_session(method, session_id, response, subject_key)
             return self.stream(response, rpc, session_id, audit)
         except BaseException:
             # Nothing owns the response yet: close it rather than leak the connection.
             await _close(response)
             raise
 
-    def _track_session(
+    async def _track_session(
         self,
         method: str,
         session_id: str | None,
         response: httpx.Response,
         subject_key: str,
     ) -> None:
-        """Keep the registry in step with what the upstream says about the session."""
+        """Keep the registry in step with what the upstream says about the session.
+
+        Binding a new session raises ``StateUnavailableError``: the caller closes the upstream
+        response and answers 503, so a session id the gateway could not bind is never relayed.
+        """
         status = response.status_code
         issued = response.headers.get("mcp-session-id")
         if session_id is not None and (
             status == 404 or (method == "DELETE" and 200 <= status < 300)
         ):
             # The upstream no longer knows the session, or the client just ended it.
-            self._sessions.drop(self._name, session_id)
+            try:
+                await self._sessions.drop(self._name, session_id)
+            except StateUnavailableError:
+                # The response is decided (the upstream said 404 or the DELETE succeeded) and
+                # is relayed as is; a stale binding costs at most one more upstream 404, then it expires.
+                logger.error("session binding not dropped: shared state unavailable")
         elif issued is not None and 200 <= status < 300:
-            self._sessions.bind(self._name, issued, subject_key)
+            await self._sessions.bind(self._name, issued, subject_key)
 
     @staticmethod
     def _client_gone(audit: AuditRecord) -> Response:

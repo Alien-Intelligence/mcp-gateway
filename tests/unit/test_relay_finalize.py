@@ -17,7 +17,7 @@ from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import RpcInfo
 from mcp_gateway.proxy import RelayResponse, UpstreamProxy, build_client
 from mcp_gateway.resolver.base import Credential, Denied
-from mcp_gateway.sessions import SessionRegistry
+from mcp_gateway.state import MemorySessionStore, SessionStore
 
 from .conftest import TrackedStream
 
@@ -41,30 +41,35 @@ class Harness:
     def __init__(self, stream: TrackedStream, caplog: pytest.LogCaptureFixture) -> None:
         self.stream = stream
         self.clock = Clock()
-        self.sessions = SessionRegistry(
+        self.sessions = MemorySessionStore(
             max_entries=10, max_entries_per_subject=10, idle_ttl_seconds=600, clock=self.clock
         )
-        self.sessions.bind(UPSTREAM, SESSION, "alice")
-        # Bound at 0, the relay ends at 500, the check happens at 1000: alive only if touched.
-        self.clock.now = 500.0
         self.audit = AuditRecord(http_method="POST", enabled=True)
         self.caplog = caplog
         upstream = httpx.Response(200, headers=SSE, stream=stream)
         self.relay = build_relay(upstream, self.sessions, self.audit)
+
+    @classmethod
+    async def create(cls, stream: TrackedStream, caplog: pytest.LogCaptureFixture) -> "Harness":
+        harness = cls(stream, caplog)
+        await harness.sessions.bind(UPSTREAM, SESSION, "alice")
+        # Bound at 0, the relay ends at 500, the check happens at 1000: alive only if touched.
+        harness.clock.now = 500.0
+        return harness
 
     def audit_lines(self) -> list[dict[str, Any]]:
         return [
             json.loads(r.getMessage()) for r in self.caplog.records if r.name == "mcp_gateway.audit"
         ]
 
-    def session_survives_after_the_clock_moves(self) -> bool:
+    async def session_survives_after_the_clock_moves(self) -> bool:
         """True when ``touch`` refreshed the idle timer (otherwise the entry has expired)."""
         self.clock.now = 1000.0
-        return self.sessions.check(UPSTREAM, SESSION, "alice")
+        return await self.sessions.check(UPSTREAM, SESSION, "alice")
 
 
 def build_relay(
-    upstream: httpx.Response, sessions: SessionRegistry, audit: AuditRecord
+    upstream: httpx.Response, sessions: SessionStore, audit: AuditRecord
 ) -> RelayResponse:
     config = UpstreamConfig.model_validate(
         {
@@ -102,14 +107,14 @@ async def yielding_send(message: Message) -> None:
 async def test_disconnect_queued_before_the_relay_starts_still_releases_everything(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    harness = Harness(TrackedStream([EVENT], hang=True), caplog)
+    harness = await Harness.create(TrackedStream([EVENT], hang=True), caplog)
 
     async def receive() -> Message:
         return {"type": "http.disconnect"}
 
     await run(harness, receive=receive, send=yielding_send)
     assert harness.stream.closed
-    assert harness.session_survives_after_the_clock_moves()
+    assert await harness.session_survives_after_the_clock_moves()
     (line,) = harness.audit_lines()
     assert line["outcome"] == "client_disconnected"
 
@@ -117,7 +122,7 @@ async def test_disconnect_queued_before_the_relay_starts_still_releases_everythi
 async def test_send_failing_on_the_response_start_still_releases_everything(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    harness = Harness(TrackedStream([EVENT]), caplog)
+    harness = await Harness.create(TrackedStream([EVENT]), caplog)
 
     async def receive() -> Message:
         await anyio.sleep_forever()
@@ -128,7 +133,7 @@ async def test_send_failing_on_the_response_start_still_releases_everything(
 
     await run(harness, receive=receive, send=send)
     assert harness.stream.closed
-    assert harness.session_survives_after_the_clock_moves()
+    assert await harness.session_survives_after_the_clock_moves()
     (line,) = harness.audit_lines()
     assert line["outcome"] == "client_disconnected"
 
@@ -136,7 +141,7 @@ async def test_send_failing_on_the_response_start_still_releases_everything(
 async def test_disconnect_mid_stream_is_audited_as_client_disconnected(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    harness = Harness(TrackedStream([EVENT], hang=True), caplog)
+    harness = await Harness.create(TrackedStream([EVENT], hang=True), caplog)
     first_event_sent = anyio.Event()
 
     async def receive() -> Message:
@@ -157,7 +162,7 @@ async def test_disconnect_mid_stream_is_audited_as_client_disconnected(
 async def test_a_stream_that_ends_cleanly_is_forwarded_and_finalised_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    harness = Harness(TrackedStream([EVENT]), caplog)
+    harness = await Harness.create(TrackedStream([EVENT]), caplog)
 
     async def receive() -> Message:
         await anyio.sleep_forever()
@@ -169,10 +174,10 @@ async def test_a_stream_that_ends_cleanly_is_forwarded_and_finalised_once(
     assert line["outcome"] == "forwarded"
 
 
-class ExplodingRegistry(SessionRegistry):
+class ExplodingRegistry(MemorySessionStore):
     """A registry whose bookkeeping fails between the upstream answering and the relay existing."""
 
-    def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
+    async def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
         raise RuntimeError("registry failed")
 
 

@@ -13,6 +13,7 @@ from mcp_gateway.app import create_app
 from mcp_gateway.config import ResolverCacheConfig
 from mcp_gateway.resolver import (
     CachingResolver,
+    MemoryCacheStore,
     WebhookResolver,
 )
 
@@ -128,6 +129,7 @@ async def test_upstream_401_invalidates_the_cache_so_the_next_request_asks_again
     cache = CachingResolver(
         inner,
         ResolverCacheConfig(positive_ttl_seconds=60, negative_ttl_seconds=5, max_entries=10),
+        MemoryCacheStore(10),
     )
     spy = SpyResolver(cache)
     app = build_app(mapping_dir, transport, resolver=spy)
