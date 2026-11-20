@@ -283,11 +283,27 @@ def test_key_pattern_is_validated_at_config_load() -> None:
 
 
 def test_render_substitutes_in_one_pass() -> None:
-    # A value that looks like a placeholder is inserted verbatim, not expanded again.
+    # A value that looks like a placeholder is inserted (encoded), not expanded again.
     identity = Identity(subject="{email}", email="a@b.c", organization="org", groups=(), claims={})
-    assert render_key("k:{subject}:{organization}", identity) == "k:{email}:org"
+    assert render_key("k:{subject}:{organization}", identity) == "k:%7Bemail%7D:org"
+
+
+def test_values_are_percent_encoded_so_distinct_identities_never_share_a_key() -> None:
+    first = Identity(subject="c", email=None, organization="a:b", groups=(), claims={})
+    second = Identity(subject="b:c", email=None, organization="a", groups=(), claims={})
+    pattern = "k:{organization}:{subject}"
+    assert render_key(pattern, first) == "k:a%3Ab:c"
+    assert render_key(pattern, second) == "k:a:b%3Ac"
+    assert render_key(pattern, first) != render_key(pattern, second)
+
+
+def test_encoding_follows_url_quoting_for_the_customer_to_mirror() -> None:
+    who = Identity(
+        subject="alice@x.example/é 1", email=None, organization="o~._-", groups=(), claims={}
+    )
+    assert render_key("{organization}|{subject}", who) == "o~._-|alice%40x.example%2F%C3%A9%201"
 
 
 def test_render_returns_none_when_a_used_placeholder_is_null() -> None:
     assert render_key("k:{subject}:{organization}", ident(organization=None)) is None
-    assert render_key("k:{subject}", ident(organization=None)) == "k:u{1}"
+    assert render_key("k:{subject}", ident(organization=None)) == "k:u%7B1%7D"

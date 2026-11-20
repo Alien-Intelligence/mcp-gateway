@@ -198,3 +198,21 @@ def test_invalid_url_refuses_startup_without_leaking(tmp_path: Path, prefix: str
 def test_default_upstream_must_exist(url_file: Path, prefix: str) -> None:
     with pytest.raises(ResolverError, match="default_upstream"):
         RedisStoreResolver(redis_config(url_file, prefix, default_upstream="nowhere"), UPSTREAMS)
+
+
+async def test_values_with_separators_resolve_to_their_own_encoded_key(
+    url_file: Path, prefix: str, admin: aioredis.Redis
+) -> None:
+    mine = json.dumps({"api_key": "fake-alien-key-mine", "upstream": None, "labels": None})
+    other = json.dumps({"api_key": "fake-alien-key-other", "upstream": None, "labels": None})
+    # "a:b" + "c" must not read the entry written for "a" + "b:c".
+    await admin.set(f"{prefix}:a%3Ab:c", mine)
+    await admin.set(f"{prefix}:a:b%3Ac", other)
+    first = await lookup(url_file, prefix, identity(subject="c", org="a:b"))
+    second = await lookup(url_file, prefix, identity(subject="b:c", org="a"))
+    assert isinstance(first, Credential) and isinstance(second, Credential)
+    assert first.api_key.get_secret_value() == "fake-alien-key-mine"
+    assert second.api_key.get_secret_value() == "fake-alien-key-other"
+    # The raw (unencoded) spelling is not a key the resolver ever reads.
+    await admin.set(f"{prefix}:a:b:c", other)
+    assert await lookup(url_file, prefix, identity(subject="c", org="a:b")) == first
