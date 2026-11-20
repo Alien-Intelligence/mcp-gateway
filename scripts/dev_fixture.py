@@ -4,8 +4,9 @@ Sets up (finding every object by name first and reusing it, since organizations 
 deleted):
 
 * two managed client organizations, created inside the sponsored group by the sponsor's service
-  account (a client-managed org-admin user, authenticated by its api-secret key), each with one
-  client-managed user and one api-key token minted by that same service account,
+  account (a client-managed org-admin user, authenticated by its api-secret key), holding three
+  client-managed users (alice and carol in client-x, bob in client-y), each with one api-key
+  token minted by that same service account,
 * a read grant on one dataset of a sponsor organization's private cluster,
 * a sponsored group in the sponsor organization holding that grant and both client organizations.
 
@@ -13,8 +14,8 @@ Everything, including the consumption feed reads, runs as the sponsor service ac
 platform admin is not a member of a managed organization and cannot read its feed.
 
 It then proves each minted key through the real MCP server, reads the consumption feeds (consumer
-and sponsor side) as a positive control, and writes the gateway's static mapping plus the key files
-and a non-secret ``fixture.json`` into the state directory.
+and sponsor side) as a positive control, and writes the gateway state (static mapping, the Redis, PostgreSQL and webhook seeds: see
+``state_layout.py``), the key files and a non-secret ``fixture.json`` into the state directory.
 
 Secrets: the sponsor key is read from a key file, never from argv, never printed. Key files are
 written mode 600 atomically. Only token identifiers are printed.
@@ -28,9 +29,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
-import os
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,6 +38,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from state_layout import (
+    REAL_ROUTING,
+    KeyedPersona,
+    ensure_private_dir,
+    write_atomic,
+    write_layout,
+)
 
 DESCRIPTION = (
     "Idempotent fixture for the gateway end-to-end tests, driving a real Alien dev platform."
@@ -75,12 +81,15 @@ class AlienApiError(FixtureError):
 
 @dataclass(frozen=True)
 class ClientSpec:
-    """One client persona: a managed org with one client-managed user.
+    """One persona: a client-managed user in a managed client organization.
 
-    ``email`` is the persona's identity at the IdPs (what the gateway's mapping matches);
-    ``alien_email`` is the client-managed user's own address on the Alien platform.
+    ``name`` is the short name of the client organization (also what the IdP's organization
+    claim carries); several personas may share one organization. ``email`` is the persona's
+    identity at the IdPs (what the gateway's mapping matches); ``alien_email`` is the
+    client-managed user's own address on the Alien platform.
     """
 
+    persona: str
     name: str
     email: str
     alien_email: str
@@ -93,13 +102,25 @@ class ClientSpec:
 
 CLIENTS: tuple[ClientSpec, ...] = (
     ClientSpec(
+        "alice",
         "client-x",
         "alice@client-x.test",
         "alice@managed-client-x.test",
         "managed-client-x-alice.key",
     ),
     ClientSpec(
-        "client-y", "bob@client-y.test", "bob@managed-client-y.test", "managed-client-y-bob.key"
+        "bob",
+        "client-y",
+        "bob@client-y.test",
+        "bob@managed-client-y.test",
+        "managed-client-y-bob.key",
+    ),
+    ClientSpec(
+        "carol",
+        "client-x",
+        "carol@client-x.test",
+        "carol@managed-client-x.test",
+        "managed-client-x-carol.key",
     ),
 )
 
@@ -146,24 +167,6 @@ def log(message: str) -> None:
 # --------------------------------------------------------------------------------------------
 # Credentials and files
 # --------------------------------------------------------------------------------------------
-
-
-def ensure_private_dir(path: Path) -> None:
-    path.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.chmod(0o700)
-
-
-def write_atomic(path: Path, content: str, mode: int) -> None:
-    """Write ``content`` to ``path`` via a temp file in the same directory and ``os.replace``."""
-    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
-    try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(content)
-        os.replace(tmp_name, path)
-    except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
 
 
 def read_key_file(path: Path) -> str | None:
@@ -890,22 +893,6 @@ def probe_forged_headers(
 
 
 def write_outputs(cfg: Config, group_id: int, grant_id: int, clients: list[ClientState]) -> None:
-    mapping = {
-        "entries": [
-            {
-                "match": {"email": CLIENTS[0].email},
-                "api_key_file": CLIENTS[0].key_file,
-                "upstream": "primary",
-                "labels": {"client": CLIENTS[0].name},
-            },
-            {
-                "match": {"organization": CLIENTS[1].name},
-                "api_key_file": CLIENTS[1].key_file,
-                "upstream": "primary",
-                "labels": {"client": CLIENTS[1].name},
-            },
-        ]
-    }
     facts = {
         "api_base": cfg.api_base,
         "mcp_url": cfg.mcp_url,
@@ -929,7 +916,10 @@ def write_outputs(cfg: Config, group_id: int, grant_id: int, clients: list[Clien
             for c in clients
         ],
     }
-    write_atomic(cfg.state_dir / "mapping.json", json.dumps(mapping, indent=2) + "\n", 0o600)
+    personas = [
+        KeyedPersona(c.spec.persona, c.spec.email, c.spec.name, c.spec.key_file) for c in clients
+    ]
+    write_layout(cfg.state_dir, personas, REAL_ROUTING)
     write_atomic(cfg.state_dir / "fixture.json", json.dumps(facts, indent=2) + "\n", 0o600)
 
 
@@ -972,7 +962,8 @@ def build_chain(
     group = ensure_group(sponsor, cfg, tally)
     group_id = int(group["id"])
     orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in CLIENTS]
-    configure_group(sponsor, cfg, group, grant_id, [int(o["id"]) for o in orgs], tally)
+    org_ids = list(dict.fromkeys(int(o["id"]) for o in orgs))
+    configure_group(sponsor, cfg, group, grant_id, org_ids, tally)
     clients: list[ClientState] = []
     for spec, org in zip(CLIENTS, orgs, strict=True):
         user_id = ensure_user(sponsor, int(org["id"]), spec, tally)
