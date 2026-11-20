@@ -46,10 +46,13 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. The full reference, key by key with bounds and a complete example, is [`docs/configuration.md`](docs/configuration.md). The gateway services in [`compose.yaml`](compose.yaml) are working examples.
 
-Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions` and `policies` (allowed origins).
+Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).
 
 - `sessions`: an upstream `Mcp-Session-Id` is bound to the subject it was issued to (in memory, or in Redis with `state.type` `redis`, which several replicas need). A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
+- `state`: `memory` (one replica) or `redis` (shared by every replica: sessions, the credential cache and the rate limit buckets). With Redis the gateway fails closed (`503`, `-32013`) when it cannot reach it, and `GET /readyz` reports readiness. See [`docs/configuration.md`](docs/configuration.md#state).
 - `policies.allowed_origins`: browser origins allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
+- `policies.tools`: per-caller tool allow and deny lists (exact names or `*`, matched on organization or resolver label). A denied `tools/call` is answered as an unknown tool and never forwarded, and `tools/list` replies are filtered. See [`docs/configuration.md`](docs/configuration.md#policiestools).
+- `policies.rate_limits`: token buckets per subject and per organization, in memory or shared in Redis. A refused request is answered in the form its sender can read (`isError` tool result, `-32014`, or `429`) with `Retry-After`. See [`docs/configuration.md`](docs/configuration.md#policiesrate_limits).
 - Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
 
 ### Resolvers
