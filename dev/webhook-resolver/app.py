@@ -12,7 +12,9 @@ organization, group. No match is ``{"decision": "deny", "reason": "no_mapping"}`
 Authentication of the caller is configured by environment, with no defaults:
 
 * ``WEBHOOK_HMAC_SECRET_FILE``: verify ``X-MCP-Gateway-Signature`` (constant-time compare)
-  and require ``X-MCP-Gateway-Timestamp`` within ``WEBHOOK_TIMESTAMP_WINDOW_SECONDS``.
+  over ``f"{timestamp}.{nonce}.{body}"``, require ``X-MCP-Gateway-Timestamp`` within
+  ``WEBHOOK_TIMESTAMP_WINDOW_SECONDS`` and refuse an ``X-MCP-Gateway-Nonce`` seen already
+  inside that window (replay protection, at most ``MAX_TRACKED_NONCES`` remembered).
 * ``WEBHOOK_TLS_CERT_FILE`` + ``WEBHOOK_TLS_KEY_FILE`` (+ ``WEBHOOK_TLS_CLIENT_CA_FILE`` to
   require and verify a client certificate, i.e. mTLS).
 
@@ -24,9 +26,11 @@ import hmac
 import json
 import logging
 import os
+import re
 import ssl
 import time
-from collections.abc import Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -40,6 +44,36 @@ from starlette.routing import Route
 logger = logging.getLogger("webhook-resolver")
 
 MATCH_ORDER = ("subject", "email", "organization", "group")
+# Upper bound on remembered nonces; beyond it requests are refused (fail closed), never evicted.
+MAX_TRACKED_NONCES = 100_000
+_NONCE = re.compile(r"[0-9a-f]{16,64}")
+
+
+class NonceLedger:
+    """Remembers accepted nonces for as long as a replay of them could still pass the window.
+
+    A request is accepted while its timestamp is within ``window`` of now, in either direction,
+    so a copy of it can arrive until ``now + 2 * window``. Entries are appended in time order,
+    so expiry only ever pops from the front and memory is bounded by ``capacity``.
+    """
+
+    def __init__(
+        self, window_seconds: float, capacity: int, clock: Callable[[], float] = time.time
+    ) -> None:
+        self._retain = 2 * window_seconds
+        self._capacity = capacity
+        self._clock = clock
+        self._expires: OrderedDict[str, float] = OrderedDict()
+
+    def accept(self, nonce: str) -> bool:
+        """True the first time ``nonce`` is seen; False for a replay or when the ledger is full."""
+        now = self._clock()
+        while self._expires and next(iter(self._expires.values())) <= now:
+            self._expires.popitem(last=False)
+        if nonce in self._expires or len(self._expires) >= self._capacity:
+            return False
+        self._expires[nonce] = now + self._retain
+        return True
 
 
 @dataclass(frozen=True)
@@ -93,12 +127,13 @@ def signature_is_valid(settings: Settings, headers: Mapping[str, str], body: byt
     if settings.hmac_secret is None:
         return True  # mTLS-only: uvicorn already verified the client certificate
     timestamp = headers.get("x-mcp-gateway-timestamp", "")
+    nonce = headers.get("x-mcp-gateway-nonce", "")
     given = headers.get("x-mcp-gateway-signature", "")
-    if not timestamp.isdigit():
+    if not timestamp.isdigit() or _NONCE.fullmatch(nonce) is None:
         return False
     if abs(time.time() - int(timestamp)) > settings.timestamp_window_seconds:
         return False
-    digest = hmac.new(settings.hmac_secret, f"{timestamp}.".encode() + body, hashlib.sha256)
+    digest = hmac.new(settings.hmac_secret, f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256)
     return hmac.compare_digest(given, f"sha256={digest.hexdigest()}")
 
 
@@ -119,12 +154,19 @@ def _find_entry(
     return None
 
 
-def create_app(settings: Settings) -> Starlette:
+def create_app(settings: Settings, ledger: NonceLedger | None = None) -> Starlette:
+    seen_nonces = ledger or NonceLedger(settings.timestamp_window_seconds, MAX_TRACKED_NONCES)
+
     async def resolve(request: Request) -> Response:
         body = await request.body()
         if not signature_is_valid(settings, request.headers, body):
             logger.warning("rejected a request with a bad or stale signature")
             return JSONResponse({"error": "invalid signature"}, status_code=401)
+        if settings.hmac_secret is not None and not seen_nonces.accept(
+            request.headers["x-mcp-gateway-nonce"]
+        ):
+            logger.warning("rejected a replayed nonce (or the nonce ledger is full)")
+            return JSONResponse({"error": "replayed request"}, status_code=401)
         try:
             identity = json.loads(body)
             mapping = json.loads((settings.state_dir / "mapping.json").read_text(encoding="utf-8"))

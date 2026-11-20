@@ -51,6 +51,7 @@ def webhook_config(url: str, auth: dict[str, Any], **overrides: Any) -> WebhookR
         "auth": auth,
         "ca_file": None,
         "default_upstream": "primary",
+        "allow_insecure_http": True,
         "timeout_seconds": 2,
         "max_attempts": 3,
         "backoff_base_seconds": 0.01,
@@ -96,9 +97,31 @@ async def resolver(server: WebhookServer, secret_file: str) -> AsyncIterator[Web
         yield item
 
 
-def test_signature_is_hmac_sha256_over_timestamp_dot_body() -> None:
-    expected = hmac.new(b"k", b"1700000000." + b'{"a":1}', hashlib.sha256).hexdigest()
-    assert sign(b"k", 1700000000, b'{"a":1}') == f"sha256={expected}"
+def test_signature_is_hmac_sha256_over_timestamp_nonce_and_body() -> None:
+    expected = hmac.new(b"k", b"1700000000.abc123." + b'{"a":1}', hashlib.sha256).hexdigest()
+    assert sign(b"k", 1700000000, "abc123", b'{"a":1}') == f"sha256={expected}"
+
+
+async def test_every_attempt_carries_a_fresh_nonce_inside_the_signature(
+    resolver: WebhookResolver, server: WebhookServer
+) -> None:
+    await resolver.resolve(identity())
+    await resolver.resolve(identity())
+    nonces = [seen.headers["x-mcp-gateway-nonce"] for seen in server.seen]
+    assert len(set(nonces)) == 2
+    assert all(len(nonce) == 32 and int(nonce, 16) >= 0 for nonce in nonces)
+    # The server verified the signature over timestamp.nonce.body.
+    assert [seen.signature_valid for seen in server.seen] == [True, True]
+
+
+async def test_a_replayed_request_with_another_nonce_fails_the_signature(
+    resolver: WebhookResolver, server: WebhookServer
+) -> None:
+    await resolver.resolve(identity())
+    forged = {**server.seen[0].headers, "x-mcp-gateway-nonce": "00" * 16}
+    assert server.verify_headers(forged, server.seen[0].body) is False, (
+        "the nonce is part of the signed string"
+    )
 
 
 async def test_allow_sends_only_the_identity_and_a_valid_signature(

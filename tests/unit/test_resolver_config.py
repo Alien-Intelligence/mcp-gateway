@@ -16,6 +16,7 @@ WEBHOOK: dict[str, Any] = {
     "auth": {"type": "hmac", "secret_file": "/run/secrets/hmac"},
     "ca_file": None,
     "default_upstream": "primary",
+    "allow_insecure_http": False,
     "timeout_seconds": 3,
     "max_attempts": 3,
     "backoff_base_seconds": 0.2,
@@ -152,11 +153,33 @@ def test_secrets_cannot_be_given_inline() -> None:
         parse({**{k: v for k, v in SQL.items() if k != "dsn_file"}, "dsn": "postgresql://x"})
 
 
+def test_plain_http_webhook_needs_the_explicit_dev_flag() -> None:
+    plain = {**WEBHOOK, "url": "http://webhook-resolver:8080/resolve"}
+    with pytest.raises(ConfigError, match="https"):
+        parse(plain)
+    with pytest.raises(ConfigError, match="https"):
+        parse({**plain, "url": "http://127.0.0.1:9/resolve"})  # loopback gets no exemption
+    parse({**plain, "allow_insecure_http": True})
+    parse(WEBHOOK)
+
+
+def test_allow_insecure_http_is_required() -> None:
+    with pytest.raises(ConfigError, match="allow_insecure_http"):
+        parse({k: v for k, v in WEBHOOK.items() if k != "allow_insecure_http"})
+
+
 def test_mtls_needs_https_and_both_files() -> None:
     mtls = {"type": "mtls", "client_cert_file": "/c", "client_key_file": "/k"}
     parse({**WEBHOOK, "auth": mtls})  # https url
     with pytest.raises(ConfigError, match="https"):
-        parse({**WEBHOOK, "auth": mtls, "url": "http://erp.example.com/r"})
+        parse(
+            {
+                **WEBHOOK,
+                "auth": mtls,
+                "url": "http://erp.example.com/r",
+                "allow_insecure_http": True,
+            }
+        )
     with pytest.raises(ConfigError, match="client_key_file"):
         parse({**WEBHOOK, "auth": {"type": "mtls", "client_cert_file": "/c"}})
 

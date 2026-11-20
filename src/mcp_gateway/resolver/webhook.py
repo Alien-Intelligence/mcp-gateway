@@ -7,10 +7,12 @@ verified, never the raw token claims and never the token::
 
 Authentication of the gateway is one of:
 
-* ``hmac``: headers ``X-MCP-Gateway-Timestamp`` (unix seconds) and
-  ``X-MCP-Gateway-Signature: sha256=<hex>`` where the digest is
-  ``HMAC-SHA256(secret, f"{timestamp}.{body}")`` over the exact body bytes. The receiver must
-  compare in constant time and reject timestamps outside a short window.
+* ``hmac``: headers ``X-MCP-Gateway-Timestamp`` (unix seconds), ``X-MCP-Gateway-Nonce`` (a
+  random hex string, new for every attempt) and ``X-MCP-Gateway-Signature: sha256=<hex>`` where
+  the digest is ``HMAC-SHA256(secret, f"{timestamp}.{nonce}.{body}")`` over the exact body
+  bytes. The receiver must compare in constant time, reject timestamps outside a short window
+  and reject a nonce it has already seen inside that window (replay protection: remember each
+  accepted nonce until its timestamp leaves the window, with bounded memory).
 * ``mtls``: the gateway presents a client certificate; the receiver verifies it.
 
 Response contract, HTTP 200 with a JSON body, either::
@@ -24,6 +26,9 @@ upstream. ``ttl_seconds`` asks the cache to keep the answer that long, capped by
 ``max_ttl_seconds``. ``reason`` is a lower-case token (``a-z0-9_``) used in audit logs.
 Anything else (other status, extra or missing keys, wrong types) is a resolver error.
 
+The URL must be ``https`` (the answer carries the API key). ``allow_insecure_http`` lifts that
+for dev and test stacks only.
+
 Failure handling: each attempt has a timeout. Connection errors, timeouts, 429, 502, 503 and
 504 are retried with exponential backoff and jitter up to ``max_attempts``; after the last one
 the resolver raises ``ResolverUnavailableError`` (the request fails closed). Any other
@@ -34,6 +39,7 @@ import hmac
 import json
 import logging
 import random
+import secrets
 import ssl
 import time
 from collections.abc import Collection
@@ -60,16 +66,18 @@ from mcp_gateway.resolver.base import (
 logger = logging.getLogger(__name__)
 
 TIMESTAMP_HEADER = "X-MCP-Gateway-Timestamp"
+NONCE_HEADER = "X-MCP-Gateway-Nonce"
 SIGNATURE_HEADER = "X-MCP-Gateway-Signature"
+_NONCE_BYTES = 16
 # Statuses worth another attempt; everything else non-200 is a verdict about the request.
 RETRYABLE_STATUSES = frozenset({429, 502, 503, 504})
 # A decision is a few hundred bytes; refuse anything that looks like a runaway body.
 MAX_RESPONSE_BYTES = 64 * 1024
 
 
-def sign(secret: bytes, timestamp: int, body: bytes) -> str:
-    """The ``X-MCP-Gateway-Signature`` value for ``body`` sent at ``timestamp``."""
-    digest = hmac.new(secret, f"{timestamp}.".encode() + body, sha256).hexdigest()
+def sign(secret: bytes, timestamp: int, nonce: str, body: bytes) -> str:
+    """The ``X-MCP-Gateway-Signature`` value for ``body`` sent at ``timestamp`` with ``nonce``."""
+    digest = hmac.new(secret, f"{timestamp}.{nonce}.".encode() + body, sha256).hexdigest()
     return f"sha256={digest}"
 
 
@@ -146,8 +154,10 @@ class WebhookResolver:
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self._secret is not None:
             timestamp = int(time.time())
+            nonce = secrets.token_hex(_NONCE_BYTES)
             headers[TIMESTAMP_HEADER] = str(timestamp)
-            headers[SIGNATURE_HEADER] = sign(self._secret, timestamp, body)
+            headers[NONCE_HEADER] = nonce
+            headers[SIGNATURE_HEADER] = sign(self._secret, timestamp, nonce, body)
         return headers
 
     def _backoff(self, attempt: int) -> float:

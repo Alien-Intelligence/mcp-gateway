@@ -157,6 +157,9 @@ class WebhookResolverConfig(_Model):
     # Private CA bundle used to verify the webhook server (both auth modes); null = system CAs.
     ca_file: str | None
     default_upstream: str = Field(min_length=1)
+    # The reply carries the customer's API key, so the webhook must be https. True lifts that
+    # for plain http and exists for dev and test stacks only: false in any real deployment.
+    allow_insecure_http: bool
     # Per attempt, covering connect, send and read.
     timeout_seconds: float = Field(gt=0)
     max_attempts: int = Field(ge=1, le=10)
@@ -179,7 +182,12 @@ class WebhookResolverConfig(_Model):
 
     @model_validator(mode="after")
     def _mtls_needs_https(self) -> Self:
-        if isinstance(self.auth, MtlsAuthConfig) and urlsplit(self.url).scheme != "https":
+        scheme = urlsplit(self.url).scheme
+        if scheme != "https" and not self.allow_insecure_http:
+            raise ValueError(
+                "webhook url must be https (allow_insecure_http=true is for dev and test only)"
+            )
+        if isinstance(self.auth, MtlsAuthConfig) and scheme != "https":
             raise ValueError("mtls auth needs an https webhook url")
         if self.backoff_max_seconds < self.backoff_base_seconds:
             raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")

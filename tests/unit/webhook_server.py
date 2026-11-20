@@ -7,7 +7,7 @@ import hmac
 import ipaddress
 import ssl
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,21 +43,24 @@ class WebhookServer:
     _server: uvicorn.Server | None = None
     _task: "asyncio.Task[None] | None" = None
 
-    def verify(self, request: Request, body: bytes) -> bool | None:
+    def verify_headers(self, headers: Mapping[str, str], body: bytes) -> bool | None:
         if self.secret is None:
             return None
-        timestamp = request.headers.get("x-mcp-gateway-timestamp", "")
-        given = request.headers.get("x-mcp-gateway-signature", "")
+        timestamp = headers.get("x-mcp-gateway-timestamp", "")
+        nonce = headers.get("x-mcp-gateway-nonce", "")
+        given = headers.get("x-mcp-gateway-signature", "")
         expected = (
             "sha256="
-            + hmac.new(self.secret, f"{timestamp}.".encode() + body, hashlib.sha256).hexdigest()
+            + hmac.new(
+                self.secret, f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256
+            ).hexdigest()
         )
         fresh = timestamp.isdigit() and abs(time.time() - int(timestamp)) < 30
-        return fresh and hmac.compare_digest(given, expected)
+        return bool(nonce) and fresh and hmac.compare_digest(given, expected)
 
     async def _handle(self, request: Request) -> Response:
         body = await request.body()
-        valid = self.verify(request, body)
+        valid = self.verify_headers(request.headers, body)
         self.seen.append(Seen(body, dict(request.headers), valid))
         if valid is False:
             return JSONResponse({"error": "bad signature"}, status_code=401)
