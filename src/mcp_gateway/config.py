@@ -311,7 +311,8 @@ class ResolverCacheConfig(_Model):
     positive_ttl_seconds: float = Field(gt=0)
     # Short: a denial is re-checked soon so a freshly added mapping works quickly.
     negative_ttl_seconds: float = Field(gt=0)
-    max_entries: int = Field(ge=1)
+    # Required with ``state.type = memory``, null with ``redis`` (entries expire by TTL there).
+    max_entries: int | None = Field(ge=1)
 
 
 class UpstreamConfig(_Model):
@@ -408,18 +409,55 @@ class ObservabilityConfig(_Model):
 
 
 class SessionsConfig(_Model):
-    """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it (in memory)."""
+    """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it."""
 
-    max_entries: int = Field(gt=0)
+    # Required with ``state.type = memory``, null with ``redis`` (bindings expire by idle TTL
+    # and the per-subject cap there).
+    max_entries: int | None = Field(gt=0)
     # One subject over this cap evicts its own oldest binding, never another subject's.
     max_entries_per_subject: int = Field(gt=0)
     idle_ttl_seconds: float = Field(gt=0)
 
     @model_validator(mode="after")
     def _subject_cap_within_total(self) -> Self:
-        if self.max_entries_per_subject > self.max_entries:
+        if self.max_entries is not None and self.max_entries_per_subject > self.max_entries:
             raise ValueError("max_entries_per_subject must be <= max_entries")
         return self
+
+
+class MemoryStateConfig(_Model):
+    """Per-process state: correct for exactly one replica."""
+
+    type: Literal["memory"]
+
+
+_KEY_PREFIX = re.compile(r"[A-Za-z0-9_:.-]{1,64}")
+
+
+class RedisStateConfig(_Model):
+    """State shared by every replica in one Redis; any failure of it fails requests closed."""
+
+    type: Literal["redis"]
+    # File holding the redis:// or rediss:// URL (it may carry the password); never inline.
+    url_file: str = Field(min_length=1)
+    # Prepended to every key, so several gateways can share one Redis.
+    key_prefix: str
+    connect_timeout_seconds: float = Field(gt=0)
+    # Ceiling for every single Redis operation, including a script and a readiness ping.
+    operation_timeout_seconds: float = Field(gt=0)
+    max_connections: int = Field(ge=1)
+    # File holding base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials.
+    encryption_key_file: str = Field(min_length=1)
+
+    @field_validator("key_prefix")
+    @classmethod
+    def _prefix_shape(cls, value: str) -> str:
+        if _KEY_PREFIX.fullmatch(value) is None:
+            raise ValueError("key_prefix must be 1 to 64 characters of A-Z a-z 0-9 _ : . -")
+        return value
+
+
+StateConfig = Annotated[MemoryStateConfig | RedisStateConfig, Field(discriminator="type")]
 
 
 class PoliciesConfig(_Model):
@@ -454,6 +492,7 @@ class GatewayConfig(_Model):
     audit: AuditConfig
     observability: ObservabilityConfig
     sessions: SessionsConfig
+    state: StateConfig
     policies: PoliciesConfig
 
     @field_validator("public_url")
@@ -471,6 +510,19 @@ class GatewayConfig(_Model):
     def _audience_contains_public_url(self) -> Self:
         if self.public_url not in self.auth.audiences:
             raise ValueError("public_url must be listed in auth.audiences")
+        return self
+
+    @model_validator(mode="after")
+    def _bounds_match_the_state_backend(self) -> Self:
+        """The in-process bounds belong to ``memory`` only; none is silently ignored."""
+        bounds = {"sessions.max_entries": self.sessions.max_entries}
+        if self.resolver_cache is not None:
+            bounds["resolver_cache.max_entries"] = self.resolver_cache.max_entries
+        for name, value in bounds.items():
+            if self.state.type == "memory" and value is None:
+                raise ValueError(f"{name} is required when state.type is memory")
+            if self.state.type == "redis" and value is not None:
+                raise ValueError(f"{name} must be null when state.type is redis")
         return self
 
     @property

@@ -66,6 +66,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
         "audit": {"enabled": True},
         "observability": {"otlp": None},
         "sessions": {"max_entries": 100, "max_entries_per_subject": 20, "idle_ttl_seconds": 600},
+        "state": {"type": "memory"},
         "policies": {"allowed_origins": ["https://app.example.com"]},
     }
 

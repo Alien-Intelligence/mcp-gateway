@@ -3,21 +3,27 @@
 * Key: (subject, email, organization, sorted groups).
 * Positive entries live ``positive_ttl_seconds``, or the credential's ``ttl_seconds`` when that
   is shorter. Denials live ``negative_ttl_seconds``. Errors are never cached.
-* Single flight: concurrent misses for one identity share one backend call. The call runs in
-  its own task and is cancelled only when every caller waiting for it has gone.
-* Bounded: at most ``max_entries`` entries, least recently used evicted first.
-* ``invalidate`` drops the entry, abandons a lookup still in flight (its answer may predate the
-  reason for invalidating, so it is neither cached nor shared with later callers) and
-  forwards to the wrapped resolver.
+* Where entries live is a ``CacheStore``: this process (``MemoryCacheStore``, bounded, least
+  recently used evicted first) or a Redis shared by all replicas. A store failure
+  (``StateUnavailableError``) propagates: the inner resolver is never called around a broken
+  cache, because the entry it would skip may have been invalidated.
+* Single flight, per process: concurrent misses for one identity share one backend call. The
+  call runs in its own task and is cancelled only when every caller waiting for it has gone.
+  Replicas do not coordinate their flights; two replicas missing at once each ask the backend.
+* ``invalidate`` drops the entry, abandons a lookup still in flight in this process (its answer
+  may predate the reason for invalidating, so it is neither cached nor shared with later
+  callers) and forwards to the wrapped resolver. A lookup in flight on another replica is
+  fenced by the store's generation token: the store refuses its late ``put``.
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from mcp_gateway.config import ResolverCacheConfig
 from mcp_gateway.identity import Identity
@@ -34,35 +40,50 @@ def cache_key(identity: Identity) -> CacheKey:
     return (identity.subject, identity.email, identity.organization, tuple(sorted(identity.groups)))
 
 
+def canonical_cache_key(key: CacheKey) -> str:
+    """One stable text per identity (what a shared store digests into a key name)."""
+    return json.dumps(list(key), ensure_ascii=False, separators=(",", ":"))
+
+
+class CacheStore(Protocol):
+    """Where cached outcomes live. Every method may raise ``StateUnavailableError``."""
+
+    async def get(self, key: CacheKey) -> Outcome | None: ...
+
+    async def generation(self, key: CacheKey) -> str:
+        """An opaque token that changes whenever the entry is invalidated.
+
+        Read it BEFORE asking the backend and hand it back to ``put``.
+        """
+        ...
+
+    async def put(
+        self, key: CacheKey, outcome: Outcome, ttl_seconds: float, generation: str
+    ) -> None:
+        """Store the outcome unless the entry was invalidated since ``generation`` was read."""
+        ...
+
+    async def invalidate(self, key: CacheKey) -> None: ...
+
+
 @dataclass
 class _Entry:
     outcome: Outcome
     expires_at: float
 
 
-class _Flight:
-    def __init__(self, task: "asyncio.Task[Outcome]") -> None:
-        self.task = task
-        self.waiters = 0
+class MemoryCacheStore:
+    """Per-process store: correct for one replica only."""
 
-
-class CachingResolver:
-    def __init__(
-        self,
-        inner: CredentialResolver,
-        config: ResolverCacheConfig,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._inner = inner
-        self._config = config
+    def __init__(self, max_entries: int, clock: Callable[[], float] = time.monotonic) -> None:
+        self._max_entries = max_entries
         self._clock = clock
         self._entries: OrderedDict[CacheKey, _Entry] = OrderedDict()
-        self._flights: dict[CacheKey, _Flight] = {}
 
     def __len__(self) -> int:
         return len(self._entries)
 
-    def _lookup(self, key: CacheKey) -> Outcome | None:
+    async def get(self, key: CacheKey) -> Outcome | None:
         entry = self._entries.get(key)
         if entry is None:
             return None
@@ -72,32 +93,71 @@ class CachingResolver:
         self._entries.move_to_end(key)
         return entry.outcome
 
-    def _store(self, key: CacheKey, outcome: Outcome) -> None:
-        if isinstance(outcome, Denied):
-            ttl = self._config.negative_ttl_seconds
-        else:
-            ttl = self._config.positive_ttl_seconds
-            if outcome.ttl_seconds is not None:
-                ttl = min(ttl, outcome.ttl_seconds)
-        self._entries[key] = _Entry(outcome, self._clock() + ttl)
+    async def generation(self, key: CacheKey) -> str:
+        # Nothing outside this process can invalidate an entry; the flight map covers the rest.
+        return ""
+
+    async def put(
+        self, key: CacheKey, outcome: Outcome, ttl_seconds: float, generation: str
+    ) -> None:
+        self._entries[key] = _Entry(outcome, self._clock() + ttl_seconds)
         self._entries.move_to_end(key)
-        while len(self._entries) > self._config.max_entries:
+        while len(self._entries) > self._max_entries:
             self._entries.popitem(last=False)
+
+    async def invalidate(self, key: CacheKey) -> None:
+        self._entries.pop(key, None)
+
+
+class _Flight:
+    task: "asyncio.Task[Outcome]"
+
+    def __init__(self) -> None:
+        self.waiters = 0
+
+
+class CachingResolver:
+    def __init__(
+        self, inner: CredentialResolver, config: ResolverCacheConfig, store: CacheStore
+    ) -> None:
+        self._inner = inner
+        self._config = config
+        self._store = store
+        self._flights: dict[CacheKey, _Flight] = {}
+
+    @property
+    def store(self) -> CacheStore:
+        return self._store
+
+    def _ttl(self, outcome: Outcome) -> float:
+        if isinstance(outcome, Denied):
+            return self._config.negative_ttl_seconds
+        ttl = self._config.positive_ttl_seconds
+        if outcome.ttl_seconds is not None:
+            ttl = min(ttl, outcome.ttl_seconds)
+        return ttl
+
+    async def _fill(self, key: CacheKey, identity: Identity, flight: _Flight) -> Outcome:
+        # The token is read before the backend is asked: an invalidation (here or on another
+        # replica) that lands while the backend works makes the store refuse the answer.
+        generation = await self._store.generation(key)
+        outcome = await self._inner.resolve(identity)
+        if self._flights.get(key) is flight:
+            await self._store.put(key, outcome, self._ttl(outcome), generation)
+        return outcome
 
     def _finished(self, key: CacheKey, flight: _Flight, task: "asyncio.Task[Outcome]") -> None:
         if self._flights.get(key) is flight:
             del self._flights[key]
-            if not task.cancelled() and task.exception() is None:
-                self._store(key, task.result())
-        elif not task.cancelled():
+        if not task.cancelled():
             # Abandoned by invalidate or close: nobody awaits it, but the error is not lost.
             task.exception()
 
     def _start(self, key: CacheKey, identity: Identity) -> _Flight:
-        task = asyncio.get_running_loop().create_task(self._inner.resolve(identity))
-        flight = _Flight(task)
+        flight = _Flight()
+        flight.task = asyncio.get_running_loop().create_task(self._fill(key, identity, flight))
         self._flights[key] = flight
-        task.add_done_callback(lambda done: self._finished(key, flight, done))
+        flight.task.add_done_callback(lambda done: self._finished(key, flight, done))
         return flight
 
     async def resolve(self, identity: Identity) -> Outcome:
@@ -110,7 +170,7 @@ class CachingResolver:
         A caller that joins a lookup already in flight is a miss: the backend was asked.
         """
         key = cache_key(identity)
-        cached = self._lookup(key)
+        cached = await self._store.get(key)
         if cached is not None:
             return cached, "negative" if isinstance(cached, Denied) else "hit"
         flight = self._flights.get(key)
@@ -130,13 +190,12 @@ class CachingResolver:
 
     async def invalidate(self, identity: Identity) -> None:
         key = cache_key(identity)
-        self._entries.pop(key, None)
         self._flights.pop(key, None)
+        await self._store.invalidate(key)
         await self._inner.invalidate(identity)
 
     async def aclose(self) -> None:
         for flight in list(self._flights.values()):
             flight.task.cancel()
         self._flights.clear()
-        self._entries.clear()
         await self._inner.aclose()
