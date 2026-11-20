@@ -45,3 +45,7 @@ coverage.xml
 dev/state/
 *.key
 mapping.json
+
+# Throwaway secrets of the stub target (scripts/ci_e2e_stub.sh)
+.env.stub
+artifacts/

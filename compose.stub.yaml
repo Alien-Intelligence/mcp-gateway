@@ -1,0 +1,91 @@
+# Stub target: the gateways forward to the fault-injection upstream stub and the stack writes
+# its own state (fake keys), so nothing outside the repository is needed.
+#   docker compose -f compose.yaml -f compose.stub.yaml --profile stub --env-file .env.stub \
+#     up --build --wait
+
+services:
+  state-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [stub]
+    user: "1000:1000"
+    command: [python, scripts/stub_fixture.py, --state-dir, /run/gateway/state]
+    volumes:
+      - state:/run/gateway/state
+    networks: [gatewaydev]
+    restart: "no"
+
+  upstream-stub:
+    build:
+      context: ./dev/upstream-stub
+    profiles: [stub]
+    user: "1000:1000"
+    environment:
+      STUB_KEYS_FILE: /run/gateway/state/stub-keys.json
+    volumes:
+      - state:/run/gateway/state:ro
+    ports:
+      - "127.0.0.1:14000:4000"
+    networks: [gatewaydev]
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/_stub/requests", timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  seed:
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+
+  gateway-keycloak:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-hydra:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-chain:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-unreachable:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+
+  # The end-to-end harness, on the host network so the localhost issuers resolve as on a laptop.
+  #   docker compose ... --profile harness run --name e2e-run harness
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [harness]
+    network_mode: host
+    environment:
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
+      E2E_RUN_DIR: /out
+      MCP_GATEWAY_TEST_PG_DSN: postgresql://gateway:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:15432/gateway
+      MCP_GATEWAY_TEST_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:16379/0
+    command:
+      - pytest
+      - tests/e2e
+      - tests/integration
+      - -m
+      - e2e_stub or integration
+      - -v
+      - -p
+      - no:cacheprovider
+      - --junitxml=/out/junit.xml

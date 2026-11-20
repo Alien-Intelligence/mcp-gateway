@@ -1,6 +1,13 @@
-# Development identity providers and gateway instances for the OAuth e2e tests.
-# Secrets come from the gitignored .env (see .env.example). Everything is bound
-# to loopback.
+# Development stack: two OAuth servers (Keycloak, Hydra), the credential backends (PostgreSQL,
+# Redis, a webhook), and four gateways. One file set serves two targets:
+#
+#   dev   docker compose up -d --build --wait              (compose.dev.yaml via COMPOSE_FILE in .env)
+#         the gateways forward to the real dev MCP, the state comes from scripts/dev_fixture.py
+#   stub  docker compose -f compose.yaml -f compose.stub.yaml --profile stub --env-file .env.stub ...
+#         the gateways forward to the fault-injection stub, the state is written by the stack
+#
+# Secrets come from the gitignored .env / .env.stub (see .env.example). Everything is bound to
+# loopback.
 
 name: mcp-gateway-dev
 
@@ -13,15 +20,42 @@ networks:
         - subnet: 172.31.250.0/24
           gateway: 172.31.250.1
 
-x-gateway-state: &gateway-state
-  type: bind
-  source: ${MCP_GATEWAY_STATE_DIR:?set MCP_GATEWAY_STATE_DIR in .env}
-  target: /run/gateway/state
-  read_only: true
+
+volumes:
+  # The gateway state (keys, mappings, seeds): see scripts/state_layout.py. A bind mount of the
+  # fixture's directory in compose.dev.yaml, written by the state-init service in the stub target.
+  state: {}
+  # Connection secrets (database DSN, Redis URL, webhook HMAC secret), written by the seed step.
+  conn: {}
+
+x-e2e-tools: &e2e-tools
+  build:
+    context: .
+    dockerfile: Dockerfile.e2e
+  image: mcp-gateway-e2e:local
+
+x-gateway: &gateway
+  build:
+    context: .
+  volumes:
+    - state:/run/gateway/state:ro
+    - conn:/run/gateway/conn:ro
+  networks: [gatewaydev]
+  healthcheck:
+    test:
+      - CMD
+      - python
+      - -c
+      - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3)
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 5s
 
 services:
   keycloak:
-    image: quay.io/keycloak/keycloak:26.8.2
+    build:
+      context: ./dev/keycloak
     command: ["start-dev", "--import-realm"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
@@ -31,13 +65,10 @@ services:
       KC_HOSTNAME: http://localhost:18080
       KC_HTTP_ENABLED: "true"
       KC_HEALTH_ENABLED: "true"
-    volumes:
-      - ./dev/keycloak/alien-gateway-dev-realm.json:/opt/keycloak/data/import/alien-gateway-dev-realm.json:ro
     ports:
       - "127.0.0.1:18080:8080"
     networks:
-      gatewaydev:
-        aliases: [keycloak]
+      - gatewaydev
     healthcheck:
       # The image has no curl: probe the management port with bash.
       test:
@@ -52,13 +83,12 @@ services:
       start_period: 20s
 
   hydra:
-    image: oryd/hydra:v26.2.0
+    build:
+      context: ./dev/hydra
     # --dev: the issuer is plain http on localhost.
     command: ["serve", "all", "--config", "/etc/hydra/hydra.yml", "--dev"]
     environment:
       SECRETS_SYSTEM: ${HYDRA_SYSTEM_SECRET:?set HYDRA_SYSTEM_SECRET in .env}
-    volumes:
-      - ./dev/hydra/hydra.yml:/etc/hydra/hydra.yml:ro
     ports:
       - "127.0.0.1:14444:4444"
     expose:
@@ -99,82 +129,150 @@ services:
       retries: 20
       start_period: 3s
 
-  gateway-keycloak:
-    build:
-      context: .
+  postgres:
+    image: postgres:17.6-alpine
     environment:
-      MCP_GATEWAY_UPSTREAM_URL: ${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}
-      MCP_GATEWAY_CONFIG: |
-        {"public_url": "http://localhost:18000/mcp", "listen": {"host": "0.0.0.0", "port": 8000},
-         "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev",
-                  "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs",
-                  "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"],
-                  "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"],
-                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600,
-                  "jwks_fetch_timeout_seconds": 5,
-                  "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}},
-         "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
-         "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
-                               "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
-                               "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
-         "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30}, "audit": {"enabled": true}}
+      POSTGRES_USER: gateway
+      POSTGRES_DB: gateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # Disposable: the seed step refills it at every stack start.
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15432:5432"
+    networks: [gatewaydev]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --save '' --appendonly no"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    networks: [gatewaydev]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 2s
+
+  # Loads PostgreSQL and Redis from the state directory and writes the connection secrets.
+  seed:
+    <<: *e2e-tools
+    user: "1000:1000"
+    command:
+      - python
+      - scripts/seed_stores.py
+      - --state-dir
+      - /run/gateway/state
+      - --conn-dir
+      - /run/gateway/conn
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      WEBHOOK_HMAC_SECRET: ${WEBHOOK_HMAC_SECRET:?set WEBHOOK_HMAC_SECRET in .env}
     volumes:
-      - *gateway-state
+      - state:/run/gateway/state:ro
+      - conn:/run/gateway/conn
+    networks: [gatewaydev]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Stand-in for a customer's webhook. Runs as the owner of the 600 key files.
+  webhook-resolver:
+    build:
+      context: ./dev/webhook-resolver
+    user: "1000:1000"
+    environment:
+      WEBHOOK_STATE_DIR: /run/gateway/state/webhook
+      WEBHOOK_HMAC_SECRET_FILE: /run/gateway/conn/hmac.secret
+      WEBHOOK_TIMESTAMP_WINDOW_SECONDS: "300"
+      WEBHOOK_HOST: 0.0.0.0
+      WEBHOOK_PORT: "8080"
+    volumes:
+      - state:/run/gateway/state:ro
+      - conn:/run/gateway/conn:ro
+    ports:
+      - "127.0.0.1:18090:8080"
+    networks: [gatewaydev]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  # Keycloak, static resolver.
+  gateway-keycloak:
+    <<: *gateway
+    environment:
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18000/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576}, "audit": {"enabled": true}, "sessions": {"max_entries": 10000, "idle_ttl_seconds": 600}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"]}}
     ports:
       - "127.0.0.1:18000:8000"
-    networks:
-      gatewaydev:
-        aliases: [gateway-keycloak]
     depends_on:
       keycloak:
         condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3)
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+      seed:
+        condition: service_completed_successfully
 
+  # Hydra, static resolver.
   gateway-hydra:
-    build:
-      context: .
+    <<: *gateway
     environment:
-      MCP_GATEWAY_UPSTREAM_URL: ${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}
       MCP_GATEWAY_CONFIG: |
-        {"public_url": "http://localhost:18001/mcp", "listen": {"host": "0.0.0.0", "port": 8000},
-         "auth": {"issuer": "http://localhost:14444",
-                  "jwks_uri": "http://hydra:4444/.well-known/jwks.json",
-                  "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"],
-                  "required_scopes": [], "scopes_advertised": ["openid"],
-                  "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600,
-                  "jwks_fetch_timeout_seconds": 5,
-                  "identity": {"subject": "sub", "email": "ext.email", "email_verified": "ext.email_verified", "organization": "ext.org", "groups": "ext.groups"}},
-         "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
-         "upstreams": {"primary": {"url": "${MCP_GATEWAY_UPSTREAM_URL:?set MCP_GATEWAY_UPSTREAM_URL in .env}",
-                               "connect_timeout_seconds": 10, "read_timeout_seconds": 130,
-                               "write_timeout_seconds": 30, "pool_timeout_seconds": 10}},
-         "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30}, "audit": {"enabled": true}}
-    volumes:
-      - *gateway-state
+        {"public_url": "http://localhost:18001/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:14444", "jwks_uri": "http://hydra:4444/.well-known/jwks.json", "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "ext.email", "email_verified": "ext.email_verified", "organization": "ext.org", "groups": "ext.groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576}, "audit": {"enabled": true}, "sessions": {"max_entries": 10000, "idle_ttl_seconds": 600}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"]}}
     ports:
       - "127.0.0.1:18001:8000"
-    networks:
-      gatewaydev:
-        aliases: [gateway-hydra]
     depends_on:
       hydra:
         condition: service_healthy
-    healthcheck:
-      test:
-        - CMD
-        - python
-        - -c
-        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/healthz", timeout=3)
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+      seed:
+        condition: service_completed_successfully
+
+  # Keycloak, chain of store_redis, store_sql and webhook (HMAC) behind a cache; needs the mcp-write scope.
+  gateway-chain:
+    <<: *gateway
+    environment:
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18002/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18002/mcp"], "algorithms": ["RS256"], "required_scopes": ["mcp-write"], "scopes_advertised": ["openid", "mcp-gateway", "mcp-write"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "chain", "resolvers": [{"type": "store_redis", "url_file": "/run/gateway/conn/redis.url", "key_pattern": "mcp-gateway:cred:{email}", "default_upstream": "stateless", "connect_timeout_seconds": 2, "socket_timeout_seconds": 2, "max_connections": 8}, {"type": "store_sql", "dsn_file": "/run/gateway/conn/pg.dsn", "query": "SELECT api_key, upstream, labels FROM credentials WHERE email = %(email)s", "default_upstream": "stateless", "pool_min_size": 1, "pool_max_size": 4, "connect_timeout_seconds": 2, "statement_timeout_seconds": 2}, {"type": "webhook", "url": "http://webhook-resolver:8080/resolve", "auth": {"type": "hmac", "secret_file": "/run/gateway/conn/hmac.secret"}, "ca_file": null, "default_upstream": "stateless", "timeout_seconds": 3, "max_attempts": 2, "backoff_base_seconds": 0.1, "backoff_max_seconds": 0.5, "max_ttl_seconds": 60}]}, "resolver_cache": {"positive_ttl_seconds": 4, "negative_ttl_seconds": 1, "max_entries": 1000}, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576}, "audit": {"enabled": true}, "sessions": {"max_entries": 10000, "idle_ttl_seconds": 600}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"]}}
+    ports:
+      - "127.0.0.1:18002:8000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  # Keycloak, a webhook nobody listens to: the resolver-down case.
+  gateway-unreachable:
+    <<: *gateway
+    environment:
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18003/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18003/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "webhook", "url": "http://webhook-resolver:9/resolve", "auth": {"type": "hmac", "secret_file": "/run/gateway/conn/hmac.secret"}, "ca_file": null, "default_upstream": "stateless", "timeout_seconds": 3, "max_attempts": 2, "backoff_base_seconds": 0.1, "backoff_max_seconds": 0.5, "max_ttl_seconds": 60}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576}, "audit": {"enabled": true}, "sessions": {"max_entries": 10000, "idle_ttl_seconds": 600}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"]}}
+    ports:
+      - "127.0.0.1:18003:8000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
