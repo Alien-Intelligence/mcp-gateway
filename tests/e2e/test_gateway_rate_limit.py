@@ -38,8 +38,6 @@ DENIED_TOOL = "datacluster_keyword_search"
 INVALID_PARAMS = -32602
 BURST = 40
 MAX_BURN_REQUESTS = 60
-# What the test itself spent before the burn: initialize, initialized, tools/call.
-SPENT_BEFORE_BURN = 3
 SLACK = 5
 SETTLE_FLOOR_SECONDS = 10.0
 
@@ -81,7 +79,9 @@ async def test_bucket_exhaustion_refuses_in_the_documented_shapes(
             assert response.status_code == 200, (response.status_code, response.text[:300])
             assert rpc_message(response)["error"]["code"] == INVALID_PARAMS
         assert limited is not None, f"no rate limit after {sent} requests"
-        assert sent <= BURST - SPENT_BEFORE_BURN + SLACK, f"limited only after {sent} requests"
+        # The wait for the feed refilled the bucket, so the burn meets a full one: BURST requests
+        # pass, the next is refused (a few more only if a refill lands mid-loop).
+        assert sent <= BURST + SLACK, f"limited only after {sent} requests"
         burn_retry_after = assert_rate_limited_tool_result(limited)
 
         allowed = await raw_post(
