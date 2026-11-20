@@ -194,15 +194,25 @@ async def test_a_call_whose_tool_cannot_be_read_is_refused(
     assert (line["outcome"], line["reason"]) == ("tool_denied", "invalid_params")
 
 
-@pytest.mark.parametrize("name", ["delete_all", None])
-async def test_a_refused_call_without_an_id_is_an_http_400_with_a_null_id(
-    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream, name: Any
+@pytest.mark.parametrize("name", ["search", "delete_all", None])
+async def test_a_tool_call_without_an_id_is_an_invalid_request(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    name: Any,
 ) -> None:
-    response = await http.post("/mcp", json=call(name, request_id=None), headers=alice)
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=call(name, request_id=None), headers=alice)
     assert response.status_code == 400
-    assert response.json()["id"] is None
-    assert response.json()["error"]["code"] == -32602
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
     assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "invalid_request"
 
 
 async def test_a_call_with_a_string_id_is_answered_with_that_id(
@@ -648,15 +658,38 @@ async def test_the_other_failed_responses_are_still_relayed_as_they_came(
     assert (response.status_code, response.content) == (500, b'{"e":1}')
 
 
-async def test_a_tool_list_without_an_id_is_forwarded_as_it_is_not_a_request(
-    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+async def test_a_tool_list_without_an_id_is_an_invalid_request_not_a_notification(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post(
+            "/mcp", json={"jsonrpc": "2.0", "method": "tools/list"}, headers=alice
+        )
+    assert response.status_code == 400
+    assert response.json()["id"] is None
+    assert response.json()["error"]["code"] == -32600
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "invalid_request"
+
+
+async def test_without_a_policy_a_tool_request_without_an_id_is_forwarded(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
 ) -> None:
     upstream.responder = lambda _r: httpx.Response(202)
-    response = await http.post(
-        "/mcp", json={"jsonrpc": "2.0", "method": "tools/list"}, headers=alice
-    )
-    assert response.status_code == 202
-    assert len(upstream.requests) == 1
+    async with client_for(build(mapping_dir, transport, tools=None)) as client:
+        for method in ("tools/list", "tools/call"):
+            response = await client.post(
+                "/mcp", json={"jsonrpc": "2.0", "method": method}, headers=alice
+            )
+            assert response.status_code == 202
+    assert len(upstream.requests) == 2
 
 
 # --- tools/list, SSE --------------------------------------------------------------------

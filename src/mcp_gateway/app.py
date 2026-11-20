@@ -506,9 +506,9 @@ class Gateway:
             return json_rpc_response(400, INVALID_REQUEST, BATCH_REFUSED_MESSAGE, None)
         if rpc.method != "tools/call":
             return None
-        # Without an id no reply can be correlated: the refusal is an HTTP error.
-        status = 200 if rpc.expects_reply else 400
-        reply_id = rpc.id if rpc.expects_reply else None
+        # A tool request without an id was refused above, so a reply can always be correlated.
+        status = 200
+        reply_id = rpc.id
         if rpc.tool is None:
             audit.reason = "invalid_params"
             audit.emit(status=status, outcome="tool_denied")

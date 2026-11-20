@@ -69,8 +69,9 @@ class RpcInfo:
     # fields above cannot see inside a batch, so the tool policy needs to be told.
     tool_batch: bool = False
     # A request (an object with a ``method``) whose ``id`` key is present but is neither a string
-    # nor an integer. No reply can be correlated with it, and the upstream may read it
-    # differently from the gateway (1.0 is 1 to some parsers), so a policy refuses it.
+    # nor an integer, or a ``tools/call`` / ``tools/list`` with no ``id`` at all. No reply can be
+    # correlated with it, and the upstream may read it differently from the gateway (1.0 is 1
+    # to some parsers), so a policy refuses it.
     invalid_id: bool = False
 
     @property
@@ -109,12 +110,12 @@ def _valid_id(raw_id: Any) -> bool:
 
 
 def _has_invalid_id(document: Any) -> bool:
-    return (
-        isinstance(document, dict)
-        and "method" in document
-        and "id" in document
-        and not _valid_id(document["id"])
-    )
+    """A request whose id is unusable, or a tool request with none (those are never notifications)."""
+    if not isinstance(document, dict) or "method" not in document:
+        return False
+    if "id" not in document:
+        return document["method"] in TOOL_METHODS
+    return not _valid_id(document["id"])
 
 
 def _single(document: dict[str, Any]) -> RpcInfo:

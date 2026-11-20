@@ -223,6 +223,8 @@ def test_a_deeply_nested_body_is_unreadable_not_a_crash() -> None:
         (b'{"id":1,"method":"x"}', False),
         (b'{"id":"a","method":"x"}', False),
         (b'{"method":"x"}', False),
+        (b'{"method":"tools/list"}', True),
+        (b'{"method":"tools/call","params":{"name":"x"}}', True),
         (b'{"id":1.0,"result":{}}', False),
         (b'[{"id":1,"method":"x"},{"id":[],"method":"x"}]', True),
         (b'[{"id":1,"method":"x"}]', False),
