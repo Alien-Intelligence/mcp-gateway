@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from mcp_gateway.jsonrpc import NO_RPC, error_body, parse_request
+from mcp_gateway.jsonrpc import NO_RPC, check_mcp_headers, error_body, parse_request
 
 
 def test_single_request_with_id() -> None:
@@ -51,3 +51,70 @@ def test_error_body_shape() -> None:
         "error": {"code": -32001, "message": "m", "data": {"upstream_status": 401}},
     }
     assert "data" not in error_body(-32001, "m", None)["error"]
+
+
+def _rpc(method: str, **params: object) -> bytes:
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+
+
+def test_target_follows_the_method() -> None:
+    assert parse_request(_rpc("tools/call", name="t")).target == "t"
+    assert parse_request(_rpc("prompts/get", name="p")).target == "p"
+    assert parse_request(_rpc("resources/read", uri="file:///x")).target == "file:///x"
+    assert parse_request(_rpc("tools/list")).target is None
+    assert parse_request(_rpc("prompts/get", name="p")).tool is None
+
+
+def test_consistent_headers_pass() -> None:
+    rpc = parse_request(_rpc("tools/call", name="get_weather"))
+    headers = [("Mcp-Method", "tools/call"), ("MCP-NAME", "get_weather")]
+    assert check_mcp_headers(headers, rpc) is None
+
+
+def test_absent_headers_pass_for_earlier_protocol_eras() -> None:
+    assert check_mcp_headers([], parse_request(_rpc("tools/call", name="t"))) is None
+
+
+def test_method_mismatch_is_reported_without_values() -> None:
+    rpc = parse_request(_rpc("tools/call", name="t"))
+    message = check_mcp_headers([("mcp-method", "tools/list")], rpc)
+    assert message is not None
+    assert "Mcp-Method" in message
+    assert "tools/list" not in message
+
+
+@pytest.mark.parametrize(
+    ("method", "params", "header"),
+    [
+        ("tools/call", {"name": "real"}, "other"),
+        ("prompts/get", {"name": "real"}, "other"),
+        ("resources/read", {"uri": "file:///real"}, "file:///other"),
+        ("tools/call", {"name": "real"}, "=?base64?b3RoZXI=?="),
+        ("tools/call", {"name": "real"}, "=?base64?%%%?="),
+        ("tools/call", {}, "anything"),
+    ],
+)
+def test_name_mismatch_is_reported(method: str, params: dict[str, str], header: str) -> None:
+    rpc = parse_request(_rpc(method, **params))
+    message = check_mcp_headers([("mcp-method", method), ("mcp-name", header)], rpc)
+    assert message is not None
+    assert "Mcp-Name" in message
+
+
+def test_base64_sentinel_is_decoded_before_comparison() -> None:
+    rpc = parse_request(_rpc("tools/call", name="Hello, 世界"))
+    encoded = "=?base64?SGVsbG8sIOS4lueVjA==?="
+    assert check_mcp_headers([("mcp-name", encoded)], rpc) is None
+
+
+def test_duplicate_headers_are_a_mismatch() -> None:
+    rpc = parse_request(_rpc("tools/call", name="t"))
+    assert check_mcp_headers([("mcp-method", "tools/call"), ("mcp-method", "tools/call")], rpc)
+
+
+def test_name_header_on_a_method_without_a_name_is_ignored() -> None:
+    assert check_mcp_headers([("mcp-name", "x")], parse_request(_rpc("tools/list"))) is None
+
+
+def test_non_rpc_bodies_are_not_inspected() -> None:
+    assert check_mcp_headers([("mcp-method", "tools/list")], NO_RPC) is None

@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from mcp_gateway.origin import normalize_origin
+
 CONFIG_ENV_VAR = "MCP_GATEWAY_CONFIG"
 
 # Asymmetric algorithms only: HS* would let anyone holding the public key forge tokens.
@@ -152,10 +154,38 @@ class UpstreamConfig(_Model):
 class LimitsConfig(_Model):
     max_request_body_bytes: int = Field(gt=0)
     request_body_timeout_seconds: float = Field(gt=0)
+    # One SSE event larger than this aborts the stream: the relay never buffers beyond one event.
+    max_sse_event_bytes: int = Field(gt=0)
 
 
 class AuditConfig(_Model):
     enabled: bool
+
+
+class SessionsConfig(_Model):
+    """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it (in memory)."""
+
+    max_entries: int = Field(gt=0)
+    idle_ttl_seconds: float = Field(gt=0)
+
+
+class PoliciesConfig(_Model):
+    # Browser origins allowed on the MCP endpoint, as scheme://host[:port]. An empty list
+    # refuses every request that carries an Origin header; requests without one pass.
+    allowed_origins: list[str]
+
+    @field_validator("allowed_origins")
+    @classmethod
+    def _normalised_origins(cls, value: list[str]) -> list[str]:
+        normalised: list[str] = []
+        for item in value:
+            origin = normalize_origin(item)
+            if origin is None:
+                raise ValueError(
+                    "allowed_origins entries must be origins such as 'https://app.example.com'"
+                )
+            normalised.append(origin)
+        return normalised
 
 
 class GatewayConfig(_Model):
@@ -166,6 +196,8 @@ class GatewayConfig(_Model):
     upstreams: dict[str, UpstreamConfig] = Field(min_length=1)
     limits: LimitsConfig
     audit: AuditConfig
+    sessions: SessionsConfig
+    policies: PoliciesConfig
 
     @field_validator("public_url")
     @classmethod

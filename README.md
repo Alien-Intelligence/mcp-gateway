@@ -23,7 +23,7 @@ MCP client ──OAuth 2.1 + PKCE──> your OAuth server (token aud = the gate
 ```
 
 - The gateway is an OAuth **resource server** only. It issues no tokens and registers no clients: your OAuth server does that.
-- It publishes Protected Resource Metadata (RFC 9728) at `/.well-known/oauth-protected-resource` and at the path-specific variant (`/.well-known/oauth-protected-resource/mcp` for a `/mcp` endpoint).
+- It publishes Protected Resource Metadata (RFC 9728) at the path-specific URL only (`/.well-known/oauth-protected-resource/mcp` for a `/mcp` endpoint), with `resource` equal to `public_url`. The origin-level URL answers `404`: RFC 9728 requires `resource` to match the URL the document was fetched for.
 - A request without a valid token gets `401` with `WWW-Authenticate: Bearer resource_metadata="…", scope="…"`.
 - A signed-in user with no mapping gets `403` with a JSON-RPC error (`-32010`) and no challenge.
 - If Alien rejects the mapped key (`401` or `402`), the client gets a JSON-RPC error (`-32001` / `-32002`), never an OAuth challenge, so it does not loop on re-authentication.
@@ -59,7 +59,11 @@ One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every
 
   A `match` names exactly one of `subject`, `email`, `organization` or `group`, tried in that order. Key files are read relative to the mapping file and re-read on each request, so a rotated key is picked up without a restart. The mapping file is reloaded when it changes.
 - `upstreams`: name to URL and timeouts.
-- `limits` (`max_request_body_bytes`, `request_body_timeout_seconds`: 408 when the body does not arrive in time), `audit`.
+- `limits` (`max_request_body_bytes`, `request_body_timeout_seconds`: 408 when the body does not arrive in time, `max_sse_event_bytes`: a larger SSE event aborts the stream), `audit`.
+- `sessions` (`max_entries`, `idle_ttl_seconds`): an upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to. A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
+- `policies.allowed_origins`: browser origins (`scheme://host[:port]`) allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
+
+Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (`HeaderMismatch`, MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
 
 On Alien, an API key is a billed user and an upstream session: users that share a key share a line in the consumption feed. Map one key per user when you need per-user accounting.
 

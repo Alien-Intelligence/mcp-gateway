@@ -57,8 +57,14 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
                 "pool_timeout_seconds": 10,
             }
         },
-        "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30},
+        "limits": {
+            "max_request_body_bytes": 1048576,
+            "request_body_timeout_seconds": 30,
+            "max_sse_event_bytes": 65536,
+        },
         "audit": {"enabled": True},
+        "sessions": {"max_entries": 100, "idle_ttl_seconds": 600},
+        "policies": {"allowed_origins": ["https://app.example.com"]},
     }
 
 

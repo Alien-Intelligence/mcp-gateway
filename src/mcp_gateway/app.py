@@ -1,7 +1,9 @@
 """Starlette application: OAuth resource server in front of the proxy."""
 
 import logging
-from collections.abc import AsyncIterator
+import re
+import time
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -25,11 +27,16 @@ from mcp_gateway.jsonrpc import (
     DENIED,
     DENY_CODES,
     GATEWAY_ERROR,
+    HEADER_MISMATCH,
     INVALID_REQUEST,
     NO_RPC,
+    ORIGIN_REFUSED,
+    SESSION_NOT_FOUND,
     RpcInfo,
+    check_mcp_headers,
     parse_request,
 )
+from mcp_gateway.origin import OriginPolicy
 from mcp_gateway.proxy import UpstreamProxy, build_client, json_rpc_response
 from mcp_gateway.resolver import (
     Credential,
@@ -38,12 +45,23 @@ from mcp_gateway.resolver import (
     ResolverError,
     StaticResolver,
 )
+from mcp_gateway.sessions import SessionRegistry
 
 logger = logging.getLogger(__name__)
 
 JWKS_RETRY_AFTER_SECONDS = 5
 DENIED_MESSAGE = "This account is not enabled for this service. Contact your administrator."
 GATEWAY_ERROR_MESSAGE = "The gateway could not obtain credentials for this request."
+ORIGIN_REFUSED_MESSAGE = "The request origin is not allowed."
+SESSION_NOT_FOUND_MESSAGE = "The session was not found. Start a new session."
+
+# RFC 6750 section 3: a quoted auth-param value may hold only %x20-21 / %x23-5B / %x5D-7E.
+_QUOTED_UNSAFE = re.compile(r"[^\x20\x21\x23-\x5b\x5d-\x7e]")
+
+
+def _quoted(value: str) -> str:
+    """Make ``value`` safe inside a quoted WWW-Authenticate parameter (no quote, backslash, controls)."""
+    return _QUOTED_UNSAFE.sub(" ", value)
 
 
 async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
@@ -74,8 +92,11 @@ class Gateway:
         verifier: TokenVerifier,
         resolver: CredentialResolver,
         proxies: dict[str, UpstreamProxy],
+        sessions: SessionRegistry,
     ) -> None:
         self._config = config
+        self._origins = OriginPolicy(config.policies.allowed_origins)
+        self._sessions = sessions
         self._verifier = verifier
         self._resolver = resolver
         self._proxies = proxies
@@ -84,12 +105,12 @@ class Gateway:
         self, *, scope: list[str], error: str | None = None, description: str | None = None
     ) -> str:
         parts = [
-            f'resource_metadata="{self._config.resource_metadata_url}"',
-            f'scope="{" ".join(scope)}"',
+            f'resource_metadata="{_quoted(self._config.resource_metadata_url)}"',
+            f'scope="{_quoted(" ".join(scope))}"',
         ]
         if error is not None:
-            parts.append(f'error="{error}"')
-            parts.append(f'error_description="{description}"')
+            parts.append(f'error="{_quoted(error)}"')
+            parts.append(f'error_description="{_quoted(description or "")}"')
         return "Bearer " + ", ".join(parts)
 
     def _unauthorized(self, description: str, *, token_presented: bool) -> Response:
@@ -169,6 +190,10 @@ class Gateway:
 
     async def mcp(self, request: Request) -> Response:
         audit = AuditRecord(http_method=request.method, enabled=self._config.audit.enabled)
+        # Before authentication: a refused origin learns nothing about tokens.
+        if not self._origins.allows(request.headers.getlist("origin")):
+            audit.emit(status=403, outcome="origin_refused")
+            return json_rpc_response(403, ORIGIN_REFUSED, ORIGIN_REFUSED_MESSAGE, None)
         identity = await self._authenticate(request, audit)
         if isinstance(identity, Response):
             return identity
@@ -195,20 +220,38 @@ class Gateway:
         rpc = parse_request(body) if body else NO_RPC
         audit.rpc_method, audit.rpc_id, audit.tool = rpc.method, rpc.id, rpc.tool
 
+        reply_id = rpc.id if rpc.expects_reply else None
+        inbound_headers = list(request.headers.items())
+        mismatch = check_mcp_headers(inbound_headers, rpc)
+        if mismatch is not None:
+            audit.emit(status=400, outcome="mcp_header_mismatch")
+            return json_rpc_response(400, HEADER_MISMATCH, mismatch, reply_id)
+
         credential = await self._resolve(identity, rpc, audit)
         if isinstance(credential, Response):
             return credential
         audit.labels = dict(credential.labels)
 
+        subject_key = f"{self._config.auth.issuer}\x1f{identity.subject}"
+        session_id = request.headers.get("mcp-session-id")
+        if session_id is not None and not self._sessions.check(
+            credential.upstream, session_id, subject_key
+        ):
+            # Unknown here, expired, or bound to another subject: never forwarded.
+            audit.upstream = credential.upstream
+            audit.emit(status=404, outcome="session_not_found")
+            return json_rpc_response(404, SESSION_NOT_FOUND, SESSION_NOT_FOUND_MESSAGE, reply_id)
+
         return await self._proxies[credential.upstream].forward(
             method=request.method,
-            inbound_headers=list(request.headers.items()),
+            inbound_headers=inbound_headers,
             body=body,
             receive=request.receive,
             rpc=rpc,
             credential=credential,
             identity=identity,
             resolver=self._resolver,
+            subject_key=subject_key,
             audit=audit,
         )
 
@@ -218,6 +261,7 @@ def create_app(
     *,
     resolver: CredentialResolver | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    session_clock: Callable[[], float] = time.monotonic,
 ) -> Starlette:
     """Build the app. HTTP clients are created here and closed by the lifespan."""
     if resolver is None:
@@ -236,13 +280,22 @@ def create_app(
         follow_redirects=False,
     )
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
+    sessions = SessionRegistry(
+        max_entries=config.sessions.max_entries,
+        idle_ttl_seconds=config.sessions.idle_ttl_seconds,
+        clock=session_clock,
+    )
     proxies = {
-        name: UpstreamProxy(name, config.upstreams[name], client)
+        name: UpstreamProxy(
+            name, config.upstreams[name], client, sessions, config.limits.max_sse_event_bytes
+        )
         for name, client in clients.items()
     }
-    gateway = Gateway(config, TokenVerifier(config.auth, jwks_client), resolver, proxies)
+    gateway = Gateway(config, TokenVerifier(config.auth, jwks_client), resolver, proxies, sessions)
 
-    # The root document mirrors the path-specific one: MCP clients probe the path variant first.
+    # RFC 9728 section 3.3: the document describes the resource it was fetched for, so only the
+    # path-specific URL is served (resource = public_url). The origin-level document would
+    # describe a different resource and answers 404.
     prm = {
         "resource": config.public_url,
         "authorization_servers": [config.auth.issuer],
@@ -268,7 +321,6 @@ def create_app(
     return Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
-            Route("/.well-known/oauth-protected-resource", protected_resource_metadata),
             Route(config.resource_metadata_path, protected_resource_metadata),
             Route(config.public_path, gateway.mcp, methods=["GET", "POST", "DELETE"]),
         ],
