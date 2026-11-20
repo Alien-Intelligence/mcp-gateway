@@ -395,9 +395,13 @@ class UpstreamProxy:
         headers = filter_response_headers(response.headers.multi_items())
         # The client is given the gateway's request id; the upstream's is in the audit record.
         headers.pop("x-request-id", None)
-        if _is_event_stream(response) and has_content_encoding(response.headers.multi_items()):
-            # Never relayed: the gateway reports the failure in the clear instead.
-            headers.pop("content-encoding", None)
+        if _is_event_stream(response):
+            # The relay may replace, drop or refuse bytes, so the upstream's length is never
+            # true for what the client gets: the body goes out chunked.
+            headers.pop("content-length", None)
+            if has_content_encoding(response.headers.multi_items()):
+                # Never relayed: the gateway reports the failure in the clear instead.
+                headers.pop("content-encoding", None)
         return RelayResponse(
             self._relay(response, rpc.id if rpc.expects_reply else None, release, audit),
             release,

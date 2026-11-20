@@ -17,8 +17,10 @@ Tools (``tools/call`` by name)
 - ``echo``: the headers received, with ``authorization`` replaced by ``persona:<name>``.
 - ``slow_sse {count, delay_seconds, hold}``: SSE with ``count`` progress events spaced by the delay,
   then the reply; with ``hold`` it idles (no reply) until the client goes away.
-- ``fail_midstream_sse {before, reply_first}``: ``before`` whole events, optionally the reply, a
-  partial event, then the TCP connection is dropped.
+- ``fail_midstream_sse {before, reply_first, declare_length, gzip}``: ``before`` whole events,
+  optionally the reply, a partial event, then the TCP connection is dropped. ``declare_length``
+  adds a ``Content-Length`` promising more than is sent; ``gzip`` sends the bytes gzip-encoded
+  (with ``Content-Encoding: gzip``, and a declared length).
 - ``fail_midstream_json``: ``Content-Length`` promises the whole body, the connection drops halfway.
 - ``hang``: never answers; the client going away is recorded.
 - ``status {status}``: answers that HTTP status (400 to 599).
@@ -28,6 +30,7 @@ Control: ``GET /_stub/requests``, ``POST /_stub/reset``, ``POST /_stub/sessions/
 import json
 import os
 import secrets
+import zlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -351,16 +354,29 @@ class StubApp:
     def _fail_sse(entry: dict[str, Any], request_id: Any, arguments: dict[str, Any]) -> Response:
         before = int(arguments.get("before", 1))
         reply_first = bool(arguments.get("reply_first", False))
+        encoded = bool(arguments.get("gzip", False))
+        declare_length = bool(arguments.get("declare_length", False)) or encoded
+        parts = [sse_event(progress(step)) for step in range(1, before + 1)]
+        if reply_first:
+            parts.append(sse_event(rpc_result(request_id, tool_text({"events": before}))))
+        parts.append(
+            b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":'
+        )
+        headers = dict(SSE_HEADERS)
+        if encoded:
+            # A flushed but never finished gzip stream: a valid prefix of an encoded body.
+            compressor = zlib.compressobj(wbits=31)
+            parts = [compressor.compress(b"".join(parts)) + compressor.flush(zlib.Z_SYNC_FLUSH)]
+            headers["Content-Encoding"] = "gzip"
+        if declare_length:
+            headers["Content-Length"] = str(sum(map(len, parts)) + 64)
 
         async def body() -> AsyncIterator[bytes]:
-            for step in range(1, before + 1):
-                yield sse_event(progress(step))
-            if reply_first:
-                yield sse_event(rpc_result(request_id, tool_text({"events": before})))
-            yield b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":'
+            for part in parts:
+                yield part
             raise ConnectionDroppedError
 
-        return streaming(body(), entry, headers=SSE_HEADERS)
+        return streaming(body(), entry, headers=headers)
 
     @staticmethod
     def _fail_json(entry: dict[str, Any], request_id: Any) -> Response:
