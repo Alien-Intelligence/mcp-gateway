@@ -13,6 +13,8 @@ from mcp_gateway.resolver import (
     ResolverError,
 )
 from mcp_gateway.resolver.base import CredentialResolver
+from mcp_gateway.resolver.cache import CacheKey
+from mcp_gateway.state import StateUnavailableError
 
 
 def identity(subject: str = "u1", groups: tuple[str, ...] = ()) -> Identity:
@@ -253,3 +255,18 @@ async def test_aclose_closes_the_wrapped_resolver() -> None:
     cache, _ = build(backend)
     await cache.aclose()
     assert backend.closed
+
+
+class StoreFailingOnInvalidate(MemoryCacheStore):
+    async def invalidate(self, key: CacheKey) -> None:
+        raise StateUnavailableError("shared state unavailable (FakeError)")
+
+
+async def test_the_inner_resolver_is_invalidated_even_when_the_store_invalidation_fails() -> None:
+    """The backend's own cache must not keep a revoked credential because the shared store is down."""
+    backend = Backend(credential())
+    config = ResolverCacheConfig(positive_ttl_seconds=60, negative_ttl_seconds=5, max_entries=10)
+    cache = CachingResolver(backend, config, StoreFailingOnInvalidate(10, Clock()))
+    with pytest.raises(StateUnavailableError):
+        await cache.invalidate(identity())
+    assert backend.invalidated == [identity()]
