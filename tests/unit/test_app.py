@@ -14,6 +14,7 @@ from starlette.applications import Starlette
 
 from mcp_gateway.app import DENIED_MESSAGE, create_app
 from mcp_gateway.identity import Identity
+from mcp_gateway.proxy import UpstreamStreamAbortedError
 from mcp_gateway.resolver import Credential, Denied, ResolverError, StaticResolver
 
 from .conftest import (
@@ -109,6 +110,23 @@ def bearer(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+async def open_session(
+    http: httpx.AsyncClient, upstream: FakeUpstream, token: str, session_id: str = "sess-1"
+) -> None:
+    """Initialize through the gateway so the upstream's session id is bound to this token."""
+    original = upstream.responder
+    upstream.responder = lambda _r: httpx.Response(
+        200,
+        headers={"Mcp-Session-Id": session_id},
+        json={"jsonrpc": "2.0", "id": 1, "result": {}},
+    )
+    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    response = await http.post("/mcp", json=initialize, headers=bearer(token))
+    assert response.headers["mcp-session-id"] == session_id
+    upstream.responder = original
+    upstream.requests.clear()
+
+
 def audit_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
     return [json.loads(r.getMessage()) for r in caplog.records if r.name == "mcp_gateway.audit"]
 
@@ -116,13 +134,10 @@ def audit_lines(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
 # --- discovery and health -------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "path", ["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"]
-)
-async def test_protected_resource_metadata_on_both_paths(
-    client: httpx.AsyncClient, path: str
+async def test_protected_resource_metadata_is_served_for_the_public_path_only(
+    client: httpx.AsyncClient,
 ) -> None:
-    response = await client.get(path)
+    response = await client.get("/.well-known/oauth-protected-resource/mcp")
     assert response.status_code == 200
     assert response.json() == {
         "resource": PUBLIC_URL,
@@ -130,6 +145,14 @@ async def test_protected_resource_metadata_on_both_paths(
         "scopes_supported": ["openid", "mcp-gateway"],
         "bearer_methods_supported": ["header"],
     }
+
+
+async def test_root_protected_resource_metadata_is_not_served(
+    client: httpx.AsyncClient,
+) -> None:
+    # RFC 9728 section 3.3: the root document would describe the origin, not the MCP resource.
+    for path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/"):
+        assert (await client.get(path)).status_code == 404
 
 
 async def test_healthz_needs_no_auth(client: httpx.AsyncClient) -> None:
@@ -312,6 +335,7 @@ async def test_proxied_request_carries_only_allowed_headers_and_the_injected_key
         "Cookie": "sid=forged",
         "X-Unlisted": "nope",
     }
+    await open_session(client, upstream, token)
     response = await client.post(
         "/mcp",
         json=RPC_BODY,
@@ -342,6 +366,7 @@ async def test_proxied_request_carries_only_allowed_headers_and_the_injected_key
 async def test_get_and_delete_are_proxied(
     client: httpx.AsyncClient, token: str, upstream: FakeUpstream
 ) -> None:
+    await open_session(client, upstream, token, "s")
     await client.get("/mcp", headers={**bearer(token), "Accept": "text/event-stream"})
     await client.delete("/mcp", headers={**bearer(token), "Mcp-Session-Id": "s"})
     assert [r.method for r in upstream.requests] == ["GET", "DELETE"]
@@ -438,25 +463,25 @@ async def test_upstream_content_encoding_is_not_decoded(
     assert upstream.requests[0].headers["accept-encoding"] == "gzip"
 
 
-async def test_midstream_upstream_failure_ends_the_stream_quietly_and_is_audited(
+async def test_midstream_failure_after_the_reply_is_aborted_not_ended_cleanly(
     app: Starlette,
     token: str,
     upstream: FakeUpstream,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    stream = TrackedStream([b"data: 1\n\n"], fail_after=httpx.ReadError("boom"))
+    reply = b'data: {"jsonrpc":"2.0","id":7,"result":{}}\n\n'
+    stream = TrackedStream([reply], fail_after=httpx.ReadError("boom"))
     upstream.responder = lambda _r: httpx.Response(
         200, headers={"Content-Type": "text/event-stream"}, stream=stream
     )
     with caplog.at_level(logging.INFO):
         async with client_for(app) as http:
-            response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
-    assert response.status_code == 200
-    assert response.content == b"data: 1\n\n"
+            with pytest.raises(UpstreamStreamAbortedError):
+                await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert stream.closed
     (line,) = audit_lines(caplog)
-    assert line["outcome"] == "upstream_error"
-    assert "ReadError" in caplog.text
+    assert line["outcome"] == "upstream_stream_failed"
+    assert line["reason"] == "ReadError"
 
 
 async def test_client_disconnect_aborts_the_upstream_request(
@@ -687,7 +712,9 @@ async def test_audit_line_for_a_forwarded_tool_call(
         "upstream",
         "latency_ms",
         "upstream_status",
+        "upstream_session",
     }
+    assert line["upstream_session"] is False
     assert line["event"] == "mcp_request"
     assert line["subject"] == "user-1"
     assert line["organization"] == "client-x"

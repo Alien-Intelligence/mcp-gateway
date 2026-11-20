@@ -45,6 +45,12 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("limits",),
         ("limits", "request_body_timeout_seconds"),
         ("audit", "enabled"),
+        ("limits", "max_sse_event_bytes"),
+        ("sessions",),
+        ("sessions", "max_entries"),
+        ("sessions", "idle_ttl_seconds"),
+        ("policies",),
+        ("policies", "allowed_origins"),
     ],
 )
 def test_every_key_is_required(config_dict: dict[str, Any], path: tuple[str, ...]) -> None:
@@ -222,3 +228,32 @@ def test_load_config_reads_the_env_var(
 ) -> None:
     monkeypatch.setenv(CONFIG_ENV_VAR, json.dumps(copy.deepcopy(config_dict)))
     assert load_config().public_url == PUBLIC_URL
+
+
+def test_allowed_origins_are_normalised_at_load(config_dict: dict[str, Any]) -> None:
+    config_dict["policies"]["allowed_origins"] = ["HTTPS://App.Example.com:443", "http://[::1]:80"]
+    config = config_from(config_dict)
+    assert config.policies.allowed_origins == ["https://app.example.com", "http://[::1]"]
+
+
+@pytest.mark.parametrize("bad", ["app.example.com", "https://app.example.com/path", "https://"])
+def test_allowed_origins_reject_non_origins(config_dict: dict[str, Any], bad: str) -> None:
+    config_dict["policies"]["allowed_origins"] = [bad]
+    with pytest.raises(ConfigError, match="allowed_origins"):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "value"),
+    [
+        ("sessions", "max_entries", 0),
+        ("sessions", "idle_ttl_seconds", 0),
+        ("limits", "max_sse_event_bytes", 0),
+    ],
+)
+def test_new_numeric_limits_must_be_positive(
+    config_dict: dict[str, Any], section: str, key: str, value: int
+) -> None:
+    config_dict[section][key] = value
+    with pytest.raises(ConfigError, match=key):
+        _parse(config_dict)

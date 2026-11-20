@@ -30,6 +30,8 @@ class AuditRecord:
     upstream: str | None = None
     upstream_status: int | None = None
     reason: str | None = None
+    # Whether the upstream response carried an Mcp-Session-Id. Presence only, never the id.
+    upstream_session: bool | None = None
     _emitted: bool = False
 
     def emit(self, *, status: int, outcome: str) -> None:
@@ -52,5 +54,6 @@ class AuditRecord:
             "upstream": self.upstream,
             "latency_ms": round((perf_counter() - self.started) * 1000, 1),
             "upstream_status": self.upstream_status,
+            "upstream_session": self.upstream_session,
         }
         audit_logger.info(json.dumps(line, separators=(",", ":")))

@@ -22,6 +22,13 @@ from mcp_gateway.jsonrpc import (
     error_body,
 )
 from mcp_gateway.resolver import Credential, CredentialResolver, ResolverError
+from mcp_gateway.sessions import SessionRegistry
+from mcp_gateway.sse import (
+    EventTooLargeError,
+    SseError,
+    SseEventSplitter,
+    stream_failed_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +127,23 @@ async def _drain(response: httpx.Response) -> None:
             break
 
 
+class UpstreamStreamAbortedError(Exception):
+    """Raised out of the response body so the ASGI server drops the connection.
+
+    Without a terminating chunk the client sees an incomplete response, never a clean end.
+    """
+
+
+def _is_event_stream(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    return content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
+
+
+def _request_session_id(headers: list[tuple[str, str]]) -> str | None:
+    values = [value for name, value in headers if name.lower() == "mcp-session-id"]
+    return values[0] if values else None
+
+
 class RelayResponse(StreamingResponse):
     """Streaming response that always watches for the client going away.
 
@@ -172,10 +196,19 @@ def _wire_headers(headers: list[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
 
 
 class UpstreamProxy:
-    def __init__(self, name: str, config: UpstreamConfig, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        name: str,
+        config: UpstreamConfig,
+        client: httpx.AsyncClient,
+        sessions: SessionRegistry,
+        max_event_bytes: int,
+    ) -> None:
         self._name = name
         self._url = config.url
         self._client = client
+        self._sessions = sessions
+        self._max_event_bytes = max_event_bytes
 
     async def forward(
         self,
@@ -188,6 +221,7 @@ class UpstreamProxy:
         credential: Credential,
         identity: Identity,
         resolver: CredentialResolver,
+        subject_key: str,
         audit: AuditRecord,
     ) -> Response:
         request = self._client.build_request(
@@ -222,9 +256,30 @@ class UpstreamProxy:
             raise RuntimeError("upstream send finished without a response or a disconnect")
 
         audit.upstream_status = response.status_code
+        audit.upstream_session = "mcp-session-id" in response.headers
+        session_id = _request_session_id(inbound_headers)
         if response.status_code in _AUTH_REPLIES:
             return await self._reject(response, receive, rpc, identity, resolver, audit)
-        return self._stream(response, audit)
+        self._track_session(method, session_id, response, subject_key)
+        return self._stream(response, rpc, session_id, audit)
+
+    def _track_session(
+        self,
+        method: str,
+        session_id: str | None,
+        response: httpx.Response,
+        subject_key: str,
+    ) -> None:
+        """Keep the registry in step with what the upstream says about the session."""
+        status = response.status_code
+        issued = response.headers.get("mcp-session-id")
+        if session_id is not None and (
+            status == 404 or (method == "DELETE" and 200 <= status < 300)
+        ):
+            # The upstream no longer knows the session, or the client just ended it.
+            self._sessions.drop(self._name, session_id)
+        elif issued is not None and 200 <= status < 300:
+            self._sessions.bind(self._name, issued, subject_key)
 
     @staticmethod
     def _client_gone(audit: AuditRecord) -> Response:
@@ -268,24 +323,61 @@ class UpstreamProxy:
             {"upstream_status": upstream_status},
         )
 
-    def _stream(self, response: httpx.Response, audit: AuditRecord) -> Response:
-        status = response.status_code
-
-        async def relay() -> AsyncGenerator[bytes, None]:
-            try:
-                async for chunk in response.aiter_raw():
-                    yield chunk
-            except httpx.HTTPError as exc:
-                logger.error("upstream %s stream failed (%s)", self._name, type(exc).__name__)
-                # Headers are already sent, so there is no status to change: end the stream.
-                audit.emit(status=status, outcome="upstream_error")
-            finally:
-                # Runs on completion, upstream failure and client disconnect (cancellation).
-                await _close(response)
-                audit.emit(status=status, outcome="forwarded")
-
+    def _stream(
+        self,
+        response: httpx.Response,
+        rpc: RpcInfo,
+        session_id: str | None,
+        audit: AuditRecord,
+    ) -> Response:
         return RelayResponse(
-            relay(),
-            status_code=status,
+            self._relay(response, rpc.id if rpc.expects_reply else None, session_id, audit),
+            status_code=response.status_code,
             headers=filter_response_headers(response.headers.multi_items()),
         )
+
+    async def _relay(
+        self,
+        response: httpx.Response,
+        reply_id: str | int | None,
+        session_id: str | None,
+        audit: AuditRecord,
+    ) -> AsyncGenerator[bytes, None]:
+        status = response.status_code
+        events = (
+            SseEventSplitter(self._max_event_bytes, reply_id)
+            if _is_event_stream(response)
+            else None
+        )
+        try:
+            try:
+                async for chunk in response.aiter_raw():
+                    if events is None:
+                        yield chunk
+                        continue
+                    for event in events.feed(chunk):
+                        yield event
+                if events is not None:
+                    for event in events.finish():
+                        yield event
+            except (httpx.HTTPError, SseError) as exc:
+                reason = exc.reason if isinstance(exc, SseError) else type(exc).__name__
+                logger.error("upstream %s stream failed (%s)", self._name, reason)
+                audit.reason = reason
+                audit.emit(status=status, outcome="upstream_stream_failed")
+                if (
+                    events is not None
+                    and reply_id is not None
+                    and events.can_report_failure
+                    and not isinstance(exc, EventTooLargeError)
+                ):
+                    # The partial event is discarded; the client learns the request failed.
+                    yield stream_failed_event(reply_id)
+                    return
+                raise UpstreamStreamAbortedError(reason) from exc
+        finally:
+            # Runs on completion, upstream failure and client disconnect (cancellation).
+            await _close(response)
+            if session_id is not None:
+                self._sessions.touch(self._name, session_id)
+            audit.emit(status=status, outcome="forwarded")
