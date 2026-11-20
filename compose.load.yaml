@@ -1,7 +1,7 @@
 # The load client, on the host network so the localhost issuers resolve as on a laptop. Used with
 # the stub target by scripts/loadtest_stub.sh:
 #   docker compose -f compose.yaml -f compose.stub.yaml -f compose.load.yaml \
-#     --env-file .env.stub --profile stub --profile load run --name load-run load \
+#     --env-file .env.stub --profile stub run --name load-run load \
 #     python -m load.loadtest <arguments>
 
 services:

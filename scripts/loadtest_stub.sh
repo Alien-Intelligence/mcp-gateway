@@ -50,7 +50,7 @@ LOAD_STATS_INTERVAL_SECONDS="${LOAD_STATS_INTERVAL_SECONDS:-2}"
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
 UP_TIMEOUT_SECONDS="${UP_TIMEOUT_SECONDS:-420}"
 ENV_FILE=.env.stub
-COMPOSE="docker compose -f compose.yaml -f compose.stub.yaml -f compose.load.yaml --env-file $ENV_FILE --profile stub --profile load"
+COMPOSE="docker compose -f compose.yaml -f compose.stub.yaml -f compose.load.yaml --env-file $ENV_FILE --profile stub"
 STATS_FILE="$ARTIFACTS_DIR/stats.jsonl"
 STOP_FILE="$ARTIFACTS_DIR/stats.stop"
 sampler_pid=
@@ -64,6 +64,7 @@ load_cleanup() {
     fi
     docker rm -f load-run >/dev/null 2>&1 || true
     ci_cleanup
+    rm -f "$STOP_FILE"
 }
 
 mkdir -p "$ARTIFACTS_DIR"
