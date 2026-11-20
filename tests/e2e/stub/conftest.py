@@ -8,8 +8,15 @@ from typing import Any
 
 import httpx
 import pytest
+from redis.asyncio import Redis
 
-from e2e.stub.stack import HTTP_TIMEOUT, StubControl, StubSettings, load_stub_settings
+from e2e.stub.stack import (
+    HTTP_TIMEOUT,
+    StubControl,
+    StubSettings,
+    flush_rate_limits,
+    load_stub_settings,
+)
 
 
 @pytest.fixture(scope="session")
@@ -58,3 +65,19 @@ async def stub(http: httpx.AsyncClient) -> StubControl:
     control = StubControl(http)
     await control.reset()
     return control
+
+
+@pytest.fixture
+async def shared_redis(settings: StubSettings) -> AsyncIterator[Redis]:
+    """The stack's Redis, the one the replica pair shares, for test setup and isolation."""
+    client = Redis.from_url(settings.redis_url, socket_connect_timeout=5, socket_timeout=5)
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+@pytest.fixture
+async def fresh_rate_limits(shared_redis: Redis) -> None:
+    """Start the test with full rate limit buckets on the replica pair."""
+    await flush_rate_limits(shared_redis)

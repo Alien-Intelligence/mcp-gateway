@@ -16,6 +16,7 @@ Keys come from a JSON file (``STUB_KEYS_FILE``): ``{"<key>": {"persona", "revoke
 Tools (``tools/call`` by name)
 - ``echo``: the headers received, with ``authorization`` replaced by ``persona:<name>``, and the
   arguments of the call.
+- ``policy_denied_probe``: behaves like ``echo``; the tool the policy tests deny.
 - ``slow_sse {count, delay_seconds, hold}``: SSE with ``count`` progress events spaced by the delay,
   then the reply; with ``hold`` it idles (no reply) until the client goes away.
 - ``fail_midstream_sse {before, reply_first, declare_length, gzip}``: ``before`` whole events,
@@ -25,6 +26,12 @@ Tools (``tools/call`` by name)
 - ``fail_midstream_json``: ``Content-Length`` promises the whole body, the connection drops halfway.
 - ``hang``: never answers; the client going away is recorded.
 - ``status {status}``: answers that HTTP status (400 to 599).
+``tools/list`` is paginated in two pages (``TOOLS_PAGE_SIZE`` tools, then the rest): a request
+without ``params.cursor`` gets the first page and a ``nextCursor``, any request with one gets the
+second. Each page carries ``"cacheScope": "public"`` and ``"ttlMs": 60000`` (the 2026-07-28 caching
+fields, so a tool policy's rewrite of them can be seen). A request whose ``params._meta`` has
+``"stub/sse": true`` gets the list as a one-event SSE stream instead of a JSON body (the gateway
+forwards the body, not custom headers).
 Control: ``GET /_stub/requests``, ``POST /_stub/reset``, ``POST /_stub/sessions/{id}/expire``.
 """
 
@@ -49,7 +56,19 @@ POLL_SECONDS = 0.05
 MAX_RECORDED_REQUESTS = 10_000
 SESSION_EVENTS = 3
 
-TOOLS = ["echo", "slow_sse", "fail_midstream_sse", "fail_midstream_json", "hang", "status"]
+TOOLS = [
+    "echo",
+    "policy_denied_probe",
+    "slow_sse",
+    "fail_midstream_sse",
+    "fail_midstream_json",
+    "hang",
+    "status",
+]
+TOOLS_PAGE_SIZE = 3
+SECOND_PAGE_CURSOR = "stub-page-2"
+LIST_CACHE_TTL_MS = 60_000
+SSE_REQUEST_FLAG = "stub/sse"
 SSE_HEADERS = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
 
 
@@ -281,12 +300,7 @@ class StubApp:
             }
             return JSONResponse(rpc_result(request_id, result), headers=headers)
         if method == "tools/list":
-            return JSONResponse(
-                rpc_result(
-                    request_id,
-                    {"tools": [{"name": n, "inputSchema": {"type": "object"}} for n in TOOLS]},
-                )
-            )
+            return self._tools_list(request_id, params, entry)
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments")
@@ -302,6 +316,26 @@ class StubApp:
             )
         return JSONResponse(rpc_error(request_id, -32601, "Method not found"))
 
+    @staticmethod
+    def _tools_list(request_id: Any, params: dict[str, Any], entry: dict[str, Any]) -> Response:
+        second_page = params.get("cursor") is not None
+        names = TOOLS[TOOLS_PAGE_SIZE:] if second_page else TOOLS[:TOOLS_PAGE_SIZE]
+        result: dict[str, Any] = {
+            "tools": [{"name": n, "inputSchema": {"type": "object"}} for n in names],
+            "cacheScope": "public",
+            "ttlMs": LIST_CACHE_TTL_MS,
+        }
+        if not second_page:
+            result["nextCursor"] = SECOND_PAGE_CURSOR
+        meta = params.get("_meta")
+        if isinstance(meta, dict) and meta.get(SSE_REQUEST_FLAG) is True:
+
+            async def body() -> AsyncIterator[bytes]:
+                yield sse_event(rpc_result(request_id, result))
+
+            return streaming(body(), entry, headers=SSE_HEADERS)
+        return JSONResponse(rpc_result(request_id, result))
+
     async def _call(
         self,
         request: Request,
@@ -312,7 +346,7 @@ class StubApp:
         name: Any,
         arguments: dict[str, Any],
     ) -> Response:
-        if name == "echo":
+        if name in ("echo", "policy_denied_probe"):
             echoed = {
                 "mode": "stateful" if stateful else "stateless",
                 "persona": key.persona,

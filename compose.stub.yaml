@@ -64,6 +64,18 @@ services:
     depends_on:
       upstream-stub:
         condition: service_healthy
+  gateway-ha-a:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-ha-b:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-noredis:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
 
   # The end-to-end harness, on the host network so the localhost issuers resolve as on a laptop.
   #   docker compose ... --profile harness run --name e2e-run harness

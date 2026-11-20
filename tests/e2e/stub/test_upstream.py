@@ -90,7 +90,11 @@ async def test_the_official_sdk_runs_a_whole_session_through_the_gateway(
     token = (await obtain_grant(settings, KEYCLOAK, PERSONAS["alice"])).token
     async with asyncio.timeout(TEST_SECONDS):
         async with mcp_session(KEYCLOAK.gateway_url, token) as (client, _):
-            tools = {tool.name for tool in (await client.list_tools()).tools}
+            # The stub lists its tools on two pages: follow the cursor like a real client.
+            first = await client.list_tools()
+            assert first.next_cursor is not None
+            second = await client.list_tools(cursor=first.next_cursor)
+            tools = {tool.name for page in (first, second) for tool in page.tools}
             assert {"echo", "slow_sse", "status"} <= tools
             result = await client.call_tool("echo", {})
     assert result.is_error is False

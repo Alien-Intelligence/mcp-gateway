@@ -69,6 +69,8 @@ umask 077
     # The real dev MCP servers are stateless: both upstream names point at the same URL.
     echo "UPSTREAM_STATEFUL_URL=$E2E_DEV_UPSTREAM_URL"
     echo "UPSTREAM_STATELESS_URL=$E2E_DEV_UPSTREAM_URL"
+    # policies.rate_limits of the replica pair: none, the real-dev suite does not exhaust buckets.
+    echo "HA_RATE_LIMITS=null"
 } >"$ENV_FILE"
 umask 022
 

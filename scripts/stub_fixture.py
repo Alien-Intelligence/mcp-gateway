@@ -34,6 +34,8 @@ PERSONAS = (
     KeyedPersona("bob", "bob@client-y.test", "client-y", "bob.key"),
     KeyedPersona("carol", "carol@client-x.test", "client-x", "carol.key"),
     KeyedPersona("dave", "dave@client-x.test", "client-x", "dave.key"),
+    KeyedPersona("erin", "erin@client-q.test", "client-q", "erin.key"),
+    KeyedPersona("frank", "frank@client-q.test", "client-q", "frank.key"),
     KeyedPersona("revoked", "revoked@client-r.test", "client-r", "revoked.key"),
     KeyedPersona("unpaid", "unpaid@client-p.test", "client-p", "unpaid.key"),
 )

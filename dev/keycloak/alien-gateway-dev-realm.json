@@ -34,6 +34,11 @@
           "name": "client-p",
           "path": "/clients/client-p",
           "subGroups": []
+        },
+        {
+          "name": "client-q",
+          "path": "/clients/client-q",
+          "subGroups": []
         }
       ]
     }
@@ -197,6 +202,54 @@
       },
       "groups": [
         "/clients/client-p"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "erin@client-q.test",
+      "email": "erin@client-q.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Erin",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-q"
+        ]
+      },
+      "groups": [
+        "/clients/client-q"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "frank@client-q.test",
+      "email": "frank@client-q.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Frank",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-q"
+        ]
+      },
+      "groups": [
+        "/clients/client-q"
       ],
       "requiredActions": [],
       "credentials": [
@@ -688,6 +741,30 @@
           "consentRequired": false,
           "config": {
             "included.custom.audience": "http://localhost:18003/mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "gateway-ha-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "http://localhost:18004/mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "gateway-noredis-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "http://localhost:18007/mcp",
             "access.token.claim": "true",
             "id.token.claim": "false",
             "introspection.token.claim": "true"

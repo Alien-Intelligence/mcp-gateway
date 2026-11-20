@@ -27,6 +27,9 @@ umask 077
     throwaway_secrets
     echo "UPSTREAM_STATEFUL_URL=http://upstream-stub:4000/stateful/mcp"
     echo "UPSTREAM_STATELESS_URL=http://upstream-stub:4000/stateless/mcp"
+    # policies.rate_limits of the replica pair: a burst small enough for a test to exhaust, a
+    # refill slow enough that nothing refills while it runs.
+    echo "HA_RATE_LIMITS='{\"per_subject\": {\"burst\": 8, \"per_minute\": 1}, \"per_organization\": {\"burst\": 12, \"per_minute\": 1}}'"
 } >"$ENV_FILE"
 umask 022
 
