@@ -56,6 +56,8 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
                 "read_timeout_seconds": 130,
                 "write_timeout_seconds": 30,
                 "pool_timeout_seconds": 10,
+                "max_connections": 200,
+                "max_detached_reads": 50,
             }
         },
         "limits": {
@@ -164,6 +166,66 @@ class TrackedStream(httpx.AsyncByteStream):
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class GatedStream(httpx.AsyncByteStream):
+    """Response body whose end is held back until ``gate`` is set; ``never_ends`` holds it forever.
+
+    ``started`` is set when the body is first read, ``finished`` records that its end was read,
+    ``closed`` that the response was closed: together they show what an upstream would observe of its client.
+    """
+
+    def __init__(
+        self,
+        chunks: list[bytes],
+        gate: asyncio.Event | None = None,
+        *,
+        never_ends: bool = False,
+        close_delay: float = 0.0,
+    ) -> None:
+        self._chunks = chunks
+        self.gate = gate or asyncio.Event()
+        self._never_ends = never_ends
+        self._close_delay = close_delay
+        self.started = asyncio.Event()
+        self.finished = False
+        self.closed = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.started.set()
+        for chunk in self._chunks:
+            yield chunk
+        if self._never_ends:
+            await asyncio.Event().wait()
+        await self.gate.wait()
+        self.finished = True
+
+    async def aclose(self) -> None:
+        # A real pooled-connection close suspends: so does the session touch that follows it.
+        await asyncio.sleep(self._close_delay)
+        self.closed = True
+
+
+class FailingStream(GatedStream):
+    """Like ``GatedStream`` but the body breaks with ``error`` once the gate opens."""
+
+    def __init__(self, chunks: list[bytes], error: Exception) -> None:
+        super().__init__(chunks)
+        self._error = error
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.started.set()
+        for chunk in self._chunks:
+            yield chunk
+        await self.gate.wait()
+        raise self._error
+
+
+async def until(condition: Callable[[], bool], *, seconds: float = 5.0) -> None:
+    """Wait, within a bound, for ``condition``; fail with a timeout instead of hanging."""
+    async with asyncio.timeout(seconds):
+        while not condition():
+            await asyncio.sleep(0.005)
 
 
 class _Replay(httpx.AsyncByteStream):

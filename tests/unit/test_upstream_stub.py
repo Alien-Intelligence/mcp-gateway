@@ -155,3 +155,23 @@ def test_keys_file_must_be_strict(tmp_path: Path) -> None:
     path.write_text(json.dumps({"k": {"persona": "x"}}))
     with pytest.raises(ValueError, match="persona"):
         load_stub_module().load_keys(path)
+
+
+async def test_a_streaming_call_records_that_it_ran_to_its_end(stub: httpx.AsyncClient) -> None:
+    response = await stub.post(
+        "/stateless/mcp", json=call("slow_sse", count=2, delay_seconds=0), headers=auth("carol")
+    )
+    assert response.status_code == 200
+    (entry,) = (await stub.get("/_stub/requests")).json()["requests"]
+    assert (entry["completed"], entry["disconnected"]) == (True, False)
+
+
+async def test_slow_sse_pads_every_event_on_request(stub: httpx.AsyncClient) -> None:
+    response = await stub.post(
+        "/stateless/mcp",
+        json=call("slow_sse", count=2, delay_seconds=0, padding_bytes=1000),
+        headers=auth("carol"),
+    )
+    events = [e for e in response.content.split(b"\n\n") if e]
+    assert len(events) == 3
+    assert all(len(e) > 1000 for e in events[:2])

@@ -259,6 +259,14 @@ class _Instruments:
             unit="{lookup}",
             description="Credential lookups, by resolver type, cache result and result.",
         )
+        self.upstream_detached = meter.create_counter(
+            "mcp_gateway.upstream.detached",
+            unit="{request}",
+            description=(
+                "Upstream requests that ran on after their client left, by upstream and result "
+                "(completed, timeout, failed)."
+            ),
+        )
 
 
 class ResolveStep:
@@ -438,6 +446,23 @@ class Telemetry:
             REQUEST_SPAN, context=Context(), kind=SpanKind.SERVER, links=links
         )
         return RequestObserver(self, span)
+
+    def record_detached(self, upstream: str, result: str) -> None:
+        """Count one upstream request that ran on after its client left."""
+        self.instruments.upstream_detached.add(1, {"upstream": upstream, "result": result})
+
+    def observe_detached(self, count: Callable[[], int]) -> None:
+        """Expose the upstream requests running on after their client left as an observable gauge."""
+
+        def callback(options: CallbackOptions) -> Iterable[Observation]:
+            yield Observation(count())
+
+        self.meter.create_observable_gauge(
+            "mcp_gateway.upstream.detached.active",
+            callbacks=[callback],
+            unit="{request}",
+            description="Upstream requests currently running on after their client left.",
+        )
 
     def observe_sessions(self, count: Callable[[], int]) -> None:
         """Expose the number of bound upstream sessions as an observable gauge."""
