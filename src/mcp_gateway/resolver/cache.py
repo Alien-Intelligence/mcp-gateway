@@ -191,8 +191,13 @@ class CachingResolver:
     async def invalidate(self, identity: Identity) -> None:
         key = cache_key(identity)
         self._flights.pop(key, None)
-        await self._store.invalidate(key)
-        await self._inner.invalidate(identity)
+        try:
+            await self._store.invalidate(key)
+        finally:
+            # The inner resolver's own cache must forget the identity even when the shared
+            # store is down: the store error still reaches the caller, but a revoked credential
+            # is not kept alive behind it.
+            await self._inner.invalidate(identity)
 
     async def aclose(self) -> None:
         for flight in list(self._flights.values()):

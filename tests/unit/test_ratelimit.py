@@ -1,9 +1,20 @@
 """Token-bucket algorithm, with an injected clock."""
 
+from typing import Any, cast
+
 import pytest
 
 from mcp_gateway.config import RateLimitsConfig, TokenBucketConfig
-from mcp_gateway.ratelimit import BucketSpec, MemoryRateLimiter, bucket_specs
+from mcp_gateway.ratelimit import (
+    MAX_RETRY_AFTER_SECONDS,
+    BucketSpec,
+    MemoryRateLimiter,
+    RateLimitUnavailableError,
+    RedisRateLimiter,
+    bucket_specs,
+)
+from mcp_gateway.state import BoundedRedis
+from mcp_gateway.state.digest import KeyDigest
 
 
 class Clock:
@@ -166,28 +177,78 @@ async def test_memory_stays_bounded_under_a_stream_of_one_shot_subjects(
     assert limiter.tracked_buckets <= 2 * MemoryRateLimiter._MIN_SWEEP_SIZE
 
 
-def _limits(per_subject: bool, per_organization: bool) -> RateLimitsConfig:
+def _limits(per_organization: bool) -> RateLimitsConfig:
     return RateLimitsConfig(
-        per_subject=TokenBucketConfig(burst=3, per_minute=6.0) if per_subject else None,
+        per_subject=TokenBucketConfig(burst=3, per_minute=6.0),
         per_organization=TokenBucketConfig(burst=9, per_minute=12.0) if per_organization else None,
     )
 
 
 def test_bucket_specs_with_an_organization_draw_from_both() -> None:
-    specs = bucket_specs(_limits(True, True), subject_key="iss\x1fu1", organization="acme")
+    specs = bucket_specs(_limits(True), subject_key="iss\x1fu1", organization="acme")
     assert specs == [
         BucketSpec("subject", "iss\x1fu1", 3, 6.0),
         BucketSpec("organization", "acme", 9, 12.0),
     ]
 
 
-def test_bucket_specs_without_an_organization_limit_the_subject_only() -> None:
-    specs = bucket_specs(_limits(True, True), subject_key="iss\x1fu1", organization=None)
+def test_a_subject_without_an_organization_is_still_limited_per_subject() -> None:
+    specs = bucket_specs(_limits(True), subject_key="iss\x1fu1", organization=None)
     assert [spec.scope for spec in specs] == ["subject"]
 
 
-def test_bucket_specs_skip_a_scope_configured_null() -> None:
-    assert [
-        s.scope for s in bucket_specs(_limits(False, True), subject_key="k", organization="o")
-    ] == ["organization"]
-    assert bucket_specs(_limits(False, True), subject_key="k", organization=None) == []
+def test_bucket_specs_skip_an_organization_scope_configured_null() -> None:
+    specs = bucket_specs(_limits(False), subject_key="k", organization="o")
+    assert [spec.scope for spec in specs] == ["subject"]
+
+
+async def test_the_memory_limiter_caps_an_enormous_wait(limiter: MemoryRateLimiter) -> None:
+    """The config floor allows 16 hours per token; the limiter itself never announces over a day."""
+    spec = subject(burst=1, per_minute=0.0001)
+    await limiter.acquire([spec])
+    decision = await limiter.acquire([spec])
+    assert (decision.allowed, decision.retry_after_seconds) == (False, MAX_RETRY_AFTER_SECONDS)
+
+
+class ScriptedRedis:
+    """The two members of ``BoundedRedis`` the limiter touches, answering a canned script reply."""
+
+    def __init__(self, reply: object) -> None:
+        self.reply = reply
+        self.client = self
+
+    def register_script(self, source: str) -> Any:
+        return lambda keys, args: self.reply
+
+    async def run(self, operation: object) -> object:
+        return operation
+
+
+def redis_limiter(reply: object) -> RedisRateLimiter:
+    redis = cast(BoundedRedis, ScriptedRedis(reply))
+    return RedisRateLimiter(redis, "p:", KeyDigest(bytes(32)))
+
+
+async def test_the_redis_limiter_caps_an_enormous_wait() -> None:
+    decision = await redis_limiter([0, 10**12, 1]).acquire([subject()])
+    assert (decision.allowed, decision.retry_after_seconds) == (False, MAX_RETRY_AFTER_SECONDS)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        [0, "soon", 1],
+        [0, None, 1],
+        [0, 1.5, 1],
+        [0, True, 1],
+        ["x", 1000, 1],
+        [0, 1000, "1"],
+        [0, 1000],
+        "not a list",
+    ],
+)
+async def test_a_script_reply_that_is_not_three_integers_is_unavailable_not_a_crash(
+    reply: object,
+) -> None:
+    with pytest.raises(RateLimitUnavailableError):
+        await redis_limiter(reply).acquire([subject()])

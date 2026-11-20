@@ -5,7 +5,7 @@ The gateway reads one JSON document from the environment variable `MCP_GATEWAY_C
 - Every key is required. There is no default for any key. An optional value is written as an explicit `null`.
 - Unknown keys are refused at every level.
 - Types are strict: `"5"` is not a number, `1` is not `true`.
-- A secret is never written inline. Keys that hold one (`secret_file`, `dsn_file`, `url_file`, `headers_file`, `client_key_file`) take the path of a file.
+- A secret is never written inline. Keys that hold one (`secret_file`, `dsn_file`, `url_file`, `headers_file`, `client_key_file`, `encryption_key_file`) take the path of a file.
 - A bad document stops the process at start with `startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` on stdout. The message names the key and the rule, never the value.
 
 In the tables, "required" means the key must be present. Durations are in seconds. "gt 0" means strictly greater than zero.
@@ -25,7 +25,7 @@ In the tables, "required" means the key must be present. Durations are in second
 | `observability` | object | Traces and metrics export. |
 | `sessions` | object | Binding of upstream session ids to subjects. |
 | `state` | object | Where session bindings and cached credentials live: in this process or in a Redis shared by every replica. |
-| `policies` | object | Origin policy and tool policy. |
+| `policies` | object | Origin policy, tool policy and rate limits. |
 
 `GET /healthz` answers `{"status":"ok"}` without authentication: it is the liveness probe and never looks at the state backend. `GET /readyz` is the readiness probe (see [`state`](#state)).
 
@@ -74,7 +74,7 @@ A claim of the wrong type is a `401`. A missing optional claim is an absent valu
 
 The resolver turns the verified identity into an Alien API key, an upstream name and labels, or a denial. `type` selects the kind; the other keys depend on it. A resolver that fails closes the request (`500`, or `503` with `Retry-After: 5` when a backend is down).
 
-The identity handed to every resolver is `subject`, `email` (verified only, else null), `organization` (or null) and `groups`.
+The identity handed to every resolver is `subject`, `email` (verified only, else `null`), `organization` (or `null`) and `groups`.
 
 Denials return `403` and a JSON-RPC error: `-32010` for `no_mapping`, `-32011` for `ambiguous_mapping`, `-32012` for any other reason. The client sees a generic message; the reason is in the audit line.
 
@@ -254,7 +254,7 @@ An upstream `Mcp-Session-Id` is bound to the subject it was issued to, in the ba
 
 ## `state`
 
-State that must agree between replicas lives here: the session bindings (`sessions`) and the resolver cache (`resolver_cache`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
+State that must agree between replicas lives here: the session bindings (`sessions`), the resolver cache (`resolver_cache`) and the rate limit buckets (`policies.rate_limits`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
 
 ### `memory`
 
@@ -281,21 +281,23 @@ State that must agree between replicas lives here: the session bindings (`sessio
 | `key_prefix` | string | 1 to 64 characters of `A-Z a-z 0-9 _ : . -` | Prepended to every key, so several gateways can share one Redis. |
 | `connect_timeout_seconds` | number | gt 0 | Socket connect timeout. |
 | `operation_timeout_seconds` | number | gt 0 | Ceiling for every Redis operation, a script and the readiness ping included. There are no retries. |
-| `max_connections` | integer | >= 1 | Connection pool size. |
+| `max_connections` | integer | >= 1 | Connection pool size. When every connection is busy a command waits for one instead of failing; that wait consumes the same `operation_timeout_seconds` as the command itself, so a saturated pool surfaces as a timeout (`503`), never as an immediate refusal. |
 | `encryption_key_file` | string | non-empty | File holding the base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials. Generate it with `head -c 32 /dev/urandom \| base64`. A missing, empty, non-base64 or wrongly sized file stops the process at start; the message never echoes the content. |
 
 With `redis`, `sessions.max_entries` and `resolver_cache.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
 
-Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold SHA-256 digests and values hold digests or ciphertext.
+Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold keyed digests and values hold digests or ciphertext. `h(...)` below is HMAC-SHA256 under a key derived (HKDF-SHA256, `info` `mcp-gateway key names`) from the key in `encryption_key_file`, so a key name cannot be recomputed from a guessed subject or session id without that key. The consequence: every replica sharing a Redis must share the key file, and changing the key renames every key (see the rotation note below).
 
 | Key | Holds | Expiry |
 |---|---|---|
-| `{p}s:{sha256(upstream, session id)}` | `sha256(subject key)`: the binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
-| `{p}ss:{sha256(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
-| `{p}c:{sha256(identity)}` | The cached credential or denial, AES-256-GCM encrypted (random 12-byte nonce, the key digest as associated data). | The entry's TTL. |
-| `{p}cg:{sha256(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
+| `{p}s:{h(upstream, session id)}` | `h(subject key)`: the binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}ss:{h(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}c:{h(identity)}` | The cached credential or denial, AES-256-GCM encrypted, after a 4-byte key id (random 12-byte nonce; `{p}` and the entry digest as associated data, so a value copied to another entry or another gateway's prefix is refused). The absolute expiry is sealed inside the value. | The entry's TTL. |
+| `{p}cg:{h(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
 
-Binding, checking and dropping a session are each one Lua script, so replicas cannot race a binding or the per-subject cap. The scripts derive the per-subject key from a stored digest: use one Redis (a primary with replicas is fine), not a sharded Redis Cluster. A cached value that cannot be decrypted (rotated key, tampering) is deleted and counted as a miss, with a warning that carries no content. Rotating `encryption_key_file` therefore empties the cache without an outage.
+Binding, checking and dropping a session are each one Lua script, so replicas cannot race a binding or the per-subject cap. The scripts derive the per-subject key from a stored digest: use one Redis (a primary with replicas is fine), not a sharded Redis Cluster. A value past its sealed expiry is a miss even if Redis still holds it (for example one replayed without its TTL); the expiry is the writing replica's wall clock (`time.time()`), so replicas whose clocks disagree by more than a cache TTL see entries expire early or late: keep them on NTP. A cached value that is malformed, or that carries this replica's key id but fails authentication (tampering, truncation), is deleted and counted as a miss, with a warning that carries no content.
+
+**Rotating `encryption_key_file`.** Every cached value starts with a 4-byte key id derived from the key (HKDF-SHA256, `info` `mcp-gateway key id`). A value with another key id is counted as a miss and left alone (DEBUG log at most): it belongs to a replica still on the other key. Because key names derive from the same key, a replica on the new key also looks under different names, so during a rolling update the two generations simply do not see each other's entries: the cache of the new generation starts empty (the credential backend is asked once per identity) and entries of the old key expire by their TTL. Session bindings and rate limit buckets are keyed the same way, so a session opened on an old-key replica is unknown (`404`) to a new-key replica and rate limit buckets restart full. Rotate in a quiet window, or accept those effects; there is no outage, and no replica fails requests because of the other generation.
 
 An upstream `401` or `402` deletes the cached entry and bumps its generation. A lookup writes its answer only if the generation is unchanged since before it asked the backend, so a lookup still running on replica B cannot put back a credential that replica A just invalidated.
 
@@ -311,7 +313,7 @@ An upstream `401` or `402` deletes the cached entry and bumps its generation. A 
 |---|---|---|
 | `allowed_origins` | list of strings | Browser origins allowed on the MCP endpoint, `scheme://host[:port]`, http or https only. Scheme and host are lowercased and a default port is dropped. An entry with a path, query, fragment or userinfo is refused, and so is `null`. A request with an `Origin` header not in the list gets `403` (`-32008`) before authentication. An empty list refuses every request that carries an `Origin`; requests without one pass. |
 | `tools` | object or `null` | Tool allow/deny policy, see below. `null` means no policy: the gateway never parses or rewrites a response, and relays bytes exactly as the upstream sent them. |
-| `rate_limits` | object or null | Token buckets per subject and per organization. `null` turns rate limiting off. See below. |
+| `rate_limits` | object or `null` | Token buckets per subject and, optionally, per organization. `null` turns rate limiting off. See below. |
 
 ### `policies.tools`
 
@@ -354,21 +356,21 @@ The policy runs after the credential is resolved and the session checked, before
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
-| `per_subject` | object or null | | One bucket per subject (the issuer and the subject claim together). `null` does not limit subjects. |
-| `per_organization` | object or null | | One bucket shared by every subject whose token carries the same organization. `null` does not limit organizations. |
+| `per_subject` | object | required, never `null` | One bucket per subject (the issuer and the subject claim together). It is required because a subject whose token carries no organization is charged to no organization bucket: without a subject bucket it would be unlimited. |
+| `per_organization` | object or `null` | needs `auth.identity.organization` when set | One bucket shared by every subject whose token carries the same organization. `null` does not limit organizations. The config is refused when it is set but `auth.identity.organization` is `null`: no request would carry an organization. |
 
-At least one of the two must be non-null (use `"rate_limits": null` to turn the feature off). A bucket has two keys, both required:
+`per_subject` must be present (use `"rate_limits": null` to turn the feature off). A bucket has two keys, both required:
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
-| `burst` | integer | >= 1 | The bucket's capacity, and its level when it is created. |
-| `per_minute` | number | > 0 | The refill rate: `per_minute / 60` tokens per second, up to `burst`. |
+| `burst` | integer | 1 to 1000000 | The bucket's capacity, and its level when it is created. |
+| `per_minute` | number | >= 0.001, finite | The refill rate: `per_minute / 60` tokens per second, up to `burst`. The floor is one token per 1000 minutes. |
 
 What a token is: every authenticated request to the MCP endpoint (any method: `POST`, `GET`, `DELETE`; a `tools/call`, a `tools/list`, a notification) takes one token from each bucket that applies to it. A request without a valid token never takes one. The check runs after authentication and the `Mcp-*` header checks and before the credential lookup, so a flood is refused without reaching the resolver backend or the upstream.
 
 Burst against rate, worked example with `{"burst": 30, "per_minute": 60}`: a new subject can send 30 requests at once, then one per second. After 30 s of silence it has 30 tokens back. A subject sending steadily 1.5 requests per second drains the bucket at 0.5 tokens per second and is refused after about 60 s, then gets through one request per second. `burst` sets how large a spike is tolerated; `per_minute` sets the sustained rate.
 
-Subject and organization: with both set, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (`auth.identity.organization` is `null` or the claim is absent) is limited per subject only.
+Subject and organization: with both set, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (the claim is absent) is charged to its subject bucket only. A `policies.tools` rule matching on `organization` is likewise refused when `auth.identity.organization` is `null`: it could never match.
 
 The refusal has three shapes, chosen so that the sender can read it:
 
@@ -378,9 +380,9 @@ The refusal has three shapes, chosen so that the sender can read it:
 | Any other single request with an id | HTTP `200` and a JSON-RPC error `-32014` with `data.retry_after_seconds: N`. Header `Retry-After: N`. |
 | No reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request) | HTTP `429`, header `Retry-After: N` and a JSON-RPC error `-32014` with id `null`. |
 
-Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1. The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
+Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1 and at most 86400 (one day). The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
 
-Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<sha256>` and `{p}rl:o:<sha256>`, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.redis.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
+Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<h>` and `{p}rl:o:<h>`, `h` being the same keyed digest, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
 
 ## `audit`
 
@@ -407,7 +409,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `tool` | string or null | `params.name` of a `tools/call`. |
 | `status` | integer | HTTP status the gateway answered (the upstream's for a relayed response, `499` when the client left). |
 | `outcome` | string | See below. |
-| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a `tools/list` reply the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name. |
+| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a `tools/list` reply the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name, or the bucket that refused a `rate_limited` request (`subject` or `organization`). |
 | `upstream` | string or null | Upstream name, once one was chosen. |
 | `latency_ms` | number | From receipt to the end of the response (the end of the stream for SSE). |
 | `upstream_status` | integer or null | Status the upstream answered. |
@@ -457,7 +459,7 @@ Each request is a new root trace; an inbound `traceparent` is never its parent. 
 | `mcp-gateway resolve_credential` | internal | `mcp_gateway.resolver.type` (`static`, `webhook`, `store_sql`, `store_redis`, `chain`), `mcp_gateway.resolver.cache` (`hit`, `miss`, `negative`, `none` when the cache is off), `mcp_gateway.resolver.result` (`credential`, `denied`, `unavailable`, `error`, `disconnected`, `aborted`). |
 | `mcp-gateway upstream` | client | `mcp_gateway.upstream`, `http.response.status_code`, `mcp_gateway.upstream.error` (`timeout`, `unreachable`, `aborted`). Ends at the response headers. |
 
-Error status is set on the request span for `status >= 500`, `upstream_stream_failed` and `internal_error`, with no message and no recorded exception. Spans never carry the subject, e-mail, organization, a token, a key, a session id, arguments or content.
+Error status is set on the request span for `status >= 500`, `upstream_stream_failed`, `tool_policy_failed` and `internal_error`, with no message and no recorded exception. Spans never carry the subject, e-mail, organization, a token, a key, a session id, arguments or content.
 
 ### Metrics
 
@@ -470,7 +472,7 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
 | `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |
 
-Telemetry is best effort: it never changes a response that is already decided or sent. A failure while recording a request is logged at ERROR (exception type only) and counted under `signal="record"`, and the audit line is still written. OTLP export failures happen in the SDK's background threads, which only log them; the gateway counts them under `traces` and `metrics` without altering what the SDK sees. Alert on a rising `mcp_gateway.telemetry.failures`: a collector that is down is otherwise visible only in the logs.
+Telemetry is best effort: it never changes a response that is already decided or sent. A failure while recording a request is logged at ERROR with its traceback (the message names the exception type and carries no request data) and counted under `signal="record"`, and the audit line is still written. OTLP export failures happen in the SDK's background threads, which only log them; the gateway counts them under `traces` and `metrics` without altering what the SDK sees. Alert on a rising `mcp_gateway.telemetry.failures`: a collector that is down is otherwise visible only in the logs.
 
 `rpc_method` is one of the standard MCP methods or `other` (and `none` for a body that is not JSON-RPC): the method is client-chosen text, so it is bounded. Tool names and resolver labels are never metric attributes (their values come from clients and backends, not from this file); they are span attributes only.
 

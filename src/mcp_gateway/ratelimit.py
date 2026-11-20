@@ -9,7 +9,6 @@ Two implementations share the algorithm. ``MemoryRateLimiter`` is exact for one 
 ``RedisRateLimiter`` keeps the buckets in Redis so several replicas share them.
 """
 
-import hashlib
 import math
 import time
 from collections.abc import Callable, Sequence
@@ -17,6 +16,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from mcp_gateway.config import RateLimitsConfig
+from mcp_gateway.state.digest import KeyDigest
 from mcp_gateway.state.errors import StateUnavailableError
 from mcp_gateway.state.redis_client import BoundedRedis
 from mcp_gateway.state.state import State
@@ -27,6 +27,10 @@ type Scope = Literal["subject", "organization"]
 # seconds from being announced as 6.
 _ROUNDING_DIGITS = 6
 _SECONDS_PER_MINUTE = 60.0
+# The longest wait ever announced in ``Retry-After``. The config floor (0.001 tokens per minute)
+# already keeps waits under 17 hours; this ceiling holds whatever a bucket spec or a script reply
+# says, so no client is ever told to wait for more than a day.
+MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
 
 
 class RateLimitUnavailableError(StateUnavailableError):
@@ -71,16 +75,12 @@ def bucket_specs(
 ) -> list[BucketSpec]:
     """The buckets one request draws from.
 
-    A subject whose token carries no organization is limited per subject only: there is no
-    organization to charge.
+    The subject bucket is always drawn. A subject whose token carries no organization is charged
+    to no organization bucket: there is none to charge, and the subject bucket still limits it.
     """
-    specs: list[BucketSpec] = []
-    if limits.per_subject is not None:
-        specs.append(
-            BucketSpec(
-                "subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute
-            )
-        )
+    specs = [
+        BucketSpec("subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute)
+    ]
     if limits.per_organization is not None and organization is not None:
         specs.append(
             BucketSpec(
@@ -94,7 +94,7 @@ def bucket_specs(
 
 
 def _retry_after(wait_seconds: float) -> int:
-    return max(1, math.ceil(round(wait_seconds, _ROUNDING_DIGITS)))
+    return min(MAX_RETRY_AFTER_SECONDS, max(1, math.ceil(round(wait_seconds, _ROUNDING_DIGITS))))
 
 
 @dataclass
@@ -210,29 +210,26 @@ return {1, 0, 0}
 """
 
 
-def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 class RedisRateLimiter:
     """Buckets in Redis, shared by every replica that uses the same ``key_prefix``.
 
     The Redis handle is the state backend's: it is built and closed by the state, and every call
     goes through its bounded ``run`` so the limiter shares the state's timeout and error mapping.
-    Keys hold a hash of the subject or organization, never the value. A failure raises
+    Keys hold a keyed digest of the subject or organization, never the value. A failure raises
     ``StateUnavailableError`` so the caller fails closed instead of letting traffic through
     unmetered.
     """
 
     _SCOPE_TAG: dict[Scope, str] = {"subject": "s", "organization": "o"}
 
-    def __init__(self, redis: BoundedRedis, key_prefix: str) -> None:
+    def __init__(self, redis: BoundedRedis, key_prefix: str, digest: KeyDigest) -> None:
         self._redis = redis
+        self._digest = digest
         self._script = redis.client.register_script(_ACQUIRE_LUA)
         self._prefix = key_prefix
 
     def _key(self, spec: BucketSpec) -> str:
-        return f"{self._prefix}rl:{self._SCOPE_TAG[spec.scope]}:{_digest(spec.key)}"
+        return f"{self._prefix}rl:{self._SCOPE_TAG[spec.scope]}:{self._digest(spec.key)}"
 
     async def acquire(self, buckets: Sequence[BucketSpec]) -> Decision:
         keys = [self._key(spec) for spec in buckets]
@@ -244,9 +241,15 @@ class RedisRateLimiter:
 
     @staticmethod
     def _decision(reply: object, buckets: Sequence[BucketSpec]) -> Decision:
-        if not (isinstance(reply, list) and len(reply) == 3):
+        # redis-py hands Lua numbers back as ints. Anything else is a broken script or server:
+        # refuse it (503) rather than coerce a guess into a decision.
+        if not (
+            isinstance(reply, list)
+            and len(reply) == 3
+            and all(isinstance(item, int) and not isinstance(item, bool) for item in reply)
+        ):
             raise RateLimitUnavailableError("unexpected reply from the rate limit script")
-        allowed, wait_ms, slowest = (int(item) for item in reply)
+        allowed, wait_ms, slowest = reply
         if allowed == 1:
             return ALLOWED
         if not 1 <= slowest <= len(buckets):
@@ -264,6 +267,6 @@ def build_rate_limiter(config: RateLimitsConfig | None, state: State) -> RateLim
         return None
     if state.redis is None:
         return MemoryRateLimiter(clock=time.monotonic)
-    if state.key_prefix is None:
-        raise ValueError("a state with a Redis client must carry its key prefix")
-    return RedisRateLimiter(state.redis, state.key_prefix)
+    if state.key_prefix is None or state.digest is None:
+        raise ValueError("a state with a Redis client must carry its key prefix and digest")
+    return RedisRateLimiter(state.redis, state.key_prefix, state.digest)

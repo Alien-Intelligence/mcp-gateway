@@ -1,11 +1,11 @@
 """Session bindings shared by every replica, kept in Redis.
 
 Layout (``p`` is the configured key prefix; nothing below is a session id, a subject, an
-issuer or an e-mail, only SHA-256 digests):
+issuer or an e-mail, only keyed digests: ``h`` is HMAC-SHA256, see ``digest.py``):
 
-* ``{p}s:{sha256(upstream \\x1f session id)}`` holds ``sha256(subject key)`` and expires after
+* ``{p}s:{h(upstream \\x1f session id)}`` holds ``h(subject key)`` and expires after
   the idle TTL. It is the binding.
-* ``{p}ss:{sha256(subject key)}`` is a sorted set of that subject's binding digests, scored by
+* ``{p}ss:{h(subject key)}`` is a sorted set of that subject's binding digests, scored by
   last use in milliseconds (the Redis server clock, so replicas never disagree). It enforces
   ``max_entries_per_subject`` by evicting the subject's own oldest binding.
 
@@ -17,7 +17,7 @@ Redis instance (or a primary with replicas), not a sharded Redis Cluster.
 import logging
 
 from mcp_gateway.config import SessionsConfig
-from mcp_gateway.state.digest import digest
+from mcp_gateway.state.digest import KeyDigest
 from mcp_gateway.state.redis_client import BoundedRedis
 from mcp_gateway.state.sessions import is_valid_session_id
 
@@ -75,8 +75,11 @@ return 1
 
 
 class RedisSessionStore:
-    def __init__(self, redis: BoundedRedis, prefix: str, config: SessionsConfig) -> None:
+    def __init__(
+        self, redis: BoundedRedis, prefix: str, config: SessionsConfig, digest: KeyDigest
+    ) -> None:
         self._redis = redis
+        self._digest = digest
         self._prefix = prefix
         self._ttl_ms = max(1, round(config.idle_ttl_seconds * 1000))
         self._cap = config.max_entries_per_subject
@@ -85,7 +88,7 @@ class RedisSessionStore:
         self._drop = redis.client.register_script(_DROP)
 
     def _binding(self, upstream: str, session_id: str) -> tuple[str, str]:
-        session = digest(upstream, session_id)
+        session = self._digest(upstream, session_id)
         return f"{self._prefix}s:{session}", session
 
     async def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
@@ -96,7 +99,7 @@ class RedisSessionStore:
         result = await self._redis.run(
             self._bind(
                 keys=[key],
-                args=[self._prefix, session, digest(subject_key), self._ttl_ms, self._cap],
+                args=[self._prefix, session, self._digest(subject_key), self._ttl_ms, self._cap],
             )
         )
         if result == 0:
@@ -107,7 +110,7 @@ class RedisSessionStore:
         return True
 
     async def check(self, upstream: str, session_id: str, subject_key: str) -> bool:
-        return await self._refresh_binding(upstream, session_id, digest(subject_key))
+        return await self._refresh_binding(upstream, session_id, self._digest(subject_key))
 
     async def touch(self, upstream: str, session_id: str) -> None:
         await self._refresh_binding(upstream, session_id, "")

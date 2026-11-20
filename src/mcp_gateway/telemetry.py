@@ -12,6 +12,7 @@ a key, a session id, arguments or content: those exist in the audit log and nowh
 Errors are a span status without a message, never a recorded exception.
 """
 
+import inspect
 import logging
 import re
 import threading
@@ -177,15 +178,23 @@ class _CountingSpanExporter(SpanExporter):
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         try:
             result = self._inner.export(spans)
-        except BaseException:
+        except Exception:
+            # Not BaseException: an interrupt or a cancellation is not an export failure.
             self._failures.increment("traces")
             raise
         if result is not SpanExportResult.SUCCESS:
             self._failures.increment("traces")
         return result
 
-    def shutdown(self) -> None:
-        self._inner.shutdown()
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        # The SDK looks for ``timeout_millis`` in the exporter's shutdown and passes the time it
+        # has left, so the wrapper must show it. It reaches the wrapped exporter only if that one
+        # takes it: the base ``SpanExporter.shutdown`` does not.
+        shutdown: Callable[..., None] = self._inner.shutdown
+        if "timeout_millis" in inspect.signature(shutdown).parameters:
+            shutdown(timeout_millis=timeout_millis, **kwargs)
+        else:
+            shutdown()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
         return self._inner.force_flush(timeout_millis)
@@ -211,7 +220,8 @@ class _CountingMetricExporter(MetricExporter):
     ) -> MetricExportResult:
         try:
             result = self._inner.export(metrics_data, timeout_millis, **kwargs)
-        except BaseException:
+        except Exception:
+            # Not BaseException: an interrupt or a cancellation is not an export failure.
             self._failures.increment("metrics")
             raise
         if result is not MetricExportResult.SUCCESS:

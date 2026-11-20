@@ -10,6 +10,7 @@ from typing import Annotated, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic_core import ErrorDetails
 
 from mcp_gateway.origin import normalize_origin
 
@@ -528,23 +529,33 @@ class ToolsPolicyConfig(_Model):
 class TokenBucketConfig(_Model):
     """One token bucket: ``burst`` is the capacity (and the starting level), ``per_minute`` the refill."""
 
-    burst: int = Field(ge=1)
-    per_minute: float = Field(gt=0, allow_inf_nan=False)
+    # The caps keep one typo from announcing a multi-day wait or an effectively absent limit; the
+    # refill floor is one token per 1000 minutes.
+    burst: int = Field(ge=1, le=1_000_000)
+    per_minute: float = Field(ge=0.001, allow_inf_nan=False)
 
 
 class RateLimitsConfig(_Model):
-    """Token buckets per subject and per organization; each null scope is not limited."""
+    """Token buckets per subject and, optionally, per organization.
 
-    per_subject: TokenBucketConfig | None
+    ``per_subject`` is required: a subject whose token carries no organization is charged to no
+    organization bucket, so without a subject bucket it would be unlimited.
+    """
+
+    per_subject: TokenBucketConfig
+    # null does not limit organizations.
     per_organization: TokenBucketConfig | None
 
-    @model_validator(mode="after")
-    def _at_least_one_scope(self) -> Self:
-        if self.per_subject is None and self.per_organization is None:
+    @field_validator("per_subject", mode="before")
+    @classmethod
+    def _per_subject_is_required(cls, value: object) -> object:
+        if value is None:
             raise ValueError(
-                "rate_limits needs per_subject or per_organization (use null to disable limiting)"
+                "per_subject is required when rate_limits is set: a subject without an "
+                "organization would otherwise be unlimited (use rate_limits null to turn "
+                "limiting off)"
             )
-        return self
+        return value
 
 
 class PoliciesConfig(_Model):
@@ -616,6 +627,27 @@ class GatewayConfig(_Model):
                 raise ValueError(f"{name} must be null when state.type is redis")
         return self
 
+    @model_validator(mode="after")
+    def _organization_policies_need_an_organization_claim(self) -> Self:
+        """Policies keyed on the organization cannot work when no claim carries one."""
+        if self.auth.identity.organization is not None:
+            return self
+        limits = self.policies.rate_limits
+        if limits is not None and limits.per_organization is not None:
+            raise ValueError(
+                "policies.rate_limits.per_organization needs auth.identity.organization "
+                "(no organization claim is read, so no request has an organization)"
+            )
+        tools = self.policies.tools
+        if tools is not None and any(
+            isinstance(rule.match, OrganizationMatchConfig) for rule in tools.rules
+        ):
+            raise ValueError(
+                "a policies.tools rule matching on organization needs auth.identity.organization "
+                "(no organization claim is read, so the rule could never match)"
+            )
+        return self
+
     @property
     def public_path(self) -> str:
         return urlsplit(self.public_url).path
@@ -634,6 +666,22 @@ class GatewayConfig(_Model):
         return f"{self.public_origin}{self.resource_metadata_path}"
 
 
+def _describe(error: ErrorDetails) -> str:
+    """One validation problem as location and rule, never the offending input.
+
+    pydantic's message for an unknown discriminator value quotes it. A mistyped value can be
+    a secret pasted into the wrong key, so that message is replaced by a fixed one that lists
+    the accepted choices (taken from the schema, not from the input).
+    """
+    where = ".".join(str(part) for part in error["loc"]) or "<root>"
+    if error["type"] == "union_tag_invalid":
+        context = error.get("ctx")
+        if context is None or "expected_tags" not in context:
+            return f"{where}: unknown type"
+        return f"{where}: unknown type, expected one of {context['expected_tags']}"
+    return f"{where}: {error['msg']}"
+
+
 def parse_config(raw: str) -> GatewayConfig:
     """Parse and validate a JSON config document."""
     try:
@@ -641,8 +689,7 @@ def parse_config(raw: str) -> GatewayConfig:
     except ValidationError as exc:
         # Report location and rule only: never echo input values.
         problems = "; ".join(
-            f"{'.'.join(str(part) for part in err['loc']) or '<root>'}: {err['msg']}"
-            for err in exc.errors(include_input=False, include_url=False)
+            _describe(err) for err in exc.errors(include_input=False, include_url=False)
         )
         raise ConfigError(f"invalid {CONFIG_ENV_VAR}: {problems}") from exc
 

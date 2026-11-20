@@ -1,7 +1,7 @@
 """The Redis limiter against a real Redis: shared buckets, atomicity, server-side time, failure."""
 
 import asyncio
-import hashlib
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -13,10 +13,12 @@ import redis.asyncio as aioredis
 from mcp_gateway.config import RedisStateConfig
 from mcp_gateway.ratelimit import BucketSpec, RedisRateLimiter
 from mcp_gateway.state import BoundedRedis, StateUnavailableError
+from mcp_gateway.state.digest import KeyDigest
 
 pytestmark = pytest.mark.integration
 
 TIMEOUT = 2.0
+DIGEST = KeyDigest(os.urandom(32))
 # Negligible refill: one token per 100 minutes.
 SLOW = 0.01
 
@@ -54,7 +56,7 @@ async def make_redis(tmp_path: Path, prefix: str) -> AsyncIterator[MakeRedis]:
                 key_prefix=prefix,
                 connect_timeout_seconds=1,
                 operation_timeout_seconds=operation_timeout,
-                max_connections=64,
+                max_connections=4,
                 encryption_key_file=str(tmp_path / "unused-key"),
             )
         )
@@ -68,7 +70,7 @@ async def make_redis(tmp_path: Path, prefix: str) -> AsyncIterator[MakeRedis]:
 
 @pytest.fixture
 def limiter(make_redis: MakeRedis, redis_url: str, prefix: str) -> RedisRateLimiter:
-    return RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix)
+    return RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix, DIGEST)
 
 
 def subject(key: str = "u1", burst: int = 3, per_minute: float = SLOW) -> BucketSpec:
@@ -82,8 +84,8 @@ def org(key: str = "o1", burst: int = 5, per_minute: float = SLOW) -> BucketSpec
 async def test_two_limiters_share_their_buckets_like_two_replicas(
     make_redis: MakeRedis, redis_url: str, prefix: str
 ) -> None:
-    replica_a = RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix)
-    replica_b = RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix)
+    replica_a = RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix, DIGEST)
+    replica_b = RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix, DIGEST)
     spec = subject(burst=3)
     results = [
         (await replica_a.acquire([spec])).allowed,
@@ -98,7 +100,7 @@ async def test_two_limiters_share_their_buckets_like_two_replicas(
 async def test_fifty_concurrent_acquires_with_burst_ten_allow_exactly_ten(
     make_redis: MakeRedis, redis_url: str, prefix: str
 ) -> None:
-    replicas = [RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix) for _ in range(2)]
+    replicas = [RedisRateLimiter(make_redis(redis_url, TIMEOUT), prefix, DIGEST) for _ in range(2)]
     spec = subject(burst=10)
     decisions = await asyncio.gather(*(replicas[i % 2].acquire([spec]) for i in range(50)))
     assert sum(d.allowed for d in decisions) == 10
@@ -173,7 +175,7 @@ async def test_idle_buckets_expire_and_start_full_again(
     assert (await limiter.acquire([spec])).allowed
 
 
-async def test_keys_hold_a_hash_and_never_the_subject_or_organization(
+async def test_keys_hold_a_keyed_digest_and_never_the_subject_or_organization(
     limiter: RedisRateLimiter, client: aioredis.Redis, prefix: str
 ) -> None:
     subject_key = "https://idp.example.com\x1fvery-identifiable-subject"
@@ -181,8 +183,8 @@ async def test_keys_hold_a_hash_and_never_the_subject_or_organization(
     keys = [key async for key in client.scan_iter(match=f"{prefix}*")]
     assert sorted(keys) == sorted(
         [
-            f"{prefix}rl:s:{hashlib.sha256(subject_key.encode()).hexdigest()}",
-            f"{prefix}rl:o:{hashlib.sha256(b'very-identifiable-org').hexdigest()}",
+            f"{prefix}rl:s:{DIGEST(subject_key)}",
+            f"{prefix}rl:o:{DIGEST('very-identifiable-org')}",
         ]
     )
     for key in keys:
@@ -193,7 +195,7 @@ async def test_keys_hold_a_hash_and_never_the_subject_or_organization(
 async def test_a_closed_port_raises_unavailable_within_the_timeout(
     make_redis: MakeRedis, prefix: str
 ) -> None:
-    limiter = RedisRateLimiter(make_redis("redis://127.0.0.1:1/0", 1.5), prefix)
+    limiter = RedisRateLimiter(make_redis("redis://127.0.0.1:1/0", 1.5), prefix, DIGEST)
     started = time.monotonic()
     with pytest.raises(StateUnavailableError):
         await limiter.acquire([subject()])
@@ -208,7 +210,7 @@ async def test_a_server_that_never_answers_hits_the_operation_timeout(
 
     server = await asyncio.start_server(silent, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    limiter = RedisRateLimiter(make_redis(f"redis://127.0.0.1:{port}/0", 0.3), prefix)
+    limiter = RedisRateLimiter(make_redis(f"redis://127.0.0.1:{port}/0", 0.3), prefix, DIGEST)
     started = time.monotonic()
     try:
         with pytest.raises(StateUnavailableError):
