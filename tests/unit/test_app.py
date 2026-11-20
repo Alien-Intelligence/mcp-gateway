@@ -541,6 +541,31 @@ async def test_client_disconnect_aborts_the_upstream_request(
     assert audit_lines(caplog)[0]["outcome"] == "client_disconnected"
 
 
+class FailingCloseResolver(FixedResolver):
+    async def aclose(self) -> None:
+        raise ResolverError("resolver close failed")
+
+
+async def test_lifespan_closes_every_client_even_when_the_resolver_close_fails(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    closed: list[httpx.AsyncClient] = []
+    original = httpx.AsyncClient.aclose
+
+    async def recording_aclose(self: httpx.AsyncClient) -> None:
+        closed.append(self)
+        await original(self)
+
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", recording_aclose)
+    app = build_app(mapping_dir, transport, resolver=FailingCloseResolver(Denied("no_mapping")))
+    with pytest.raises(ResolverError, match="resolver close failed"):
+        async with app.router.lifespan_context(app):
+            pass
+    assert len(closed) == 2, "the JWKS client and the upstream client are both closed"
+
+
 class HangingResolver:
     """Never answers; records being cancelled."""
 

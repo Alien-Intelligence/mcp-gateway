@@ -21,6 +21,7 @@ from mcp_gateway.auth import (
     JwksUnavailableError,
     TokenVerifier,
 )
+from mcp_gateway.closing import close_all
 from mcp_gateway.config import GatewayConfig
 from mcp_gateway.identity import Identity, IdentityError, build_identity
 from mcp_gateway.jsonrpc import (
@@ -364,10 +365,9 @@ def create_app(
         try:
             yield
         finally:
-            await resolver.aclose()
-            await jwks_client.aclose()
-            for client in clients.values():
-                await client.aclose()
+            await close_all(
+                [resolver.aclose, jwks_client.aclose, *(c.aclose for c in clients.values())]
+            )
 
     return Starlette(
         routes=[

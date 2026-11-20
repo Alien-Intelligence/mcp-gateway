@@ -10,10 +10,14 @@ KEY = Credential(api_key=SecretStr("fake-alien-key-k"), upstream="primary", labe
 
 class Member:
     def __init__(
-        self, outcome: Credential | Denied | Exception, invalidate_error: Exception | None = None
+        self,
+        outcome: Credential | Denied | Exception,
+        invalidate_error: Exception | None = None,
+        close_error: Exception | None = None,
     ) -> None:
         self.outcome = outcome
         self.invalidate_error = invalidate_error
+        self.close_error = close_error
         self.calls = 0
         self.invalidated = 0
         self.closed = False
@@ -31,6 +35,8 @@ class Member:
 
     async def aclose(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 async def test_no_mapping_moves_on_to_the_next_member() -> None:
@@ -77,3 +83,11 @@ async def test_invalidate_and_close_reach_every_member_even_after_a_failure() ->
 def test_empty_chain_is_refused() -> None:
     with pytest.raises(ResolverError):
         ChainResolver([])
+
+
+async def test_every_member_is_closed_even_when_one_close_fails() -> None:
+    failing = Member(KEY, close_error=ResolverError("close failed"))
+    after = Member(KEY)
+    with pytest.raises(ResolverError, match="close failed"):
+        await ChainResolver([failing, after]).aclose()
+    assert failing.closed and after.closed
