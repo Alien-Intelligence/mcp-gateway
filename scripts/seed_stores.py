@@ -17,6 +17,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import psycopg
 import redis
@@ -38,8 +39,12 @@ CREATE_TABLE = (
 
 
 def redis_key(email: str) -> str:
-    """The Redis key of an identity; matches ``key_pattern`` ``mcp-gateway:cred:{email}``."""
-    return f"{REDIS_KEY_PREFIX}{email}"
+    """The Redis key of an identity; matches ``key_pattern`` ``mcp-gateway:cred:{email}``.
+
+    The gateway percent-encodes every substituted value (``quote(value, safe="")``), so the
+    store must be written the same way.
+    """
+    return f"{REDIS_KEY_PREFIX}{quote(email, safe='')}"
 
 
 def require_env(name: str) -> str:
