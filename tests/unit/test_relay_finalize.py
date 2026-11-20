@@ -38,7 +38,9 @@ class Harness:
     def __init__(self, stream: TrackedStream, caplog: pytest.LogCaptureFixture) -> None:
         self.stream = stream
         self.clock = Clock()
-        self.sessions = SessionRegistry(max_entries=10, idle_ttl_seconds=600, clock=self.clock)
+        self.sessions = SessionRegistry(
+            max_entries=10, max_entries_per_subject=10, idle_ttl_seconds=600, clock=self.clock
+        )
         self.sessions.bind(UPSTREAM, SESSION, "alice")
         # Bound at 0, the relay ends at 500, the check happens at 1000: alive only if touched.
         self.clock.now = 500.0

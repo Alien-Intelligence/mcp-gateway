@@ -331,6 +331,7 @@ def create_app(
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
     sessions = SessionRegistry(
         max_entries=config.sessions.max_entries,
+        max_entries_per_subject=config.sessions.max_entries_per_subject,
         idle_ttl_seconds=config.sessions.idle_ttl_seconds,
         clock=session_clock,
     )

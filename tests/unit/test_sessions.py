@@ -9,9 +9,17 @@ class Clock:
         return self.now
 
 
-def make(max_entries: int = 3, ttl: float = 60.0) -> tuple[SessionRegistry, Clock]:
+def make(
+    max_entries: int = 3, ttl: float = 60.0, per_subject: int | None = None
+) -> tuple[SessionRegistry, Clock]:
     clock = Clock()
-    return SessionRegistry(max_entries=max_entries, idle_ttl_seconds=ttl, clock=clock), clock
+    registry = SessionRegistry(
+        max_entries=max_entries,
+        max_entries_per_subject=max_entries if per_subject is None else per_subject,
+        idle_ttl_seconds=ttl,
+        clock=clock,
+    )
+    return registry, clock
 
 
 def test_bound_session_is_usable_by_its_subject_only() -> None:
@@ -104,3 +112,42 @@ def test_malformed_ids_are_not_bound() -> None:
     assert not registry.bind("up", "x" * 513, "alice")
     assert len(registry) == 0
     assert is_valid_session_id("1868a90c-AbC~!")
+
+
+def test_a_subject_over_its_cap_evicts_only_its_own_oldest_binding() -> None:
+    registry, clock = make(max_entries=10, per_subject=2)
+    registry.bind("up", "bob-1", "bob")
+    for index in range(5):
+        clock.now += 1
+        registry.bind("up", f"alice-{index}", "alice")
+    assert registry.check("up", "bob-1", "bob"), "another subject's binding is never evicted"
+    assert [registry.check("up", f"alice-{i}", "alice") for i in range(5)] == [
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
+    assert len(registry) == 3
+
+
+def test_rebinding_a_known_session_does_not_count_twice() -> None:
+    registry, _ = make(max_entries=10, per_subject=2)
+    registry.bind("up", "a1", "alice")
+    registry.bind("up", "a2", "alice")
+    assert registry.bind("up", "a2", "alice")
+    assert registry.check("up", "a1", "alice")
+
+
+def test_dropped_and_expired_bindings_free_the_subject_cap() -> None:
+    registry, clock = make(max_entries=10, ttl=60, per_subject=2)
+    registry.bind("up", "a1", "alice")
+    registry.bind("up", "a2", "alice")
+    registry.drop("up", "a1")
+    registry.bind("up", "a3", "alice")
+    assert registry.check("up", "a2", "alice") and registry.check("up", "a3", "alice")
+    clock.now += 61
+    assert not registry.check("up", "a2", "alice")
+    registry.bind("up", "a4", "alice")
+    registry.bind("up", "a5", "alice")
+    assert registry.check("up", "a4", "alice") and registry.check("up", "a5", "alice")

@@ -342,7 +342,15 @@ class SessionsConfig(_Model):
     """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it (in memory)."""
 
     max_entries: int = Field(gt=0)
+    # One subject over this cap evicts its own oldest binding, never another subject's.
+    max_entries_per_subject: int = Field(gt=0)
     idle_ttl_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _subject_cap_within_total(self) -> Self:
+        if self.max_entries_per_subject > self.max_entries:
+            raise ValueError("max_entries_per_subject must be <= max_entries")
+        return self
 
 
 class PoliciesConfig(_Model):
