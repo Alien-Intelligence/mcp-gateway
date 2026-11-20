@@ -21,7 +21,7 @@ from mcp_gateway.resolver import (
 
 pytestmark = pytest.mark.integration
 
-UPSTREAMS = ["primary", "other"]
+UPSTREAMS = ["main", "other"]
 
 
 def identity(
@@ -35,7 +35,7 @@ def redis_config(url_file: Path, prefix: str, **overrides: Any) -> StoreRedisRes
         "type": "store_redis",
         "url_file": str(url_file),
         "key_pattern": f"{prefix}:{{organization}}:{{subject}}",
-        "default_upstream": "primary",
+        "default_upstream": "main",
         "connect_timeout_seconds": 1,
         "socket_timeout_seconds": 1,
         "max_connections": 4,
@@ -87,7 +87,7 @@ async def test_allow_with_default_upstream_and_labels(
     outcome = await lookup(url_file, prefix, identity())
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == "fake-alien-key-alice"
-    assert outcome.upstream == "primary"
+    assert outcome.upstream == "main"
     assert dict(outcome.labels) == {"client": "x"}
 
 

@@ -4,7 +4,7 @@ It answers from a mapping file in ``WEBHOOK_STATE_DIR/mapping.json``, re-read on
 so the state can change while the stack runs::
 
     {"entries": [{"match": {"email": "alice@x.example"}, "api_key_file": "alice.key",
-                  "upstream": "primary" | null, "labels": {"client": "x"}, "ttl_seconds": 30 | null}]}
+                  "upstream": "main" | null, "labels": {"client": "x"}, "ttl_seconds": 30 | null}]}
 
 ``match`` has exactly one of subject/email/organization/group; lookup order is subject, email,
 organization, group. No match is ``{"decision": "deny", "reason": "no_mapping"}``.

@@ -20,7 +20,7 @@ from mcp_gateway.resolver import (
 
 pytestmark = pytest.mark.integration
 
-UPSTREAMS = ["primary", "other"]
+UPSTREAMS = ["main", "other"]
 DEFAULT_QUERY = (
     "SELECT api_key, upstream, labels FROM p3_mapping "
     "WHERE email = %(email)s OR subject = %(subject)s OR organization = %(organization)s"
@@ -38,7 +38,7 @@ def sql_config(dsn_file: Path, **overrides: Any) -> StoreSqlResolverConfig:
         "type": "store_sql",
         "dsn_file": str(dsn_file),
         "query": DEFAULT_QUERY,
-        "default_upstream": "primary",
+        "default_upstream": "main",
         "pool_min_size": 1,
         "pool_max_size": 2,
         "connect_timeout_seconds": 2,
@@ -90,7 +90,7 @@ async def test_allow_with_default_upstream_and_labels(dsn_file: Path) -> None:
         await resolver.aclose()
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == "fake-alien-key-alice"
-    assert outcome.upstream == "primary"
+    assert outcome.upstream == "main"
     assert dict(outcome.labels) == {"client": "x"}
     assert outcome.ttl_seconds is None
 

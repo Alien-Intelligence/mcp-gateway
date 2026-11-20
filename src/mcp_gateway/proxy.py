@@ -314,15 +314,20 @@ class UpstreamProxy:
             step.finish(status=None, error="unreachable")
             raise RuntimeError("upstream send finished without a response or a disconnect")
 
-        step.finish(status=response.status_code)
-        audit.upstream_status = response.status_code
-        audit.upstream_request_id = response.headers.get("x-request-id")
-        audit.upstream_session = "mcp-session-id" in response.headers
-        session_id = _request_session_id(inbound_headers)
-        if response.status_code in _AUTH_REPLIES:
-            return await self._reject(response, receive, rpc, identity, resolver, audit)
-        self._track_session(method, session_id, response, subject_key)
-        return self.stream(response, rpc, session_id, audit)
+        try:
+            step.finish(status=response.status_code)
+            audit.upstream_status = response.status_code
+            audit.upstream_request_id = response.headers.get("x-request-id")
+            audit.upstream_session = "mcp-session-id" in response.headers
+            session_id = _request_session_id(inbound_headers)
+            if response.status_code in _AUTH_REPLIES:
+                return await self._reject(response, receive, rpc, identity, resolver, audit)
+            self._track_session(method, session_id, response, subject_key)
+            return self.stream(response, rpc, session_id, audit)
+        except BaseException:
+            # Nothing owns the response yet: close it rather than leak the connection.
+            await _close(response)
+            raise
 
     def _track_session(
         self,
@@ -395,9 +400,13 @@ class UpstreamProxy:
         headers = filter_response_headers(response.headers.multi_items())
         # The client is given the gateway's request id; the upstream's is in the audit record.
         headers.pop("x-request-id", None)
-        if _is_event_stream(response) and has_content_encoding(response.headers.multi_items()):
-            # Never relayed: the gateway reports the failure in the clear instead.
-            headers.pop("content-encoding", None)
+        if _is_event_stream(response):
+            # The relay may replace, drop or refuse bytes, so the upstream's length is never
+            # true for what the client gets: the body goes out chunked.
+            headers.pop("content-length", None)
+            if has_content_encoding(response.headers.multi_items()):
+                # Never relayed: the gateway reports the failure in the clear instead.
+                headers.pop("content-encoding", None)
         return RelayResponse(
             self._relay(response, rpc.id if rpc.expects_reply else None, release, audit),
             release,

@@ -9,7 +9,7 @@ import pytest
 from mcp_gateway.identity import Identity
 from mcp_gateway.resolver import Credential, Denied, ResolverError, StaticResolver
 
-UPSTREAMS = ["primary", "other"]
+UPSTREAMS = ["main", "other"]
 
 
 def identity(
@@ -29,7 +29,7 @@ def entry(
     return {
         "match": match,
         "api_key_file": key_file,
-        "upstream": "primary",
+        "upstream": "main",
         "labels": labels if labels is not None else {},
     }
 
@@ -83,7 +83,7 @@ async def test_credential_carries_upstream_and_labels(state: Path) -> None:
     path = write_mapping(state, [entry({"subject": "s"}, "subj.key", {"client": "client-x"})])
     outcome = await StaticResolver(path, UPSTREAMS, email_matching=True).resolve(identity("s"))
     assert isinstance(outcome, Credential)
-    assert outcome.upstream == "primary"
+    assert outcome.upstream == "main"
     assert dict(outcome.labels) == {"client": "client-x"}
     assert "fake-alien-key-subj" not in repr(outcome)
 
@@ -249,25 +249,25 @@ async def test_bad_reload_serves_nothing_and_recovers_on_fix(
 @pytest.mark.parametrize(
     "document",
     [
-        {"entries": [{"match": {}, "api_key_file": "k", "upstream": "primary", "labels": {}}]},
+        {"entries": [{"match": {}, "api_key_file": "k", "upstream": "main", "labels": {}}]},
         {
             "entries": [
                 {
                     "match": {"email": "a", "subject": "b"},
                     "api_key_file": "k",
-                    "upstream": "primary",
+                    "upstream": "main",
                     "labels": {},
                 }
             ]
         },
         {
             "entries": [
-                {"match": {"color": "red"}, "api_key_file": "k", "upstream": "primary", "labels": {}}
+                {"match": {"color": "red"}, "api_key_file": "k", "upstream": "main", "labels": {}}
             ]
         },
         {
             "entries": [
-                {"match": {"email": " "}, "api_key_file": "k", "upstream": "primary", "labels": {}}
+                {"match": {"email": " "}, "api_key_file": "k", "upstream": "main", "labels": {}}
             ]
         },
         {
@@ -277,10 +277,10 @@ async def test_bad_reload_serves_nothing_and_recovers_on_fix(
         },
         {
             "entries": [
-                {"match": {"email": "a"}, "api_key_file": "", "upstream": "primary", "labels": {}}
+                {"match": {"email": "a"}, "api_key_file": "", "upstream": "main", "labels": {}}
             ]
         },
-        {"entries": [{"match": {"email": "a"}, "api_key_file": "k", "upstream": "primary"}]},
+        {"entries": [{"match": {"email": "a"}, "api_key_file": "k", "upstream": "main"}]},
         {"entries": [], "extra": 1},
         {"nope": []},
     ],

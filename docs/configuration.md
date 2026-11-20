@@ -313,6 +313,7 @@ Providers are owned by the gateway. No global OpenTelemetry provider is ever set
 | `endpoint` | string, http(s) URL | no credentials, query or fragment | Collector base URL. With `http/protobuf` the gateway posts to `<endpoint>/v1/traces` and `<endpoint>/v1/metrics`. With `grpc` the endpoint is used as is; an `http` scheme means a plaintext channel. |
 | `protocol` | `"grpc"` or `"http/protobuf"` | | |
 | `headers_file` | path or `null` | non-empty when set | File of `key=value` lines sent with every export, for an auth header. Blank lines and lines starting with `#` are skipped; the name is everything before the first `=`; names are case-insensitive and may not repeat; a value may contain `=`. A missing, unreadable or empty file, or a bad line, stops the gateway at start (the message names the file and line, never a value). Never inline. |
+| `allow_insecure_http` | boolean | required | Allows an `http` endpoint together with `headers_file`, which sends the auth header in clear. Without a `headers_file` or with an `https` endpoint it has no effect. For dev and test stacks only. |
 | `timeout_seconds` | number | gt 0 | One export attempt. |
 | `export_interval_seconds` | number | gt 0, >= `timeout_seconds` | Metric collection period, and the delay of the span batch. |
 | `service_name` | string | non-empty | The `service.name` resource attribute. |
@@ -419,6 +420,7 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
       "endpoint": "https://otel.example.com:4318",
       "protocol": "http/protobuf",
       "headers_file": "/run/secrets/otlp-headers",
+      "allow_insecure_http": false,
       "timeout_seconds": 10,
       "export_interval_seconds": 15,
       "service_name": "mcp-gateway",

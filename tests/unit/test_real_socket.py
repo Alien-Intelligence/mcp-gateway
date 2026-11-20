@@ -354,3 +354,28 @@ async def test_revoked_and_unpaid_keys_become_jsonrpc_errors_never_a_challenge(
     assert (revoked.status_code, revoked.json()["error"]["code"]) == (200, -32001)
     assert (unpaid.status_code, unpaid.json()["error"]["code"]) == (200, -32002)
     assert "www-authenticate" not in revoked.headers
+
+
+# --- an upstream Content-Length on a stream the relay may rewrite -------------------------
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{"declare_length": True}, {"gzip": True}],
+    ids=["content-length", "gzip-and-content-length"],
+)
+async def test_sse_failure_with_an_upstream_content_length_still_gives_the_error_event(
+    stack: Stack, arguments: dict[str, Any]
+) -> None:
+    with anyio.fail_after(TEST_SECONDS):
+        async with stack.client.stream(
+            "POST",
+            f"{stack.gateway}/mcp",
+            json=rpc_call("fail_midstream_sse", before=1, **arguments),
+            headers=stack.headers("carol", **ACCEPT),
+        ) as response:
+            assert "content-length" not in response.headers
+            assert "content-encoding" not in response.headers
+            body, error = await read_body(response)
+    assert error is None, "the stream must end cleanly after the error event"
+    assert json_of(events_of(body)[-1])["error"]["code"] == -32006

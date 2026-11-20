@@ -24,7 +24,7 @@ from .conftest import FAKE_API_KEY
 from .webhook_server import WebhookServer, json_responder, make_pki, slow_responder
 
 SECRET = "s3cret-shared-with-customer"
-UPSTREAMS = ["primary", "other"]
+UPSTREAMS = ["main", "other"]
 ALLOW = {
     "decision": "allow",
     "api_key": FAKE_API_KEY,
@@ -50,7 +50,7 @@ def webhook_config(url: str, auth: dict[str, Any], **overrides: Any) -> WebhookR
         "url": url,
         "auth": auth,
         "ca_file": None,
-        "default_upstream": "primary",
+        "default_upstream": "main",
         "allow_insecure_http": True,
         "timeout_seconds": 2,
         "total_timeout_seconds": 10,
@@ -131,7 +131,7 @@ async def test_allow_sends_only_the_identity_and_a_valid_signature(
     outcome = await resolver.resolve(identity())
     assert isinstance(outcome, Credential)
     assert outcome.api_key.get_secret_value() == FAKE_API_KEY
-    assert outcome.upstream == "primary"  # null upstream selects default_upstream
+    assert outcome.upstream == "main"  # null upstream selects default_upstream
     assert dict(outcome.labels) == {"client": "client-x"}
     assert outcome.ttl_seconds is None
 

@@ -161,3 +161,29 @@ def test_mixed_line_endings_split_the_same_at_every_chunk_size() -> None:
         events = drain(splitter, chunks)
         events.extend(splitter.finish())
         assert events == expected, size
+
+
+class _CountingLineBreak:
+    """Stands in for the line-break pattern and counts the bytes every search looks at."""
+
+    def __init__(self, real: re.Pattern[bytes]) -> None:
+        self._real = real
+        self.scanned = 0
+
+    def search(self, buffer: bytes | bytearray, start: int) -> re.Match[bytes] | None:
+        self.scanned += len(buffer) - start
+        return self._real.search(buffer, start)
+
+
+def test_one_long_unterminated_line_is_scanned_once_not_per_chunk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter = _CountingLineBreak(sse_module._LINE_BREAK)
+    monkeypatch.setattr(sse_module, "_LINE_BREAK", counter)
+    size = 8192
+    stream = b"data: " + b"x" * size + b"\n\n"
+    splitter = SseEventSplitter(1024 * 1024, None)
+    events = drain(splitter, [stream[i : i + 1] for i in range(len(stream))])
+    assert events == [stream]
+    # A rescan from the line start would look at ~size**2 / 2 (33 million) bytes.
+    assert counter.scanned < 4 * len(stream)

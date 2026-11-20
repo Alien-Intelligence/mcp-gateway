@@ -41,7 +41,7 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("auth", "identity", "email_verified"),
         ("auth", "jwks_max_stale_seconds"),
         ("resolver", "type"),
-        ("upstreams", "primary", "read_timeout_seconds"),
+        ("upstreams", "main", "read_timeout_seconds"),
         ("limits",),
         ("limits", "request_body_timeout_seconds"),
         ("audit", "enabled"),
@@ -67,7 +67,7 @@ def test_every_key_is_required(config_dict: dict[str, Any], path: tuple[str, ...
 
 @pytest.mark.parametrize(
     "path",
-    [(), ("auth",), ("auth", "identity"), ("listen",), ("upstreams", "primary"), ("resolver",)],
+    [(), ("auth",), ("auth", "identity"), ("listen",), ("upstreams", "main"), ("resolver",)],
 )
 def test_unknown_keys_are_rejected(config_dict: dict[str, Any], path: tuple[str, ...]) -> None:
     node = config_dict
@@ -155,7 +155,7 @@ def test_value_rules(config_dict: dict[str, Any], section: str, key: str, value:
     ],
 )
 def test_upstream_timeouts_must_be_positive(config_dict: dict[str, Any], timeout_key: str) -> None:
-    config_dict["upstreams"]["primary"][timeout_key] = 0
+    config_dict["upstreams"]["main"][timeout_key] = 0
     with pytest.raises(ConfigError, match=timeout_key):
         _parse(config_dict)
 
@@ -167,7 +167,7 @@ def test_at_least_one_upstream(config_dict: dict[str, Any]) -> None:
 
 
 def test_upstream_url_must_be_http(config_dict: dict[str, Any]) -> None:
-    config_dict["upstreams"]["primary"]["url"] = "upstream.example.com/mcp"
+    config_dict["upstreams"]["main"]["url"] = "upstream.example.com/mcp"
     with pytest.raises(ConfigError, match="url"):
         _parse(config_dict)
 
@@ -208,7 +208,7 @@ def test_invalid_json_is_a_clear_error() -> None:
 
 
 def test_error_never_echoes_values(config_dict: dict[str, Any]) -> None:
-    config_dict["upstreams"]["primary"]["url"] = "super-secret-value"
+    config_dict["upstreams"]["main"]["url"] = "super-secret-value"
     with pytest.raises(ConfigError) as excinfo:
         _parse(config_dict)
     assert "super-secret-value" not in str(excinfo.value)
