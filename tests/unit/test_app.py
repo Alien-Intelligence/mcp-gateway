@@ -802,6 +802,8 @@ async def test_audit_line_for_a_forwarded_tool_call(
     assert set(line) == {
         "ts",
         "event",
+        "request_id",
+        "trace_id",
         "subject",
         "organization",
         "labels",
@@ -816,6 +818,7 @@ async def test_audit_line_for_a_forwarded_tool_call(
         "latency_ms",
         "upstream_status",
         "upstream_session",
+        "upstream_request_id",
     }
     assert line["upstream_session"] is False
     assert line["event"] == "mcp_request"

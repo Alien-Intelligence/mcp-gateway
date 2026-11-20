@@ -338,6 +338,60 @@ class AuditConfig(_Model):
     enabled: bool
 
 
+class OtlpConfig(_Model):
+    """OTLP export of traces and metrics. Only the endpoint's address is configured here."""
+
+    # Base URL of the collector. http/protobuf appends /v1/traces and /v1/metrics.
+    endpoint: str
+    protocol: Literal["grpc", "http/protobuf"]
+    # File of ``key=value`` lines sent with every export (an auth header); never inline.
+    headers_file: str | None
+    # Per export attempt.
+    timeout_seconds: float = Field(gt=0)
+    # Metric collection period; also the span batch delay.
+    export_interval_seconds: float = Field(gt=0)
+    service_name: str = Field(min_length=1)
+    resource_attributes: dict[str, str]
+
+    @field_validator("endpoint")
+    @classmethod
+    def _endpoint_url(cls, value: str) -> str:
+        _require_http_url(value, what="otlp endpoint")
+        parts = urlsplit(value)
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("otlp endpoint must not carry credentials; use headers_file")
+        if parts.query or parts.fragment:
+            raise ValueError("otlp endpoint must not carry a query or fragment")
+        return value
+
+    @field_validator("headers_file")
+    @classmethod
+    def _headers_file_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value:
+            raise ValueError("headers_file must be a path or null")
+        return value
+
+    @field_validator("resource_attributes")
+    @classmethod
+    def _attribute_keys(cls, value: dict[str, str]) -> dict[str, str]:
+        if any(not key for key in value):
+            raise ValueError("resource attribute keys must be non-empty")
+        if "service.name" in value:
+            raise ValueError("set service_name instead of the service.name resource attribute")
+        return value
+
+    @model_validator(mode="after")
+    def _interval_covers_timeout(self) -> Self:
+        if self.export_interval_seconds < self.timeout_seconds:
+            raise ValueError("export_interval_seconds must be >= timeout_seconds")
+        return self
+
+
+class ObservabilityConfig(_Model):
+    # null installs nothing: no exporter, no provider, no-op instruments.
+    otlp: OtlpConfig | None
+
+
 class SessionsConfig(_Model):
     """Binding of an upstream ``Mcp-Session-Id`` to the subject that created it (in memory)."""
 
@@ -383,6 +437,7 @@ class GatewayConfig(_Model):
     upstreams: dict[str, UpstreamConfig] = Field(min_length=1)
     limits: LimitsConfig
     audit: AuditConfig
+    observability: ObservabilityConfig
     sessions: SessionsConfig
     policies: PoliciesConfig
 

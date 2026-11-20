@@ -1,5 +1,6 @@
 """Starlette application: OAuth resource server in front of the proxy."""
 
+import asyncio
 import logging
 import re
 import time
@@ -8,6 +9,8 @@ from contextlib import asynccontextmanager
 
 import anyio
 import httpx
+from opentelemetry.sdk.metrics.export import MetricReader
+from opentelemetry.sdk.trace.export import SpanExporter
 from starlette.applications import Starlette
 from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse, Response
@@ -46,6 +49,7 @@ from mcp_gateway.proxy import (
     watching_disconnect,
 )
 from mcp_gateway.resolver import (
+    CachingResolver,
     Credential,
     CredentialResolver,
     Denied,
@@ -55,12 +59,15 @@ from mcp_gateway.resolver import (
     with_cache,
 )
 from mcp_gateway.sessions import SessionRegistry
+from mcp_gateway.telemetry import Telemetry, build_telemetry
 
 logger = logging.getLogger(__name__)
 
 JWKS_RETRY_AFTER_SECONDS = 5
 DENIED_MESSAGE = "This account is not enabled for this service. Contact your administrator."
 GATEWAY_ERROR_MESSAGE = "The gateway could not obtain credentials for this request."
+INTERNAL_ERROR_MESSAGE = "The gateway failed to handle this request."
+REQUEST_ID_HEADER = "x-request-id"
 ORIGIN_REFUSED_MESSAGE = "The request origin is not allowed."
 SESSION_NOT_FOUND_MESSAGE = "The session was not found. Start a new session."
 
@@ -116,8 +123,10 @@ class Gateway:
         resolver: CredentialResolver,
         proxies: dict[str, UpstreamProxy],
         sessions: SessionRegistry,
+        telemetry: Telemetry,
     ) -> None:
         self._config = config
+        self._telemetry = telemetry
         self._origins = OriginPolicy(config.policies.allowed_origins)
         self._sessions = sessions
         self._verifier = verifier
@@ -193,12 +202,21 @@ class Gateway:
         self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, receive: Receive
     ) -> Credential | Response:
         reply_id = rpc.id if rpc.expects_reply else None
+        step = audit.observer.begin_resolve(self._config.resolver.type)
+        cache: str = "none"
+
+        async def lookup() -> Credential | Denied:
+            nonlocal cache
+            if isinstance(self._resolver, CachingResolver):
+                found, cache = await self._resolver.resolve_detailed(identity)
+                return found
+            return await self._resolver.resolve(identity)
+
         try:
             # A client that leaves must not keep a (possibly slow) lookup running.
-            outcome, gone = await watching_disconnect(
-                receive, lambda: self._resolver.resolve(identity)
-            )
+            outcome, gone = await watching_disconnect(receive, lookup)
         except ResolverUnavailableError as exc:
+            step.finish(cache=cache, result="unavailable")
             logger.error("credential backend unavailable: %s", exc)
             audit.emit(status=503, outcome="resolver_unavailable")
             response = json_rpc_response(
@@ -207,13 +225,19 @@ class Gateway:
             response.headers["Retry-After"] = str(RESOLVER_RETRY_AFTER_SECONDS)
             return response
         except ResolverError as exc:
+            step.finish(cache=cache, result="error")
             logger.error("credential resolution failed: %s", exc)
             audit.emit(status=500, outcome="gateway_error")
             return json_rpc_response(500, GATEWAY_ERROR, GATEWAY_ERROR_MESSAGE, reply_id)
+        except BaseException:
+            step.finish(cache=cache, result="aborted")
+            raise
         if gone or outcome is None:
+            step.finish(cache=cache, result="disconnected")
             logger.info("client disconnected while the credential was being resolved")
             audit.emit(status=499, outcome="client_disconnected")
             return Response(status_code=499)
+        step.finish(cache=cache, result="denied" if isinstance(outcome, Denied) else "credential")
         if isinstance(outcome, Denied):
             audit.reason = outcome.reason
             audit.emit(status=403, outcome="denied")
@@ -227,7 +251,26 @@ class Gateway:
         return outcome
 
     async def mcp(self, request: Request) -> Response:
-        audit = AuditRecord(http_method=request.method, enabled=self._config.audit.enabled)
+        audit = AuditRecord(
+            http_method=request.method,
+            enabled=self._config.audit.enabled,
+            observer=self._telemetry.start_request(request.headers.getlist("traceparent")),
+            session_present="mcp-session-id" in request.headers,
+        )
+        try:
+            response = await self._handle(request, audit)
+        except asyncio.CancelledError:
+            audit.emit(status=499, outcome="client_disconnected")
+            raise
+        except Exception:
+            logger.exception("request handling failed")
+            audit.emit(status=500, outcome="internal_error")
+            response = json_rpc_response(500, GATEWAY_ERROR, INTERNAL_ERROR_MESSAGE, None)
+        # Whatever the upstream sent as x-request-id was dropped (and audited) by the proxy.
+        response.headers[REQUEST_ID_HEADER] = audit.request_id
+        return response
+
+    async def _handle(self, request: Request, audit: AuditRecord) -> Response:
         # Before authentication: a refused origin learns nothing about tokens.
         if not self._origins.allows(request.headers.getlist("origin")):
             audit.emit(status=403, outcome="origin_refused")
@@ -309,8 +352,17 @@ def create_app(
     resolver: CredentialResolver | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
     session_clock: Callable[[], float] = time.monotonic,
+    span_exporter: SpanExporter | None = None,
+    metric_reader: MetricReader | None = None,
 ) -> Starlette:
-    """Build the app. HTTP clients are created here and closed by the lifespan."""
+    """Build the app. HTTP clients are created here and closed by the lifespan.
+
+    ``span_exporter`` and ``metric_reader`` replace the configured OTLP export; tests use them
+    to read spans and metrics in memory.
+    """
+    telemetry = build_telemetry(
+        config.observability, span_exporter=span_exporter, metric_reader=metric_reader
+    )
     if resolver is None:
         resolver = with_cache(
             build_resolver(
@@ -342,7 +394,10 @@ def create_app(
         )
         for name, client in clients.items()
     }
-    gateway = Gateway(config, TokenVerifier(config.auth, jwks_client), resolver, proxies, sessions)
+    telemetry.observe_sessions(lambda: len(sessions))
+    gateway = Gateway(
+        config, TokenVerifier(config.auth, jwks_client), resolver, proxies, sessions, telemetry
+    )
 
     # RFC 9728 section 3.3: the document describes the resource it was fetched for, so only the
     # path-specific URL is served (resource = public_url). The origin-level document would
@@ -365,8 +420,14 @@ def create_app(
         try:
             yield
         finally:
+            # Telemetry last: it flushes what the requests above produced while closing.
             await close_all(
-                [resolver.aclose, jwks_client.aclose, *(c.aclose for c in clients.values())]
+                [
+                    resolver.aclose,
+                    jwks_client.aclose,
+                    *(c.aclose for c in clients.values()),
+                    *telemetry.closers,
+                ]
             )
 
     return Starlette(
