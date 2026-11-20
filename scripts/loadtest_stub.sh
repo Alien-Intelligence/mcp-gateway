@@ -75,6 +75,8 @@ umask 077
     echo "UPSTREAM_STATEFUL_URL=http://upstream-stub:4000/stateful/mcp"
     echo "UPSTREAM_STATELESS_URL=http://upstream-stub:4000/stateless/mcp"
     echo "LOADTEST_GIT_COMMIT=${LOADTEST_GIT_COMMIT:-}"
+    # The replica pair is not under load; the stack requires the variable, null means no rate limits.
+    echo "HA_RATE_LIMITS=null"
 } >"$ENV_FILE"
 umask 022
 
