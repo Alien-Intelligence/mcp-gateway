@@ -291,3 +291,42 @@ def test_missing_dsn_file_refuses_startup(tmp_path: Path) -> None:
 def test_default_upstream_must_exist(dsn_file: Path) -> None:
     with pytest.raises(ResolverError, match="default_upstream"):
         SqlStoreResolver(sql_config(dsn_file, default_upstream="nowhere"), UPSTREAMS)
+
+
+@pytest.mark.usefixtures("table")
+async def test_no_statement_is_ever_prepared_on_the_server(dsn_file: Path) -> None:
+    # One connection, so every lookup reuses the same server session.
+    resolver = await resolver_for(dsn_file, pool_min_size=1, pool_max_size=1)
+    try:
+        for _ in range(12):  # psycopg would auto-prepare from the sixth execution on
+            assert isinstance(
+                await resolver.resolve(identity(subject="nobody", org=None)), Credential
+            )
+        async with resolver._pool.connection() as conn:
+            cursor = await conn.execute("SELECT count(*) FROM pg_prepared_statements")
+            row = await cursor.fetchone()
+        assert row == (0,)
+    finally:
+        await resolver.aclose()
+
+
+@pytest.mark.usefixtures("table")
+async def test_a_connection_dropped_while_idle_is_replaced_at_checkout(
+    tmp_path: Path, pg_dsn: str
+) -> None:
+    # A named application lets the test kill the pool's connections and nothing else.
+    named = tmp_path / "named-dsn"
+    named.write_text(f"{pg_dsn}{'&' if '?' in pg_dsn else '?'}application_name=p3pool\n")
+    resolver = await resolver_for(named, pool_min_size=1, pool_max_size=1)
+    try:
+        assert isinstance(await resolver.resolve(identity(subject="nobody", org=None)), Credential)
+        async with await psycopg.AsyncConnection.connect(pg_dsn, autocommit=True) as admin:
+            await admin.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE pid <> pg_backend_pid() AND datname = current_database() "
+                "AND application_name = 'p3pool'"
+            )
+        await asyncio.sleep(0.2)
+        assert isinstance(await resolver.resolve(identity(subject="nobody", org=None)), Credential)
+    finally:
+        await resolver.aclose()

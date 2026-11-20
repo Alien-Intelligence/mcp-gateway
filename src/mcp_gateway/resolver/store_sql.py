@@ -55,7 +55,15 @@ class SqlStoreResolver:
             max_size=config.pool_max_size,
             open=False,
             timeout=config.connect_timeout_seconds,
-            kwargs={"connect_timeout": max(1, round(config.connect_timeout_seconds))},
+            # None: never auto-prepare. psycopg prepares a statement after five executions, and a
+            # named prepared statement lives on one server session, which PgBouncer in
+            # transaction mode hands to other clients.
+            kwargs={
+                "connect_timeout": max(1, round(config.connect_timeout_seconds)),
+                "prepare_threshold": None,
+            },
+            # A connection the server or a pooler dropped while idle is discarded at checkout.
+            check=AsyncConnectionPool.check_connection,
         )
         self._open_lock = anyio.Lock()
         self._opened = False
