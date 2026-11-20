@@ -171,6 +171,19 @@ async def _until_disconnect(receive: Receive) -> None:
         pass
 
 
+async def client_already_gone(receive: Receive) -> bool:
+    """True when the client's disconnect is already queued: one look, one scheduling checkpoint."""
+    watcher = asyncio.create_task(_until_disconnect(receive))
+    try:
+        await asyncio.sleep(0)
+        if watcher.done():
+            watcher.result()
+            return True
+        return False
+    finally:
+        watcher.cancel()
+
+
 async def await_read[T](read: ReadHandle[T], receive: Receive) -> tuple[T | None, bool]:
     """Wait for an owned upstream read to end, or for the client to leave: whichever is first.
 
@@ -471,6 +484,10 @@ class UpstreamProxy:
         )
         audit.upstream = self._name
         reply_id = rpc.id if rpc.expects_reply else None
+        if await client_already_gone(receive):
+            # It left while the gateway was still deciding (session check, policy): nothing was
+            # in flight, so nothing is sent.
+            return self._client_gone(audit)
         # Only a POST carrying a request is a unit of work the upstream is asked to do; a listen
         # stream, a DELETE and a notification have nothing to complete. For the former a client
         # disconnect does not abort the upstream request (decision of 2026-11-20: "disconnect is not a

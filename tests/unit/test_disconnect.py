@@ -511,3 +511,34 @@ async def test_an_upstream_that_breaks_after_the_client_left_is_not_counted_comp
     stream.gate.set()
     await rig.idle()
     assert rig.detached() == {result: 1}
+
+
+# --- a request whose client left before it was sent is never sent -------------------------------
+
+
+async def test_a_client_that_left_during_the_session_check_is_not_forwarded(
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checking = asyncio.Event()
+    sent: list[httpx.Request] = []
+
+    async def slow_check(self: Any, upstream: str, session_id: str, subject_key: str) -> bool:
+        checking.set()
+        await asyncio.sleep(0.05)  # a shared-state round trip
+        return True
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        return httpx.Response(200, headers=JSON_TYPE, stream=GatedStream([b"{}"]))
+
+    monkeypatch.setattr(MemorySessionStore, "check", slow_check)
+    rig = Rig(mapping_dir, idp, upstream, token)
+    call = rig.call(RPC_BODY)
+    call.add_header(b"mcp-session-id", b"s-1")
+    running = call.start()
+    await checking.wait()
+    call.leave.set()
+    await running
+    await rig.idle()
+    assert sent == [], "nothing was in flight, so nothing is sent for a client that is gone"
+    assert rig.detached() == {}
