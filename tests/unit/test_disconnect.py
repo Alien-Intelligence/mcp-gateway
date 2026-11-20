@@ -52,6 +52,7 @@ LIST_REPLY = json.dumps(
     {"jsonrpc": "2.0", "id": 5, "result": {"tools": [{"name": "search"}]}}
 ).encode()
 ALLOW_ALL = {"default": {"allow": None, "deny": []}, "rules": []}
+DENY_ALL = {"default": {"allow": [], "deny": []}, "rules": []}
 Handler = Callable[[httpx.Request], Awaitable[httpx.Response]]
 
 
@@ -410,7 +411,7 @@ async def test_a_request_that_was_not_forwarded_yet_is_abandoned(
 # --- cancellation is explicit -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("policy", [None, ALLOW_ALL])
+@pytest.mark.parametrize("policy", [None, ALLOW_ALL, DENY_ALL])
 async def test_notifications_cancelled_is_forwarded_like_any_notification(
     mapping_dir: Path, idp: Any, token: str, policy: dict[str, Any] | None
 ) -> None:
@@ -748,3 +749,37 @@ async def test_a_failing_invalidation_cannot_turn_a_disconnect_into_a_503(
     assert "credential invalidation failed" in caplog.text
     stream.gate.set()
     await rig.idle()
+
+
+@pytest.mark.parametrize(
+    ("method", "document"),
+    [
+        ("GET", None),
+        ("DELETE", None),
+        ("POST", {"jsonrpc": "2.0", "method": "notifications/progress"}),
+    ],
+)
+async def test_leaving_while_waiting_for_the_headers_cancels_what_has_no_request_to_complete(
+    mapping_dir: Path, idp: Any, token: str, method: str, document: dict[str, Any] | None
+) -> None:
+    asked = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def never_answers(request: httpx.Request) -> httpx.Response:
+        asked.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        raise AssertionError("unreachable")
+
+    rig = Rig(mapping_dir, idp, never_answers, token)
+    call = rig.call(document, method=method)
+    running = call.start()
+    await asked.wait()
+    call.leave.set()
+    await running
+    assert cancelled.is_set(), "cancelled before the request returned"
+    assert len(rig.reads) == 0
+    assert rig.detached() == {}

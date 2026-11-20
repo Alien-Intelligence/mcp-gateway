@@ -150,7 +150,11 @@ async def leave_after_first_event(stack: Stack, tool: str, **arguments: Any) -> 
 async def test_leaving_mid_sse_does_not_abort_the_upstream_request(stack: Stack) -> None:
     """Decision of 2026-11-20: a disconnect is not a cancellation; the upstream finishes its work."""
     with anyio.fail_after(TEST_SECONDS):
-        await leave_after_first_event(stack, "slow_sse", count=4, delay_seconds=0.2)
+        # 30 events of 50 kB: far more than the socket buffers between the stub and the
+        # gateway hold, so the stub can only complete if the gateway reads it to the end.
+        await leave_after_first_event(
+            stack, "slow_sse", count=30, delay_seconds=0.02, padding_bytes=50_000
+        )
         record = await stack.wait_for_stub(
             lambda r: r["tool"] == "slow_sse" and (r["completed"] or r["disconnected"]),
             timeout=DISCONNECT_SECONDS,

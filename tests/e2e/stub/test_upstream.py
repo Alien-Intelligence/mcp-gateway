@@ -358,7 +358,9 @@ async def test_a_client_leaving_mid_stream_does_not_abort_the_upstream_request(
         async with http.stream(
             "POST",
             KEYCLOAK.gateway_url,
-            json=tool_call("slow_sse", count=6, delay_seconds=0.3),
+            # 30 events of 50 kB, 1.5 MB: more than the socket buffers hold, so the stub can
+            # only complete if the gateway reads its response to the end.
+            json=tool_call("slow_sse", count=30, delay_seconds=0.02, padding_bytes=50_000),
             headers=bearer(token, Accept="application/json, text/event-stream"),
         ) as response:
             async for _first in response.aiter_raw():

@@ -17,8 +17,10 @@ Tools (``tools/call`` by name)
 - ``echo``: the headers received, with ``authorization`` replaced by ``persona:<name>``, and the
   arguments of the call.
 - ``policy_denied_probe``: behaves like ``echo``; the tool the policy tests deny.
-- ``slow_sse {count, delay_seconds, hold}``: SSE with ``count`` progress events spaced by the delay,
-  then the reply; with ``hold`` it idles (no reply) until the client goes away.
+- ``slow_sse {count, delay_seconds, hold, padding_bytes}``: SSE with ``count`` progress events spaced
+  by the delay, then the reply; with ``hold`` it idles (no reply) until the client goes away.
+  ``padding_bytes`` adds that many bytes to every event, so a stream can outgrow every socket
+  buffer between the stub and the gateway (a ``completed`` record then proves it was read).
 - ``fail_midstream_sse {before, reply_first, declare_length, gzip}``: ``before`` whole events,
   optionally the reply, a partial event, then the TCP connection is dropped. ``declare_length``
   adds a ``Content-Length`` promising more than is sent; ``gzip`` sends the bytes gzip-encoded
@@ -158,8 +160,11 @@ def sse_event(payload: dict[str, Any] | None, event_id: str | None = None) -> by
     return ("\n".join(lines) + "\n\n").encode()
 
 
-def progress(step: int) -> dict[str, Any]:
-    return {"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progress": step}}
+def progress(step: int, padding_bytes: int = 0) -> dict[str, Any]:
+    params: dict[str, Any] = {"progress": step}
+    if padding_bytes:
+        params["padding"] = "x" * padding_bytes
+    return {"jsonrpc": "2.0", "method": "notifications/progress", "params": params}
 
 
 def tool_text(payload: dict[str, Any]) -> dict[str, Any]:
@@ -378,10 +383,11 @@ class StubApp:
         count = int(arguments.get("count", 3))
         delay = float(arguments.get("delay_seconds", 0.05))
         hold = bool(arguments.get("hold", False))
+        padding = int(arguments.get("padding_bytes", 0))
 
         async def body() -> AsyncIterator[bytes]:
             for step in range(1, count + 1):
-                yield sse_event(progress(step), str(step))
+                yield sse_event(progress(step, padding), str(step))
                 await anyio.sleep(delay)
             if hold:
                 await idle_until_closed(entry)
