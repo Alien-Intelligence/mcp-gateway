@@ -238,7 +238,7 @@ services:
     <<: *gateway
     environment:
       MCP_GATEWAY_CONFIG: |
-        {"public_url": "http://localhost:18000/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": 10000, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "memory"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": null, "rate_limits": null}}
+        {"public_url": "http://localhost:18000/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18000/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": 10000, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "memory"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": {"default": {"allow": null, "deny": ["datacluster_keyword_search", "policy_denied_probe"]}, "rules": [{"match": {"label": {"name": "client", "value": "client-y"}}, "allow": ["datacluster_get_dataset", "datacluster_list_datasets", "echo"], "deny": []}]}, "rate_limits": {"per_subject": {"burst": 40, "per_minute": 20}, "per_organization": null}}}
     ports:
       - "127.0.0.1:18000:8000"
     depends_on:
@@ -252,7 +252,7 @@ services:
     <<: *gateway
     environment:
       MCP_GATEWAY_CONFIG: |
-        {"public_url": "http://localhost:18001/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:14444", "jwks_uri": "http://hydra:4444/.well-known/jwks.json", "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "ext.email", "email_verified": "ext.email_verified", "organization": "ext.org", "groups": "ext.groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": 10000, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "memory"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": null, "rate_limits": null}}
+        {"public_url": "http://localhost:18001/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:14444", "jwks_uri": "http://hydra:4444/.well-known/jwks.json", "audiences": ["http://localhost:18001/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "ext.email", "email_verified": "ext.email_verified", "organization": "ext.org", "groups": "ext.groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": 10000, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "memory"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": {"default": {"allow": null, "deny": ["datacluster_keyword_search", "policy_denied_probe"]}, "rules": [{"match": {"label": {"name": "client", "value": "client-y"}}, "allow": ["datacluster_get_dataset", "datacluster_list_datasets", "echo"], "deny": []}]}, "rate_limits": {"per_subject": {"burst": 40, "per_minute": 20}, "per_organization": null}}}
     ports:
       - "127.0.0.1:18001:8000"
     depends_on:
@@ -285,6 +285,77 @@ services:
         {"public_url": "http://localhost:18003/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18003/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "webhook", "url": "http://webhook-resolver:9/resolve", "auth": {"type": "hmac", "secret_file": "/run/gateway/conn/hmac.secret"}, "ca_file": null, "default_upstream": "stateless", "allow_insecure_http": true, "timeout_seconds": 3, "total_timeout_seconds": 10, "max_attempts": 2, "backoff_base_seconds": 0.1, "backoff_max_seconds": 0.5, "max_ttl_seconds": 60}, "resolver_cache": null, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": 10000, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "memory"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": null, "rate_limits": null}}
     ports:
       - "127.0.0.1:18003:8000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  # Two replicas of one gateway sharing state through Redis: sessions, the resolver cache and the
+  # rate limit buckets. Same config for both (same public_url, so one token works on either); reached
+  # through gateway-lb, or directly on 18005 (a) and 18006 (b). HA_RATE_LIMITS is the
+  # policies.rate_limits value (JSON, or null), set by the CI scripts.
+  gateway-ha-a: &gateway-ha
+    <<: *gateway
+    environment:
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18004/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18004/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "store_redis", "url_file": "/run/gateway/conn/redis.url", "key_pattern": "mcp-gateway:ha:{email}", "default_upstream": "stateless", "connect_timeout_seconds": 2, "socket_timeout_seconds": 2, "max_connections": 8}, "resolver_cache": {"positive_ttl_seconds": 60, "negative_ttl_seconds": 1, "max_entries": null}, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": null, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "redis", "url_file": "/run/gateway/conn/state-redis.url", "key_prefix": "mcp-gateway:state:", "connect_timeout_seconds": 2, "operation_timeout_seconds": 2, "max_connections": 32, "encryption_key_file": "/run/gateway/conn/state.key"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": {"default": {"allow": null, "deny": ["policy_denied_probe"]}, "rules": []}, "rate_limits": ${HA_RATE_LIMITS:?set HA_RATE_LIMITS}}}
+    healthcheck:
+      # Ready, not just alive: a replica that lost Redis must leave the load balancer.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    ports:
+      - "127.0.0.1:18005:8000"
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  gateway-ha-b:
+    <<: *gateway-ha
+    ports:
+      - "127.0.0.1:18006:8000"
+
+  # Round-robin in front of the replica pair, on the address the pair's tokens are issued for.
+  gateway-lb:
+    build:
+      context: ./dev/gateway-lb
+    ports:
+      - "127.0.0.1:18004:8080"
+    networks: [gatewaydev]
+    depends_on:
+      gateway-ha-a:
+        condition: service_healthy
+      gateway-ha-b:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/_lb/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 2s
+
+  # Keycloak, static resolver, shared state pointing at a Redis nobody listens on: alive (/healthz,
+  # which its healthcheck uses so that `up --wait` does not block on it) but never ready. The
+  # resolver cache is on so that every request does a state operation (the cache lookup) before
+  # anything is forwarded; with no cache and no limits nothing would touch the state.
+  gateway-noredis:
+    <<: *gateway
+    environment:
+      MCP_GATEWAY_CONFIG: |
+        {"public_url": "http://localhost:18007/mcp", "listen": {"host": "0.0.0.0", "port": 8000}, "auth": {"issuer": "http://localhost:18080/realms/alien-gateway-dev", "jwks_uri": "http://keycloak:8080/realms/alien-gateway-dev/protocol/openid-connect/certs", "audiences": ["http://localhost:18007/mcp"], "algorithms": ["RS256"], "required_scopes": [], "scopes_advertised": ["openid", "mcp-gateway"], "clock_skew_seconds": 5, "jwks_cache_ttl_seconds": 300, "jwks_max_stale_seconds": 3600, "jwks_fetch_timeout_seconds": 5, "identity": {"subject": "sub", "email": "email", "email_verified": "email_verified", "organization": "org", "groups": "groups"}}, "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"}, "resolver_cache": {"positive_ttl_seconds": 60, "negative_ttl_seconds": 1, "max_entries": null}, "upstreams": {"stateful": {"url": "${UPSTREAM_STATEFUL_URL:?set UPSTREAM_STATEFUL_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}, "stateless": {"url": "${UPSTREAM_STATELESS_URL:?set UPSTREAM_STATELESS_URL in .env}", "connect_timeout_seconds": 10, "read_timeout_seconds": 130, "write_timeout_seconds": 30, "pool_timeout_seconds": 10}}, "limits": {"max_request_body_bytes": 1048576, "request_body_timeout_seconds": 30, "max_sse_event_bytes": 1048576, "max_filtered_response_bytes": 4194304}, "audit": {"enabled": true}, "observability": {"otlp": null}, "sessions": {"max_entries": null, "max_entries_per_subject": 50, "idle_ttl_seconds": 600}, "state": {"type": "redis", "url_file": "/run/gateway/conn/noredis.url", "key_prefix": "mcp-gateway:state:", "connect_timeout_seconds": 2, "operation_timeout_seconds": 2, "max_connections": 32, "encryption_key_file": "/run/gateway/conn/state.key"}, "policies": {"allowed_origins": ["https://claude.ai", "http://localhost:6274"], "tools": null, "rate_limits": null}}
+    ports:
+      - "127.0.0.1:18007:8000"
     depends_on:
       keycloak:
         condition: service_healthy

@@ -5,7 +5,9 @@ write the same files, so one stack definition serves both targets::
 
     <persona>.key            one API key per persona (written by the fixture, mode 600)
     mapping.json             the static resolver's mapping (gateway-keycloak, gateway-hydra)
-    stores.json              what ``seed_stores.py`` loads into Redis and PostgreSQL
+    stores.json              what ``seed_stores.py`` loads into Redis and PostgreSQL: the chain's
+                             ``redis`` and ``postgres`` stores, and ``ha``, the Redis store of the
+                             replica pair, which holds every persona
     webhook/mapping.json     the dev webhook service's mapping, with its own copies of the keys
 
 Connection secrets (database password, webhook HMAC secret) are not part of the state: the
@@ -52,10 +54,12 @@ class KeyedPersona:
 
 @dataclass(frozen=True)
 class Routing:
-    """Upstream name per persona: for the static mapping and for the stores (None = default)."""
+    """Upstream name per persona: for the static mapping, for the chain's stores and for the
+    replica pair's store (``ha``); None means the resolver's default upstream."""
 
     static: Mapping[str, str]
     store: Mapping[str, str | None]
+    ha: Mapping[str, str | None]
 
 
 # Stub target: stateful and stateless stub endpoints, spread over the personas.
@@ -65,15 +69,29 @@ STUB_ROUTING = Routing(
         "bob": STATEFUL,
         "carol": STATELESS,
         "dave": STATELESS,
+        "erin": STATELESS,
+        "frank": STATELESS,
         "revoked": STATEFUL,
         "unpaid": STATEFUL,
     },
     store={"alice": STATELESS, "bob": STATEFUL, "carol": None, "dave": None},
+    # Only bob is stateful: the shared-session tests need a session on the replicas.
+    ha={
+        "alice": None,
+        "bob": STATEFUL,
+        "carol": None,
+        "dave": None,
+        "erin": None,
+        "frank": None,
+        "revoked": None,
+        "unpaid": None,
+    },
 )
 # Dev target: the real dev MCP is stateless, and both upstream names point at it.
 REAL_ROUTING = Routing(
     static=dict.fromkeys(STUB_ROUTING.static, STATELESS),
     store={"alice": STATELESS, "bob": STATELESS, "carol": None},
+    ha=dict.fromkeys(STUB_ROUTING.ha, STATELESS),
 )
 
 
@@ -119,6 +137,18 @@ def _store_rows(personas: Sequence[KeyedPersona], routing: Routing, store: str) 
     ]
 
 
+def _ha_rows(personas: Sequence[KeyedPersona], routing: Routing) -> list[Any]:
+    return [
+        {
+            "email": p.email,
+            "key_file": p.key_file,
+            "upstream": routing.ha[p.name],
+            "labels": p.labels,
+        }
+        for p in personas
+    ]
+
+
 def write_layout(state_dir: Path, personas: Sequence[KeyedPersona], routing: Routing) -> None:
     """Write mapping.json, stores.json and the webhook directory. Key files must exist."""
     missing = [p.key_file for p in personas if not (state_dir / p.key_file).is_file()]
@@ -129,6 +159,7 @@ def write_layout(state_dir: Path, personas: Sequence[KeyedPersona], routing: Rou
         state_dir / MAPPING_FILE, json.dumps({"entries": entries}, indent=2) + "\n", KEY_FILE_MODE
     )
     stores = {s: _store_rows(personas, routing, s) for s in ("redis", "postgres")}
+    stores["ha"] = _ha_rows(personas, routing)
     write_atomic(state_dir / STORES_FILE, json.dumps(stores, indent=2) + "\n", KEY_FILE_MODE)
 
     webhook_dir = state_dir / WEBHOOK_DIR
