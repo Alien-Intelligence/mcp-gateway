@@ -44,7 +44,7 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Configuration
 
-One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. See the two gateway services in [`compose.yaml`](compose.yaml) for complete examples (one for Keycloak, one for Hydra).
+One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. See the gateway services in [`compose.yaml`](compose.yaml) for complete examples (static, chain and webhook resolvers).
 
 - `public_url`: the canonical URL of the MCP endpoint; it must be listed in `auth.audiences`.
 - `auth`: `issuer`, `jwks_uri`, `audiences`, `algorithms` (asymmetric only), `required_scopes`, `scopes_advertised` (the scope in the 401 challenge and the metadata), clock skew, JWKS cache settings (`jwks_cache_ttl_seconds`, and `jwks_max_stale_seconds`: how long past the TTL the cached key set is still served when a refresh fails), and `identity` claim paths. `identity.email_verified` is the path of the boolean claim that must be `true` before the email is trusted; with `null` the email is never trusted and a mapping with `email` matchers is refused.
@@ -69,30 +69,50 @@ On Alien, an API key is a billed user and an upstream session: users that share 
 
 ## Development stack
 
-`docker compose` runs two real OAuth servers and one gateway for each:
+One compose file set (`compose.yaml` plus a target file) runs the whole thing on loopback. Two targets share it:
 
-| Service | URL | Notes |
+- **dev**: the gateways forward to a real dev MCP server (`compose.dev.yaml`) and read the state that `scripts/dev_fixture.py` writes from the real Alien dev platform.
+- **stub**: the gateways forward to a fault-injection upstream (`compose.stub.yaml`) and the stack writes its own state with fake keys, so nothing outside the repository is needed. This is what CI runs.
+
+| Service | Address | Notes |
 |---|---|---|
-| Keycloak 26.8 | `http://localhost:18080` | realm `alien-gateway-dev` imported from `dev/keycloak/` |
+| Keycloak 26.8 | `http://localhost:18080` | realm `alien-gateway-dev` from `dev/keycloak/` |
 | Ory Hydra v26.2 | `http://localhost:14444` | login/consent app from `dev/hydra-login/` on `:13000` |
-| gateway for Keycloak | `http://localhost:18000/mcp` | |
-| gateway for Hydra | `http://localhost:18001/mcp` | |
+| `gateway-keycloak` | `http://localhost:18000/mcp` | Keycloak, `static` resolver |
+| `gateway-hydra` | `http://localhost:18001/mcp` | Hydra, `static` resolver |
+| `gateway-chain` | `http://localhost:18002/mcp` | Keycloak, `chain` of `store_redis`, `store_sql` and `webhook` (HMAC) behind a resolver cache; requires the `mcp-write` scope |
+| `gateway-unreachable` | `http://localhost:18003/mcp` | Keycloak, a `webhook` resolver nobody listens to (the resolver-down case) |
+| PostgreSQL, Redis | `127.0.0.1:15432`, `127.0.0.1:16379` | credential stores, refilled at every start by the `seed` service |
+| dev webhook | `127.0.0.1:18090` | `dev/webhook-resolver/`, `GET /_stats` counts the calls it served |
+| upstream stub (stub target) | `127.0.0.1:14000` | `dev/upstream-stub/`, control endpoints under `/_stub/` |
 
-Both providers have the same three test users: `alice@client-x.test`, `bob@client-y.test`, and `nomap@client-z.test`, who has no mapping. Access tokens live 60 seconds. Anonymous DCR is enabled on both (Keycloak through Trusted Hosts covering loopback and the compose network gateway).
+Every gateway has two upstreams, `stateful` and `stateless`, chosen per mapping entry. In the stub target they are the stub's `/stateful/mcp` and `/stateless/mcp`; in the dev target both are the real dev MCP (all of them are stateless). Gateway configuration is one JSON block per gateway in `compose.yaml`.
+
+Test users, the same in both identity providers: `alice@client-x.test`, `bob@client-y.test`, `carol@client-x.test`, `nomap@client-z.test` (no mapping), `revoked@client-r.test` and `unpaid@client-p.test` (their keys are refused by the stub with 401 and 402; in the dev target they have no mapping). On `gateway-chain`, alice is resolved by Redis, bob by PostgreSQL and carol by the webhook. Access tokens live 60 seconds. Anonymous DCR is enabled on both providers (Keycloak through Trusted Hosts covering loopback and the compose network gateway). `allowed_origins` is `https://claude.ai` and `http://localhost:6274` (the MCP Inspector).
+
+### Dev target
 
 ```bash
 cp .env.example .env          # fill in random secrets, the upstream MCP URL and a state directory
-chmod 600 .env
+chmod 600 .env                # COMPOSE_FILE in .env selects the dev target
 uv sync --extra dev
-docker compose up -d --build
-docker compose ps             # every service healthy
+# write the state (see "Alien fixture" below), then:
+docker compose up -d --build --wait
 ```
 
-The gateways read `mapping.json` and the key files from `MCP_GATEWAY_STATE_DIR`, mounted read-only. Create them with the fixture below.
+### Stub target
+
+```bash
+sh scripts/ci_e2e_stub.sh     # secrets, stack, harness, artifacts in artifacts/, stack removed
+```
+
+The script needs only a Docker daemon with the compose plugin. To keep the stack up for debugging, run the compose commands it contains by hand (`.env.stub` holds the throwaway secrets it generated).
+
+The gateway state lives in a directory (`state_layout.py`): one key file per persona, `mapping.json` for the static resolver, `stores.json` for the seed step and `webhook/` for the webhook service. `scripts/stub_fixture.py` writes it with fake keys (the `state-init` service runs it), `scripts/dev_fixture.py` with real ones. The `seed` service loads PostgreSQL and Redis from it and writes the connection secrets (database DSN, Redis URL, webhook HMAC secret) from the stack's environment into a volume the gateways mount read-only. Config files reach the daemon through image builds, not bind mounts, so the stack also runs against a remote daemon (CI).
 
 ### Alien fixture (dev platform)
 
-`scripts/dev_fixture.py` sets up, through the real Alien API, two managed client organizations created inside a sponsored group of a sponsor organization that owns a private cluster, one client-managed user per client organization, and an `api-key` token for each. Everything runs as the sponsor's service account (a client-managed `org-admin` user, authenticated by its `api-secret` key). It is idempotent: organizations cannot be deleted on Alien, so every object is found by name (or user by email) and reused, and a key is reused while `GET /users/me` accepts it. It writes `mapping.json`, the key files (mode 600) and a non-secret `fixture.json` into the state directory.
+`scripts/dev_fixture.py` sets up, through the real Alien API, two managed client organizations created inside a sponsored group of a sponsor organization that owns a private cluster, three client-managed users (alice and carol in the first organization, bob in the second), and an `api-key` token for each. Everything runs as the sponsor's service account (a client-managed `org-admin` user, authenticated by its `api-secret` key). It is idempotent: organizations cannot be deleted on Alien, so every object is found by name (or user by email) and reused, and a key is reused while `GET /users/me` accepts it. It writes the gateway state, the key files (mode 600) and a non-secret `fixture.json` into the state directory.
 
 ```bash
 uv run python scripts/dev_fixture.py \
@@ -108,10 +128,25 @@ The key is read from the file and never passed on the command line or printed. T
 
 ```bash
 uv run pytest tests/unit -q                       # unit tests, no network
-uv run ruff check src tests scripts dev && uv run pyright src
+uv run ruff check src tests scripts dev && uv run pyright src && uv run pyright scripts tests/e2e
 ```
 
-The end-to-end suite (`-m e2e`) behaves like a real MCP client against both providers: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It then reads the Alien consumption feeds back and asserts the call was billed to the expected client-managed user and client organization, with the sponsorship applied. Negative cases: wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), and forged `X-Job-Id` / `X-Organization-Id` (stripped: the call succeeds and the metered event carries neither, whereas sent straight to the upstream the foreign job id is refused), each with a positive control that goes direct to the upstream.
+Three suites need the stack, each selected by a marker:
+
+- `integration`: the PostgreSQL and Redis resolvers against real servers (`MCP_GATEWAY_TEST_PG_DSN`, `MCP_GATEWAY_TEST_REDIS_URL`; a selected test without them fails).
+- `e2e_stub`: the stub-target suite. Every test performs the real OAuth journey (challenge, resource metadata, authorization-server metadata, anonymous DCR, authorization code + PKCE S256 + `resource` through the provider's real login form) with a real test user, then calls the gateway against the stub upstream. It covers: resource metadata (path-specific `200`, root `404`), challenges and `403 insufficient_scope`, the Origin policy, the `Mcp-Method`/`Mcp-Name` check, header stripping and key injection, session binding between two users, `DELETE` and upstream session expiry, `Last-Event-ID` replay, a stateless upstream's `405`, upstream `401`/`402`/`404`/`500`/`502`/`503`, incremental and failing streams, a client disconnect during a hanging call, each resolver of the chain, the resolver cache (counted at the webhook) and an unreachable webhook (`503`, `Retry-After`).
+- `e2e`: the real-dev suite, below.
+
+`scripts/ci_e2e_stub.sh` runs `integration` and `e2e_stub` in a container on the daemon's host network (so the `localhost` issuers resolve as on a laptop). CI runs it in the `e2e-stub` job on every push, with the daemon as a `docker:dind` service. To reproduce that job before pushing, run the script inside a privileged `docker:<version>-dind` daemon of its own (its ports then never clash with a running dev stack):
+
+```bash
+docker run -d --privileged --name ci-dind -e DOCKER_TLS_CERTDIR= docker:28.3.3-dind
+docker run --rm --link ci-dind:docker -e DOCKER_HOST=tcp://docker:2375 \
+  -v "$PWD":/src:ro --tmpfs /work:exec -w /work docker:28.3.3-cli \
+  sh -c 'tar cf - -C /src --exclude=./.git --exclude=./.venv --exclude=./.env* . | tar xf - && sh scripts/ci_e2e_stub.sh'
+```
+
+The real-dev suite (`-m e2e`) behaves like a real MCP client against both providers on the dev target: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It then reads the Alien consumption feeds back and asserts the call was billed to the expected client-managed user and client organization, with the sponsorship applied. Negative cases: wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), and forged `X-Job-Id` / `X-Organization-Id` (stripped: the call succeeds and the metered event carries neither, whereas sent straight to the upstream the foreign job id is refused), each with a positive control that goes direct to the upstream.
 
 ```bash
 E2E_STATE_DIR=<state dir> E2E_SPONSOR_KEY_FILE=<sponsor key file> E2E_API_BASE=<Alien dev API> \
@@ -119,4 +154,4 @@ E2E_UPSTREAM_URL=<dev MCP URL> E2E_EXISTING_JOB_ID=<an existing dev job id the p
 E2E_RUN_DIR=<evidence dir> uv run pytest tests/e2e -m e2e -v
 ```
 
-A run takes about ten minutes, mostly waiting for tokens to expire and for metering to appear in the feeds. It needs the compose stack up, the fixture applied and network access to the Alien dev platform. CI runs the unit tests only.
+A run takes about ten minutes, mostly waiting for tokens to expire and for metering to appear in the feeds. It needs the dev target up, the fixture applied and network access to the Alien dev platform. CI does not run it yet.
