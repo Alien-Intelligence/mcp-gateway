@@ -48,7 +48,7 @@ One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every
 
 Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions` and `policies` (allowed origins).
 
-- `sessions`: an upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to. A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
+- `sessions`: an upstream `Mcp-Session-Id` is bound to the subject it was issued to (in memory, or in Redis with `state.type` `redis`, which several replicas need). A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
 - `policies.allowed_origins`: browser origins allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
 - Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
 

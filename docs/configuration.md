@@ -24,9 +24,10 @@ In the tables, "required" means the key must be present. Durations are in second
 | `audit` | object | The audit log. |
 | `observability` | object | Traces and metrics export. |
 | `sessions` | object | Binding of upstream session ids to subjects. |
+| `state` | object | Where session bindings and cached credentials live: in this process or in a Redis shared by every replica. |
 | `policies` | object | Origin policy. |
 
-`GET /healthz` answers `{"status":"ok"}` without authentication.
+`GET /healthz` answers `{"status":"ok"}` without authentication: it is the liveness probe and never looks at the state backend. `GET /readyz` is the readiness probe (see [`state`](#state)).
 
 ## `listen`
 
@@ -212,9 +213,9 @@ A missing key is `no_mapping`. A value that is not text, not that JSON or of the
 |---|---|---|---|
 | `positive_ttl_seconds` | number | gt 0 | Lifetime of an answer that carries a key. A webhook `ttl_seconds` can only shorten it. |
 | `negative_ttl_seconds` | number | gt 0 | Lifetime of a denial. Keep it short so a new mapping works soon. |
-| `max_entries` | integer | >= 1 | Least recently used entries go first. |
+| `max_entries` | integer or `null` | >= 1 | Least recently used entries go first. Required with `state.type` `memory`, `null` with `redis` (shared entries expire by their TTL only). |
 
-The key is the identity (subject, e-mail, organization, sorted groups). Errors are never cached. Concurrent misses for one identity share one backend call. When an upstream answers `401` or `402` for a cached key, the entry is dropped so the next request asks the backend again.
+The key is the identity (subject, e-mail, organization, sorted groups). Errors are never cached. Concurrent misses for one identity share one backend call (per process: two replicas missing at once each ask the backend). When an upstream answers `401` or `402` for a cached key, the entry is dropped so the next request asks the backend again.
 
 ## `upstreams`
 
@@ -242,13 +243,66 @@ Gateway-made errors: an upstream `401` or `402` is never relayed; the client get
 
 ## `sessions`
 
-An upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to. A request that presents an unknown, expired or foreign session id gets `404` (`-32007`) and is not forwarded.
+An upstream `Mcp-Session-Id` is bound to the subject it was issued to, in the backend chosen by [`state`](#state). A request that presents an unknown, expired or foreign session id gets `404` (`-32007`) and is not forwarded.
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
-| `max_entries` | integer | gt 0 | Total bindings. When full, expired ones go first, then the least recently used. |
-| `max_entries_per_subject` | integer | gt 0, <= `max_entries` | One subject over the cap evicts its own oldest binding. |
+| `max_entries` | integer or `null` | gt 0 | Total bindings. When full, expired ones go first, then the least recently used. Required with `state.type` `memory`, `null` with `redis` (bindings expire by idle TTL and the per-subject cap there). |
+| `max_entries_per_subject` | integer | gt 0, <= `max_entries` when it is set | One subject over the cap evicts its own oldest binding. |
 | `idle_ttl_seconds` | number | gt 0 | A binding unused for this long expires. |
+
+## `state`
+
+State that must agree between replicas lives here: the session bindings (`sessions`) and the resolver cache (`resolver_cache`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
+
+### `memory`
+
+`{"type": "memory"}`. Bindings and cache entries live in the process. This is correct for exactly one replica: behind a load balancer with two replicas, a session bound on one would be unknown to the other (`404`), and an upstream `401` that drops a cached credential on one replica would not reach the other. `sessions.max_entries` and (when the cache is on) `resolver_cache.max_entries` are required.
+
+### `redis`
+
+```json
+"state": {
+  "type": "redis",
+  "url_file": "/run/secrets/state-redis-url",
+  "key_prefix": "mcp-gateway:",
+  "connect_timeout_seconds": 1,
+  "operation_timeout_seconds": 1,
+  "max_connections": 16,
+  "encryption_key_file": "/run/secrets/state-encryption-key"
+}
+```
+
+| Key | Type | Bounds | Meaning |
+|---|---|---|---|
+| `type` | `"redis"` | | |
+| `url_file` | string | non-empty | File holding a `redis://` or `rediss://` URL. It may carry the password, so it is never inline. |
+| `key_prefix` | string | 1 to 64 characters of `A-Z a-z 0-9 _ : . -` | Prepended to every key, so several gateways can share one Redis. |
+| `connect_timeout_seconds` | number | gt 0 | Socket connect timeout. |
+| `operation_timeout_seconds` | number | gt 0 | Ceiling for every Redis operation, a script and the readiness ping included. There are no retries. |
+| `max_connections` | integer | >= 1 | Connection pool size. |
+| `encryption_key_file` | string | non-empty | File holding the base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials. Generate it with `head -c 32 /dev/urandom \| base64`. A missing, empty, non-base64 or wrongly sized file stops the process at start; the message never echoes the content. |
+
+With `redis`, `sessions.max_entries` and `resolver_cache.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
+
+Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold SHA-256 digests and values hold digests or ciphertext.
+
+| Key | Holds | Expiry |
+|---|---|---|
+| `{p}s:{sha256(upstream, session id)}` | `sha256(subject key)`: the binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}ss:{sha256(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}c:{sha256(identity)}` | The cached credential or denial, AES-256-GCM encrypted (random 12-byte nonce, the key digest as associated data). | The entry's TTL. |
+| `{p}cg:{sha256(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
+
+Binding, checking and dropping a session are each one Lua script, so replicas cannot race a binding or the per-subject cap. The scripts derive the per-subject key from a stored digest: use one Redis (a primary with replicas is fine), not a sharded Redis Cluster. A cached value that cannot be decrypted (rotated key, tampering) is deleted and counted as a miss, with a warning that carries no content. Rotating `encryption_key_file` therefore empties the cache without an outage.
+
+An upstream `401` or `402` deletes the cached entry and bumps its generation. A lookup writes its answer only if the generation is unchanged since before it asked the backend, so a lookup still running on replica B cannot put back a credential that replica A just invalidated.
+
+**Fail closed.** If Redis errors, refuses the connection or exceeds `operation_timeout_seconds`, the request is not forwarded: the gateway answers `503` with `Retry-After: 5`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`. A session id is never honoured without its check, and the resolver is never called around a broken cache. If binding a new session fails after the upstream answered `initialize`, the upstream response is discarded and the client gets that `503`, so it never holds a session the gateway cannot check. Refreshing or dropping a binding after the response is already decided (end of a stream, a successful `DELETE`, an upstream `404`) cannot change that response: the failure is logged at ERROR and the stale binding expires by its TTL.
+
+**Readiness.** `GET /readyz` answers `{"status":"ready"}` (`200`) with `memory`. With `redis` it sends `PING` within `operation_timeout_seconds` and answers `200` `{"status":"ready"}`, or `503` `{"status":"state_unavailable"}`. Point the load balancer's health check at it so a replica that lost Redis is drained; keep `/healthz` for liveness (restarting a replica does not fix Redis).
+
+**Metrics.** The `mcp_gateway.sessions.bound` gauge counts the sessions in this process, so it exists with `memory` only; with `redis` it is not exported (a global count would need a scan).
 
 ## `policies`
 
@@ -290,7 +344,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 
 Text values are clipped to 256 characters. The line never holds request or response content, arguments, tokens, API keys or session ids.
 
-`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `gateway_error`, `denied`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `forwarded`, `client_disconnected`, `internal_error`.
+`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `forwarded`, `client_disconnected`, `internal_error`.
 
 Example:
 
@@ -428,6 +482,7 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
     }
   },
   "sessions": {"max_entries": 10000, "max_entries_per_subject": 20, "idle_ttl_seconds": 1800},
+  "state": {"type": "memory"},
   "policies": {"allowed_origins": ["https://app.example.com"]}
 }
 ```
