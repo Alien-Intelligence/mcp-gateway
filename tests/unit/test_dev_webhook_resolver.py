@@ -206,6 +206,16 @@ async def test_a_request_without_a_usable_nonce_is_refused(
         assert response.status_code == 401, nonce
 
 
+async def test_a_non_ascii_signature_is_401_not_a_server_error(
+    replay_client: httpx.AsyncClient,
+) -> None:
+    headers = signed_headers(int(time.time()), NONCE_A, BODY)
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    raw = [(k, "sha256=é".encode("latin-1") if k.endswith(b"signature") else v) for k, v in raw]
+    response = await replay_client.post("/resolve", content=BODY, headers=raw)
+    assert response.status_code == 401
+
+
 def test_the_nonce_ledger_forgets_after_the_replay_window_and_is_bounded() -> None:
     now = [1000.0]
     ledger = service.NonceLedger(30, capacity=2, clock=lambda: now[0])

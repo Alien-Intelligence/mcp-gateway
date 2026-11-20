@@ -134,7 +134,8 @@ def signature_is_valid(settings: Settings, headers: Mapping[str, str], body: byt
     if abs(time.time() - int(timestamp)) > settings.timestamp_window_seconds:
         return False
     digest = hmac.new(settings.hmac_secret, f"{timestamp}.{nonce}.".encode() + body, hashlib.sha256)
-    return hmac.compare_digest(given, f"sha256={digest.hexdigest()}")
+    # Bytes, so a non-ASCII header value is a failed comparison instead of a TypeError.
+    return hmac.compare_digest(given.encode(), f"sha256={digest.hexdigest()}".encode())
 
 
 def _find_entry(
