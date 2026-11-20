@@ -5,7 +5,13 @@ from pydantic import SecretStr
 
 from mcp_gateway.config import ResolverCacheConfig
 from mcp_gateway.identity import Identity
-from mcp_gateway.resolver import CachingResolver, Credential, Denied, ResolverError
+from mcp_gateway.resolver import (
+    CachingResolver,
+    Credential,
+    Denied,
+    MemoryCacheStore,
+    ResolverError,
+)
 from mcp_gateway.resolver.base import CredentialResolver
 
 
@@ -55,11 +61,18 @@ def build(
     backend: Backend, *, positive: float = 60, negative: float = 5, max_entries: int = 100
 ) -> tuple[CachingResolver, Clock]:
     clock = Clock()
+    store = MemoryCacheStore(max_entries, clock)
     config = ResolverCacheConfig(
         positive_ttl_seconds=positive, negative_ttl_seconds=negative, max_entries=max_entries
     )
     inner: CredentialResolver = backend
-    return CachingResolver(inner, config, clock), clock
+    return CachingResolver(inner, config, store), clock
+
+
+def cache_store(cache: CachingResolver) -> MemoryCacheStore:
+    store = cache.store
+    assert isinstance(store, MemoryCacheStore)
+    return store
 
 
 async def test_positive_hit_then_expiry() -> None:
@@ -101,7 +114,7 @@ async def test_errors_are_never_cached() -> None:
     cache, _ = build(backend)
     with pytest.raises(ResolverError):
         await cache.resolve(identity())
-    assert len(cache) == 0
+    assert len(cache_store(cache)) == 0
     assert isinstance(await cache.resolve(identity()), Credential)
     assert backend.calls == 2
 
@@ -227,7 +240,7 @@ async def test_size_is_bounded_and_least_recently_used_goes_first() -> None:
     await cache.resolve(identity("b"))
     await cache.resolve(identity("a"))  # a is now most recent
     await cache.resolve(identity("c"))  # evicts b
-    assert len(cache) == 2
+    assert len(cache_store(cache)) == 2
     assert backend.calls == 3
     await cache.resolve(identity("a"))
     assert backend.calls == 3

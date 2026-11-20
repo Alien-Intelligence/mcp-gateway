@@ -1,7 +1,9 @@
-"""In-memory binding of upstream MCP session ids to the subject that created them.
+"""Binding of upstream MCP session ids to the subject that created them.
 
 A session id is a bearer capability on the upstream. The gateway records which subject an
 upstream issued it to, and refuses (without forwarding) any other subject presenting it.
+``SessionStore`` is the contract; this module holds the in-process implementation (one replica
+only). The shared one is ``RedisSessionStore``.
 """
 
 import logging
@@ -9,6 +11,7 @@ import re
 import time
 from collections import Counter, OrderedDict
 from collections.abc import Callable
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +25,28 @@ def is_valid_session_id(value: str) -> bool:
     return _SESSION_ID.fullmatch(value) is not None
 
 
-class SessionRegistry:
+class SessionStore(Protocol):
+    """Where session bindings live. Every method may raise ``StateUnavailableError``."""
+
+    async def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
+        """Record a session id the upstream issued to ``subject_key``.
+
+        False (nothing recorded) when the id is malformed or already bound to another subject.
+        """
+        ...
+
+    async def check(self, upstream: str, session_id: str, subject_key: str) -> bool:
+        """True when the session is bound to ``subject_key``; refreshes its idle timer."""
+        ...
+
+    async def touch(self, upstream: str, session_id: str) -> None:
+        """Refresh an entry's idle timer (after a long stream), whoever owns it."""
+        ...
+
+    async def drop(self, upstream: str, session_id: str) -> None: ...
+
+
+class MemorySessionStore:
     """Bounded map ``(upstream, session id) -> subject key`` with an idle TTL.
 
     The clock is injectable so tests control time. Entries are least-recently-used ordered;
@@ -30,6 +54,9 @@ class SessionRegistry:
     (that client gets a 404 and re-initialises). One subject holds at most
     ``max_entries_per_subject`` bindings: beyond it the subject's own oldest binding goes, so a
     single user opening sessions in a loop cannot push everyone else's out.
+
+    ``len()`` feeds the ``mcp_gateway.sessions.bound`` gauge. The Redis store has no cheap
+    equivalent (a count would need a scan), so that gauge exists only with this store.
     """
 
     def __init__(
@@ -51,12 +78,7 @@ class SessionRegistry:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
-        """Record a session id the upstream issued to ``subject_key``.
-
-        Returns False and records nothing when the id is malformed or already bound to a
-        different subject (an upstream reusing an id must never move a binding).
-        """
+    async def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
         if not is_valid_session_id(session_id):
             logger.warning("upstream %s returned a malformed session id; not bound", upstream)
             return False
@@ -74,8 +96,7 @@ class SessionRegistry:
         self._make_room(now)
         return True
 
-    def check(self, upstream: str, session_id: str, subject_key: str) -> bool:
-        """True when the session is bound to ``subject_key``; refreshes its idle timer."""
+    async def check(self, upstream: str, session_id: str, subject_key: str) -> bool:
         key = (upstream, session_id)
         now = self._clock()
         owner = self._live(key, now)
@@ -85,8 +106,7 @@ class SessionRegistry:
         self._entries.move_to_end(key)
         return True
 
-    def touch(self, upstream: str, session_id: str) -> None:
-        """Refresh an entry's idle timer (after a long stream), whoever owns it."""
+    async def touch(self, upstream: str, session_id: str) -> None:
         key = (upstream, session_id)
         now = self._clock()
         owner = self._live(key, now)
@@ -94,7 +114,7 @@ class SessionRegistry:
             self._entries[key] = (owner, now)
             self._entries.move_to_end(key)
 
-    def drop(self, upstream: str, session_id: str) -> None:
+    async def drop(self, upstream: str, session_id: str) -> None:
         self._discard((upstream, session_id))
 
     def _discard(self, key: _Key) -> None:

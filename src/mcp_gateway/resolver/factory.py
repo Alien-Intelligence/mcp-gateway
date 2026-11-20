@@ -10,7 +10,7 @@ from mcp_gateway.config import (
     ResolverConfig,
 )
 from mcp_gateway.resolver.base import CredentialResolver
-from mcp_gateway.resolver.cache import CachingResolver
+from mcp_gateway.resolver.cache import CacheStore, CachingResolver
 from mcp_gateway.resolver.chain import ChainResolver
 from mcp_gateway.resolver.static import StaticResolver
 from mcp_gateway.resolver.store_redis import RedisStoreResolver
@@ -49,7 +49,15 @@ def build_resolver(
 
 
 def with_cache(
-    resolver: CredentialResolver, config: ResolverCacheConfig | None
+    resolver: CredentialResolver, config: ResolverCacheConfig | None, store: CacheStore | None
 ) -> CredentialResolver:
-    """Wrap ``resolver`` in the cache, or return it unchanged when the cache is disabled."""
-    return resolver if config is None else CachingResolver(resolver, config)
+    """Wrap ``resolver`` in the cache, or return it unchanged when the cache is disabled.
+
+    ``config`` and ``store`` are both None or both set (the state builder makes the store only
+    when the cache is configured).
+    """
+    if config is None:
+        return resolver
+    if store is None:
+        raise ValueError("a resolver cache is configured but no cache store was given")
+    return CachingResolver(resolver, config, store)

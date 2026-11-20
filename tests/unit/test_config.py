@@ -52,6 +52,8 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("sessions", "max_entries"),
         ("sessions", "max_entries_per_subject"),
         ("sessions", "idle_ttl_seconds"),
+        ("state",),
+        ("state", "type"),
         ("policies",),
         ("policies", "allowed_origins"),
     ],

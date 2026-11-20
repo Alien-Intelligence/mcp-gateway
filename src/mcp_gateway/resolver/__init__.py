@@ -7,7 +7,7 @@ from mcp_gateway.resolver.base import (
     ResolverError,
     ResolverUnavailableError,
 )
-from mcp_gateway.resolver.cache import CacheResult, CachingResolver
+from mcp_gateway.resolver.cache import CacheResult, CacheStore, CachingResolver, MemoryCacheStore
 from mcp_gateway.resolver.chain import ChainResolver
 from mcp_gateway.resolver.factory import build_resolver, with_cache
 from mcp_gateway.resolver.static import StaticResolver
@@ -17,11 +17,13 @@ from mcp_gateway.resolver.webhook import WebhookResolver
 
 __all__ = [
     "CacheResult",
+    "CacheStore",
     "CachingResolver",
     "ChainResolver",
     "Credential",
     "CredentialResolver",
     "Denied",
+    "MemoryCacheStore",
     "RedisStoreResolver",
     "ResolverError",
     "ResolverUnavailableError",

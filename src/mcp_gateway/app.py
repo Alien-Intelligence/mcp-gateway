@@ -37,6 +37,7 @@ from mcp_gateway.jsonrpc import (
     ORIGIN_REFUSED,
     RESOLVER_UNAVAILABLE,
     SESSION_NOT_FOUND,
+    STATE_UNAVAILABLE,
     RpcInfo,
     check_mcp_headers,
     parse_request,
@@ -58,7 +59,13 @@ from mcp_gateway.resolver import (
     build_resolver,
     with_cache,
 )
-from mcp_gateway.sessions import SessionRegistry
+from mcp_gateway.state import (
+    MemorySessionStore,
+    SessionStore,
+    State,
+    StateUnavailableError,
+    build_state,
+)
 from mcp_gateway.telemetry import Telemetry, build_telemetry
 
 logger = logging.getLogger(__name__)
@@ -82,6 +89,16 @@ def _quoted(value: str) -> str:
 
 RESOLVER_UNAVAILABLE_MESSAGE = "Credentials are temporarily unavailable. Retry shortly."
 RESOLVER_RETRY_AFTER_SECONDS = 5
+STATE_UNAVAILABLE_MESSAGE = "The gateway's shared state is unavailable. Retry shortly."
+STATE_RETRY_AFTER_SECONDS = 5
+
+
+def _state_unavailable(audit: AuditRecord, reply_id: str | int | None) -> Response:
+    """The 503 for any request the gateway cannot serve without its shared state (fail closed)."""
+    audit.emit(status=503, outcome="state_unavailable")
+    response = json_rpc_response(503, STATE_UNAVAILABLE, STATE_UNAVAILABLE_MESSAGE, reply_id)
+    response.headers["Retry-After"] = str(STATE_RETRY_AFTER_SECONDS)
+    return response
 
 
 async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
@@ -122,7 +139,7 @@ class Gateway:
         verifier: TokenVerifier,
         resolver: CredentialResolver,
         proxies: dict[str, UpstreamProxy],
-        sessions: SessionRegistry,
+        sessions: SessionStore,
         telemetry: Telemetry,
     ) -> None:
         self._config = config
@@ -224,6 +241,10 @@ class Gateway:
             )
             response.headers["Retry-After"] = str(RESOLVER_RETRY_AFTER_SECONDS)
             return response
+        except StateUnavailableError as exc:
+            step.finish(cache=cache, result="unavailable")
+            logger.error("credential cache unavailable: %s", exc)
+            return _state_unavailable(audit, reply_id)
         except ResolverError as exc:
             step.finish(cache=cache, result="error")
             logger.error("credential resolution failed: %s", exc)
@@ -321,10 +342,30 @@ class Gateway:
         if isinstance(credential, Response):
             return credential
         audit.labels = dict(credential.labels)
+        try:
+            return await self._serve(
+                request, body, inbound_headers, rpc, identity, credential, audit
+            )
+        except StateUnavailableError as exc:
+            # Raised before a response was chosen (session check, binding a new session,
+            # invalidating a rejected credential): nothing is relayed.
+            logger.error("shared state unavailable: %s", exc)
+            return _state_unavailable(audit, reply_id)
 
+    async def _serve(
+        self,
+        request: Request,
+        body: bytes,
+        inbound_headers: list[tuple[str, str]],
+        rpc: RpcInfo,
+        identity: Identity,
+        credential: Credential,
+        audit: AuditRecord,
+    ) -> Response:
+        reply_id = rpc.id if rpc.expects_reply else None
         subject_key = f"{self._config.auth.issuer}\x1f{identity.subject}"
         session_id = request.headers.get("mcp-session-id")
-        if session_id is not None and not self._sessions.check(
+        if session_id is not None and not await self._sessions.check(
             credential.upstream, session_id, subject_key
         ):
             # Unknown here, expired, or bound to another subject: never forwarded.
@@ -352,14 +393,18 @@ def create_app(
     resolver: CredentialResolver | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
     session_clock: Callable[[], float] = time.monotonic,
+    state: State | None = None,
     span_exporter: SpanExporter | None = None,
     metric_reader: MetricReader | None = None,
 ) -> Starlette:
     """Build the app. HTTP clients are created here and closed by the lifespan.
 
     ``span_exporter`` and ``metric_reader`` replace the configured OTLP export; tests use them
-    to read spans and metrics in memory.
+    to read spans and metrics in memory. ``state`` replaces the backend ``config.state`` names
+    (tests inject failing stores); the lifespan closes it either way.
     """
+    if state is None:
+        state = build_state(config, session_clock=session_clock)
     telemetry = build_telemetry(
         config.observability, span_exporter=span_exporter, metric_reader=metric_reader
     )
@@ -374,6 +419,7 @@ def create_app(
                 ),
             ),
             config.resolver_cache,
+            state.cache,
         )
 
     jwks_client = httpx.AsyncClient(
@@ -382,19 +428,16 @@ def create_app(
         follow_redirects=False,
     )
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
-    sessions = SessionRegistry(
-        max_entries=config.sessions.max_entries,
-        max_entries_per_subject=config.sessions.max_entries_per_subject,
-        idle_ttl_seconds=config.sessions.idle_ttl_seconds,
-        clock=session_clock,
-    )
+    sessions = state.sessions
     proxies = {
         name: UpstreamProxy(
             name, config.upstreams[name], client, sessions, config.limits.max_sse_event_bytes
         )
         for name, client in clients.items()
     }
-    telemetry.observe_sessions(lambda: len(sessions))
+    if isinstance(sessions, MemorySessionStore):
+        # The shared store has no cheap count, so the gauge exists with the memory backend only.
+        telemetry.observe_sessions(lambda: len(sessions))
     gateway = Gateway(
         config, TokenVerifier(config.auth, jwks_client), resolver, proxies, sessions, telemetry
     )
@@ -415,6 +458,15 @@ def create_app(
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
+    async def readyz(request: Request) -> Response:
+        """Readiness: can this replica reach its shared state? A load balancer drains it if not."""
+        try:
+            await state.ping()
+        except StateUnavailableError as exc:
+            logger.error("not ready: %s", exc)
+            return JSONResponse({"status": "state_unavailable"}, status_code=503)
+        return JSONResponse({"status": "ready"})
+
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         try:
@@ -425,6 +477,7 @@ def create_app(
                 [
                     resolver.aclose,
                     jwks_client.aclose,
+                    state.aclose,
                     *(c.aclose for c in clients.values()),
                     *telemetry.closers,
                 ]
@@ -433,6 +486,7 @@ def create_app(
     return Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
+            Route("/readyz", readyz, methods=["GET"]),
             Route(config.resource_metadata_path, protected_resource_metadata),
             Route(config.public_path, gateway.mcp, methods=["GET", "POST", "DELETE"]),
         ],
