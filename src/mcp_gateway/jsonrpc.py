@@ -68,6 +68,10 @@ class RpcInfo:
     # A JSON array holding any ``tools/call`` or ``tools/list`` element: the single-request
     # fields above cannot see inside a batch, so the tool policy needs to be told.
     tool_batch: bool = False
+    # A request (an object with a ``method``) whose ``id`` key is present but is neither a string
+    # nor an integer. No reply can be correlated with it, and the upstream may read it
+    # differently from the gateway (1.0 is 1 to some parsers), so a policy refuses it.
+    invalid_id: bool = False
 
     @property
     def expects_reply(self) -> bool:
@@ -104,6 +108,15 @@ def _valid_id(raw_id: Any) -> bool:
     return isinstance(raw_id, str) or (isinstance(raw_id, int) and not isinstance(raw_id, bool))
 
 
+def _has_invalid_id(document: Any) -> bool:
+    return (
+        isinstance(document, dict)
+        and "method" in document
+        and "id" in document
+        and not _valid_id(document["id"])
+    )
+
+
 def _single(document: dict[str, Any]) -> RpcInfo:
     method = document.get("method")
     method = method if isinstance(method, str) else None
@@ -115,7 +128,14 @@ def _single(document: dict[str, Any]) -> RpcInfo:
         value = params.get(_NAMED_BY_FIELD[method])
         target = value if isinstance(value, str) else None
     tool = target if method == "tools/call" else None
-    return RpcInfo(method=method, id=rpc_id, tool=tool, target=target, kind=BodyKind.OBJECT)
+    return RpcInfo(
+        method=method,
+        id=rpc_id,
+        tool=tool,
+        target=target,
+        kind=BodyKind.OBJECT,
+        invalid_id=_has_invalid_id(document),
+    )
 
 
 def parse_request(body: bytes) -> RpcInfo:
@@ -135,7 +155,13 @@ def parse_request(body: bytes) -> RpcInfo:
             for element in document
         )
         return RpcInfo(
-            method=None, id=None, tool=None, target=None, kind=BodyKind.ARRAY, tool_batch=tool_batch
+            method=None,
+            id=None,
+            tool=None,
+            target=None,
+            kind=BodyKind.ARRAY,
+            tool_batch=tool_batch,
+            invalid_id=any(_has_invalid_id(element) for element in document),
         )
     return UNPARSABLE
 

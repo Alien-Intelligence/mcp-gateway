@@ -624,6 +624,11 @@ async def _unparsable_request(env: Env) -> None:
     await env.post(env.rebuild(policies__tools=DENY_BLOCKED), content=b"\xff not json", json=None)
 
 
+async def _invalid_request(env: Env) -> None:
+    body = {"jsonrpc": "2.0", "id": 1.5, "method": "ping"}
+    await env.post(env.rebuild(policies__tools=DENY_BLOCKED), json=body)
+
+
 async def _tool_policy_failed(env: Env) -> None:
     env.upstream.responder = lambda _r: httpx.Response(
         200, headers={"Content-Type": "application/json"}, content=b"not json"
@@ -670,6 +675,7 @@ SCENARIOS: dict[str, Scenario] = {
     "tool_denied": _tool_denied,
     "batch_refused": _batch_refused,
     "unparsable_request": _unparsable_request,
+    "invalid_request": _invalid_request,
     "tool_policy_failed": _tool_policy_failed,
     "forwarded": _forwarded,
     "client_disconnected": _client_disconnected,

@@ -326,6 +326,94 @@ async def test_without_a_policy_an_unreadable_body_is_forwarded_untouched(
     assert [sent.content for sent in upstream.requests] == list(UNREADABLE_BODIES.values())
 
 
+# --- request ids the gateway cannot correlate -----------------------------------------
+
+BAD_IDS = {
+    "float": 1.0,
+    "fraction": 1.5,
+    "true": True,
+    "false": False,
+    "null": None,
+    "object": {"a": 1},
+    "array": [1],
+}
+
+
+@pytest.mark.parametrize("bad_id", BAD_IDS.values(), ids=BAD_IDS.keys())
+@pytest.mark.parametrize("method", ["tools/list", "tools/call", "ping"])
+async def test_a_request_whose_id_is_not_a_string_or_integer_is_refused(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    method: str,
+    bad_id: Any,
+) -> None:
+    body = {"jsonrpc": "2.0", "id": bad_id, "method": method, "params": {"name": "delete_all"}}
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=body, headers=alice)
+    assert response.status_code == 400
+    assert response.json() == {
+        "jsonrpc": "2.0",
+        "id": None,
+        "error": {"code": -32600, "message": "Invalid Request"},
+    }
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["outcome"], line["status"]) == ("invalid_request", 400)
+
+
+@pytest.mark.parametrize("bad_id", BAD_IDS.values(), ids=BAD_IDS.keys())
+async def test_a_batch_element_with_a_bad_id_is_refused(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream, bad_id: Any
+) -> None:
+    batch = [
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "id": bad_id, "method": "ping"},
+    ]
+    response = await http.post("/mcp", json=batch, headers=alice)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize("good_id", [0, -3, 2**40, "", "7"])
+async def test_string_and_integer_ids_are_accepted(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream, good_id: Any
+) -> None:
+    response = await http.post("/mcp", json=call("search", request_id=good_id), headers=alice)
+    assert response.status_code == 200
+    assert len(upstream.requests) == 1
+
+
+async def test_a_notification_and_a_client_response_are_not_checked_for_an_id(
+    http: httpx.AsyncClient, alice: dict[str, str], upstream: FakeUpstream
+) -> None:
+    """Without a method the object is a response, not a request; without an id, a notification."""
+    upstream.responder = lambda _r: httpx.Response(202)
+    for body in (
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 1.5, "result": {}},
+    ):
+        response = await http.post("/mcp", json=body, headers=alice)
+        assert response.status_code == 202
+    assert len(upstream.requests) == 2
+
+
+async def test_without_a_policy_a_bad_id_is_forwarded(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+) -> None:
+    async with client_for(build(mapping_dir, transport, tools=None)) as client:
+        response = await client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": 1.0, "method": "ping"}, headers=alice
+        )
+    assert response.status_code == 200
+    assert len(upstream.requests) == 1
+
+
 # --- batches ----------------------------------------------------------------------------
 
 

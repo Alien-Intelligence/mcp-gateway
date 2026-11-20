@@ -90,6 +90,7 @@ REQUEST_ID_HEADER = "x-request-id"
 ORIGIN_REFUSED_MESSAGE = "The request origin is not allowed."
 SESSION_NOT_FOUND_MESSAGE = "The session was not found. Start a new session."
 PARSE_ERROR_MESSAGE = "Parse error"
+INVALID_REQUEST_MESSAGE = "Invalid Request"
 BATCH_REFUSED_MESSAGE = "Batched tool requests are not accepted. Send one request per call."
 INVALID_PARAMS_MESSAGE = "Invalid params"
 
@@ -496,6 +497,9 @@ class Gateway:
         ):
             audit.emit(status=400, outcome="unparsable_request")
             return json_rpc_response(400, PARSE_ERROR, PARSE_ERROR_MESSAGE, None)
+        if rpc.invalid_id:
+            audit.emit(status=400, outcome="invalid_request")
+            return json_rpc_response(400, INVALID_REQUEST, INVALID_REQUEST_MESSAGE, None)
         if rpc.tool_batch:
             # A batch is invisible to the single-request checks, so it is refused outright.
             audit.emit(status=400, outcome="batch_refused")

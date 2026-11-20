@@ -212,3 +212,23 @@ DEEP = b"[" * 10_000 + b"]" * 10_000
 
 def test_a_deeply_nested_body_is_unreadable_not_a_crash() -> None:
     assert parse_request(DEEP) == UNPARSABLE
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (b'{"id":1.0,"method":"x"}', True),
+        (b'{"id":null,"method":"x"}', True),
+        (b'{"id":true,"method":"x"}', True),
+        (b'{"id":1,"method":"x"}', False),
+        (b'{"id":"a","method":"x"}', False),
+        (b'{"method":"x"}', False),
+        (b'{"id":1.0,"result":{}}', False),
+        (b'[{"id":1,"method":"x"},{"id":[],"method":"x"}]', True),
+        (b'[{"id":1,"method":"x"}]', False),
+    ],
+)
+def test_a_request_with_an_id_that_is_not_a_string_or_integer_is_flagged(
+    body: bytes, expected: bool
+) -> None:
+    assert parse_request(body).invalid_id is expected
