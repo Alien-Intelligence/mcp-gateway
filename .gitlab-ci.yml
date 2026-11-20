@@ -12,6 +12,14 @@ include:
       - '/templates/jobs/python-test.gitlab-ci.yml'
       - '/templates/jobs/python-lint.gitlab-ci.yml'
 
+# One pipeline per change: a branch push is skipped while the branch has an open merge request
+# (its merge request pipeline runs instead).
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - when: always
+
 variables:
   # Versioning: the release bot bumps after merge (ci-scripts docs/VERSIONING.md)
   VBUMP_RELEASE_BRANCH: "dev"
@@ -24,13 +32,25 @@ variables:
   # the compose stack.
   PYTEST_MARKER: "not e2e and not e2e_stub and not integration"
 
-# The stack and the harness, end to end, on every push: real Keycloak and Hydra, the gateways, the
-# credential backends and the fault-injection upstream stub (compose stub target). The harness
+# The stack and the harness, end to end, on every push that changes code, tests, the stack or the
+# lockfile: real Keycloak and Hydra, the gateways, the credential backends, the telemetry
+# collector and the fault-injection upstream stub (compose stub target). The harness
 # runs in a container on the host network of the Docker daemon (the dind service), so the
 # localhost issuers resolve as on a laptop. The steps live in scripts/ci_e2e_stub.sh, which also
 # runs inside a local docker:dind container (README): run it there before pushing, CI minutes
 # are paid. The stub target holds fake keys only, so the artifacts hold no secret.
-e2e-stub:
+.e2e-changes: &e2e-changes
+  - src/**/*
+  - tests/**/*
+  - scripts/**/*
+  - dev/**/*
+  - compose*.yaml
+  - Dockerfile*
+  - pyproject.toml
+  - uv.lock
+  - .gitlab-ci.yml
+
+.dind:
   stage: test
   tags:
     - saas-linux-small-amd64
@@ -43,13 +63,17 @@ e2e-stub:
     DOCKER_TLS_CERTDIR: ""
     ARTIFACTS_DIR: artifacts
     UP_TIMEOUT_SECONDS: "420"
-    RUN_TIMEOUT_SECONDS: "900"
-  timeout: 25m
   before_script:
     - for attempt in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
     - docker info >/dev/null
     - docker version
     - docker compose version
+
+e2e-stub:
+  extends: .dind
+  variables:
+    RUN_TIMEOUT_SECONDS: "900"
+  timeout: 25m
   script:
     - sh scripts/ci_e2e_stub.sh
   artifacts:
@@ -61,4 +85,35 @@ e2e-stub:
       junit: artifacts/junit.xml
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *e2e-changes
     - if: '$CI_COMMIT_BRANCH'
+      changes: *e2e-changes
+
+# The real-dev suite (pytest -m e2e): the same stack against the real dev MCP server and the Alien
+# dev platform, which meters the calls. Merge requests and the default branch only, never a push
+# to dev: it takes about a quarter of an hour and bills a few dev calls. The inputs are CI
+# variables (names in README.md, "CI"); the personas' keys, the sponsor service account's key and
+# the fixture are File-type variables, protected, so the job gets them on protected refs only.
+# One run at a time: the suite reads each call back as the single new event in the shared
+# dev feeds. The artifacts hold evidence (ids, claims) and the compose logs: developers only.
+e2e-dev:
+  extends: .dind
+  variables:
+    RUN_TIMEOUT_SECONDS: "1500"
+  timeout: 40m
+  resource_group: e2e-dev
+  script:
+    - sh scripts/ci_e2e_dev.sh
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 1 week
+    paths:
+      - artifacts/
+    reports:
+      junit: artifacts/junit.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *e2e-changes
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: *e2e-changes

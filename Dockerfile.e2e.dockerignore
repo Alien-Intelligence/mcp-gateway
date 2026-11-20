@@ -11,3 +11,7 @@ build
 runs
 .env
 .env.*
+.secrets/
+dev/state/
+artifacts/
+runs/
