@@ -34,6 +34,9 @@ import httpx
 from e2e.harness import MCP_ACCEPT, MCP_PROTOCOL_VERSION, Grant, Provider, obtain_grant
 from e2e.stub.stack import PERSONAS
 
+# Opens the client of one worker (an async context manager).
+ClientFactory = Callable[[], httpx.AsyncClient]
+
 PASSWORD_VARIABLE = "E2E_USER_PASSWORD"
 GIT_COMMIT_VARIABLE = "LOADTEST_GIT_COMMIT"
 PERCENTILES = (50.0, 95.0, 99.0)
@@ -531,7 +534,7 @@ async def _notify_initialized(
 
 async def _worker(
     index: int,
-    client: httpx.AsyncClient,
+    open_client: ClientFactory,
     target: str,
     url: str,
     auth: AuthSource,
@@ -540,6 +543,21 @@ async def _worker(
     samples: list[Sample],
 ) -> None:
     persona = workload.personas[index % len(workload.personas)]
+    async with open_client() as client:
+        await _run_worker(index, client, target, url, auth, workload, gate, samples, persona)
+
+
+async def _run_worker(
+    index: int,
+    client: httpx.AsyncClient,
+    target: str,
+    url: str,
+    auth: AuthSource,
+    workload: Workload,
+    gate: StartGate,
+    samples: list[Sample],
+    persona: str,
+) -> None:
     session_id, refused = await _handshake(client, url, auth, persona, workload)
     await gate.arrive()
     phases = ["warmup"] * workload.warmup_requests + ["call"] * workload.requests_per_worker
@@ -570,16 +588,18 @@ async def _worker(
 
 
 async def run_target(
-    client: httpx.AsyncClient, name: str, url: str, auth: AuthSource, workload: Workload
+    open_client: ClientFactory, name: str, url: str, auth: AuthSource, workload: Workload
 ) -> list[Sample]:
-    """Run the whole workload against one target and return every sample (warmup included)."""
+    """Run the whole workload against one target and return every sample (warmup included).
+
+    Every worker opens its own client, so it owns its connection: see ``make_client``."""
     # Every persona's first token before the workers start: the measurement has no login in it.
     await auth.prime(workload.personas)
     samples: list[Sample] = []
     gate = StartGate(workload.concurrency)
     await asyncio.gather(
         *(
-            _worker(index, client, name, url, auth, workload, gate, samples)
+            _worker(index, open_client, name, url, auth, workload, gate, samples)
             for index in range(workload.concurrency)
         )
     )
@@ -829,12 +849,17 @@ def make_auth(target: Target, workload: Workload, state_dir: Path | None) -> Aut
     return OAuthAuth(fetch_grant, time.time)
 
 
-def make_client(concurrency: int, timeout_seconds: float) -> httpx.AsyncClient:
-    """A client whose pool never caps the concurrency: one connection per live stream, with room
-    for the handshakes."""
-    limits = httpx.Limits(
-        max_connections=concurrency * 2, max_keepalive_connections=concurrency * 2
-    )
+def make_client(timeout_seconds: float) -> httpx.AsyncClient:
+    """The client of ONE worker: a pool of a single connection, kept alive between its requests.
+
+    The workers must not share a client. httpcore re-scans its whole pool on every request and
+    every response end, and that scan is quadratic in the number of pooled connections: with
+    about 200 idle keep-alive connections one scan round after a burst of streams ending together
+    costs seconds of CPU on the event loop, so the requests that follow wait for the client, not
+    for the server (the time to headers of the direct baseline then reads one stream length too
+    long). One pool of one connection per worker has nothing to scan.
+    """
+    limits = httpx.Limits(max_connections=1, max_keepalive_connections=1)
     return httpx.AsyncClient(
         limits=limits, timeout=httpx.Timeout(timeout_seconds, connect=min(timeout_seconds, 10.0))
     )
@@ -858,8 +883,9 @@ async def run_all(
     for target in targets:
         auth = make_auth(target, workload, state_dir)
         print(f"== {target.name}: {workload.concurrency} workers", flush=True)
-        async with make_client(workload.concurrency, workload.timeout_seconds) as client:
-            samples = await run_target(client, target.name, target.url, auth, workload)
+        samples = await run_target(
+            lambda: make_client(workload.timeout_seconds), target.name, target.url, auth, workload
+        )
         per_target[target.name] = samples
         oauth_grants[target.name] = auth.grants_obtained
         write_raw_csv(out_dir / f"raw-{target.name}.csv", samples)

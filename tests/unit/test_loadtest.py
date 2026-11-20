@@ -4,7 +4,7 @@ worker loop over a mock transport, the output files and the container-stats summ
 import asyncio
 import csv
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -198,10 +198,15 @@ def workload(**overrides: Any) -> loadtest.Workload:
     return loadtest.Workload(**values)
 
 
+def clients_of(handler: Callable[[httpx.Request], httpx.Response]) -> loadtest.ClientFactory:
+    """A factory of clients over a mock transport: what each worker opens in these tests."""
+    return lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
 async def run(upstream: Upstream, load: loadtest.Workload) -> list[loadtest.Sample]:
-    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
-    async with client:
-        return await loadtest.run_target(client, "gateway", "http://up/mcp", FixedAuth(), load)
+    return await loadtest.run_target(
+        clients_of(upstream), "gateway", "http://up/mcp", FixedAuth(), load
+    )
 
 
 async def test_workers_run_the_workload_and_carry_the_session() -> None:
@@ -339,10 +344,9 @@ async def test_run_target_logs_every_persona_in_before_the_first_request() -> No
         log.append("request")
         return upstream(request)
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as client:
-        samples = await loadtest.run_target(
-            client, "gateway", "http://up/mcp", auth, workload(concurrency=4)
-        )
+    samples = await loadtest.run_target(
+        clients_of(recording), "gateway", "http://up/mcp", auth, workload(concurrency=4)
+    )
     assert all(s.ok for s in samples)
     # One grant per persona, all done before the workers made any request, and no grant
     # afterwards: the measurement contains no login.
@@ -352,10 +356,25 @@ async def test_run_target_logs_every_persona_in_before_the_first_request() -> No
     assert auth.grants_obtained == 2
 
 
+async def test_every_worker_owns_its_client_and_its_connection_pool() -> None:
+    """Workers sharing one client share one httpcore pool, which scans all its connections on
+    every request: at a few hundred idle connections that stalls the event loop for seconds and
+    shows up as a server wait (the direct baseline's time to headers)."""
+    upstream = Upstream()
+    opened: list[httpx.AsyncClient] = []
+
+    def open_client() -> httpx.AsyncClient:
+        opened.append(httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+        return opened[-1]
+
+    await loadtest.run_target(open_client, "gateway", "http://up/mcp", FixedAuth(), workload())
+    assert len(opened) == 3
+    assert all(client.is_closed for client in opened)
+
+
 async def test_run_target_primes_the_auth_with_the_workload_personas() -> None:
     auth = FixedAuth()
-    async with httpx.AsyncClient(transport=httpx.MockTransport(Upstream())) as client:
-        await loadtest.run_target(client, "gateway", "http://up/mcp", auth, workload())
+    await loadtest.run_target(clients_of(Upstream()), "gateway", "http://up/mcp", auth, workload())
     assert auth.primed == ["alice", "bob"]
 
 
@@ -374,10 +393,9 @@ async def test_a_refused_handshake_counts_every_call_of_the_worker_as_an_error()
     def refuse(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "invalid_token"})
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(refuse)) as client:
-        samples = await loadtest.run_target(
-            client, "gateway", "http://up/mcp", FixedAuth(), workload(concurrency=2)
-        )
+    samples = await loadtest.run_target(
+        clients_of(refuse), "gateway", "http://up/mcp", FixedAuth(), workload(concurrency=2)
+    )
     calls = [s for s in samples if s.phase == "call"]
     assert len(calls) == 4
     assert {s.failure_reason for s in calls} == {"initialize_failed:http_401"}
