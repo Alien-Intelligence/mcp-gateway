@@ -960,3 +960,27 @@ async def test_the_stream_of_a_request_without_a_policy_is_untouched(
     async with client_for(build(mapping_dir, transport, tools=None)) as client:
         response = await client.get("/mcp", headers={**alice, "Accept": "text/event-stream"})
     assert response.content == b"".join(chunks)
+
+
+async def test_a_buffered_tool_list_that_never_finishes_ends_in_a_504(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The read timeout is a wall-clock total for the buffered body, not only per silence."""
+    data = base_config_dict(str(mapping_dir / "mapping.json"))
+    data["policies"]["tools"] = POLICY
+    data["upstreams"]["main"]["read_timeout_seconds"] = 0.2
+    raw = json.dumps(tools_reply()).encode()
+    stream = TrackedStream([raw[:30]], hang=True)
+    upstream.responder = lambda _r: httpx.Response(200, headers=JSON_TYPE, stream=stream)
+    async with client_for(create_app(config_from(data), http_transport=transport)) as client:
+        with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+            response = await client.post("/mcp", json=LIST, headers=alice)
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == -32004
+    assert stream.closed
+    (line,) = audit_lines(caplog)
+    assert line["outcome"] == "upstream_error"
