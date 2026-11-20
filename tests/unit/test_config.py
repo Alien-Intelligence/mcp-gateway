@@ -299,6 +299,12 @@ def test_rate_limits_null_is_accepted_and_both_scopes_parse(config_dict: dict[st
         {"per_subject": {"burst": 1, "per_minute": 0}, "per_organization": None},
         {"per_subject": {"burst": 1, "per_minute": -3}, "per_organization": None},
         {"per_subject": {"burst": 1, "per_minute": float("inf")}, "per_organization": None},
+        {"per_subject": {"burst": 1, "per_minute": 0.0009}, "per_organization": None},
+        {"per_subject": {"burst": 1_000_001, "per_minute": 1}, "per_organization": None},
+        {
+            "per_subject": {"burst": 1, "per_minute": 1},
+            "per_organization": {"burst": 2_000_000, "per_minute": 1},
+        },
         {"per_subject": {"burst": 1}, "per_organization": None},
         {"per_subject": {"burst": 1, "per_minute": 1}},
         {"per_subject": {"burst": 1, "per_minute": 1, "x": 1}, "per_organization": None},
@@ -310,6 +316,14 @@ def test_invalid_rate_limits_are_refused(
     config_dict["policies"]["rate_limits"] = rate_limits
     with pytest.raises(ConfigError, match="rate_limits"):
         _parse(config_dict)
+
+
+def test_rate_limits_accept_the_documented_extremes(config_dict: dict[str, Any]) -> None:
+    config_dict["policies"]["rate_limits"] = {
+        "per_subject": {"burst": 1_000_000, "per_minute": 0.001},
+        "per_organization": None,
+    }
+    assert config_from(config_dict).policies.rate_limits is not None
 
 
 def test_rate_limits_key_is_required(config_dict: dict[str, Any]) -> None:

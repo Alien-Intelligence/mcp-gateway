@@ -528,8 +528,10 @@ class ToolsPolicyConfig(_Model):
 class TokenBucketConfig(_Model):
     """One token bucket: ``burst`` is the capacity (and the starting level), ``per_minute`` the refill."""
 
-    burst: int = Field(ge=1)
-    per_minute: float = Field(gt=0, allow_inf_nan=False)
+    # The caps keep one typo from announcing a multi-day wait or an effectively absent limit; the
+    # refill floor is one token per 1000 minutes.
+    burst: int = Field(ge=1, le=1_000_000)
+    per_minute: float = Field(ge=0.001, allow_inf_nan=False)
 
 
 class RateLimitsConfig(_Model):

@@ -27,6 +27,10 @@ type Scope = Literal["subject", "organization"]
 # seconds from being announced as 6.
 _ROUNDING_DIGITS = 6
 _SECONDS_PER_MINUTE = 60.0
+# The longest wait ever announced in ``Retry-After``. The config floor (0.001 tokens per minute)
+# already keeps waits under 17 hours; this ceiling holds whatever a bucket spec or a script reply
+# says, so no client is ever told to wait for more than a day.
+MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60
 
 
 class RateLimitUnavailableError(StateUnavailableError):
@@ -94,7 +98,7 @@ def bucket_specs(
 
 
 def _retry_after(wait_seconds: float) -> int:
-    return max(1, math.ceil(round(wait_seconds, _ROUNDING_DIGITS)))
+    return min(MAX_RETRY_AFTER_SECONDS, max(1, math.ceil(round(wait_seconds, _ROUNDING_DIGITS))))
 
 
 @dataclass
@@ -241,9 +245,15 @@ class RedisRateLimiter:
 
     @staticmethod
     def _decision(reply: object, buckets: Sequence[BucketSpec]) -> Decision:
-        if not (isinstance(reply, list) and len(reply) == 3):
+        # redis-py hands Lua numbers back as ints. Anything else is a broken script or server:
+        # refuse it (503) rather than coerce a guess into a decision.
+        if not (
+            isinstance(reply, list)
+            and len(reply) == 3
+            and all(isinstance(item, int) and not isinstance(item, bool) for item in reply)
+        ):
             raise RateLimitUnavailableError("unexpected reply from the rate limit script")
-        allowed, wait_ms, slowest = (int(item) for item in reply)
+        allowed, wait_ms, slowest = reply
         if allowed == 1:
             return ALLOWED
         if not 1 <= slowest <= len(buckets):

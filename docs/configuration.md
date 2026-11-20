@@ -363,8 +363,8 @@ At least one of the two must be non-null (use `"rate_limits": null` to turn the 
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
-| `burst` | integer | >= 1 | The bucket's capacity, and its level when it is created. |
-| `per_minute` | number | > 0 | The refill rate: `per_minute / 60` tokens per second, up to `burst`. |
+| `burst` | integer | 1 to 1000000 | The bucket's capacity, and its level when it is created. |
+| `per_minute` | number | >= 0.001, finite | The refill rate: `per_minute / 60` tokens per second, up to `burst`. The floor is one token per 1000 minutes. |
 
 What a token is: every authenticated request to the MCP endpoint (any method: `POST`, `GET`, `DELETE`; a `tools/call`, a `tools/list`, a notification) takes one token from each bucket that applies to it. A request without a valid token never takes one. The check runs after authentication and the `Mcp-*` header checks and before the credential lookup, so a flood is refused without reaching the resolver backend or the upstream.
 
@@ -380,7 +380,7 @@ The refusal has three shapes, chosen so that the sender can read it:
 | Any other single request with an id | HTTP `200` and a JSON-RPC error `-32014` with `data.retry_after_seconds: N`. Header `Retry-After: N`. |
 | No reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request) | HTTP `429`, header `Retry-After: N` and a JSON-RPC error `-32014` with id `null`. |
 
-Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1. The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
+Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1 and at most 86400 (one day). The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
 
 Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<h>` and `{p}rl:o:<h>`, `h` being the same keyed digest, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.redis.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
 
