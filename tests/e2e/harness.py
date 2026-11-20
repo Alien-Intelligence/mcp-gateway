@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
@@ -202,6 +203,13 @@ CHAIN = Provider(
     issuer="http://localhost:18080/realms/alien-gateway-dev",
     wrong_audience={"scope": "openid"},
 )
+# The replica pair behind nginx (Keycloak, store_redis resolver, state in Redis).
+REPLICAS = Provider(
+    name="replicas",
+    gateway_url="http://localhost:18004/mcp",
+    issuer="http://localhost:18080/realms/alien-gateway-dev",
+    wrong_audience={"scope": "openid"},
+)
 # Which store of the chain resolves each persona (see scripts/state_layout.py).
 CHAIN_STORE = {"alice": "redis", "bob": "postgres", "carol": "webhook"}
 
@@ -248,6 +256,67 @@ def rpc_error(response: httpx.Response) -> dict[str, Any]:
         f"no JSON-RPC error in body: {response.text[:300]}"
     )
     return body["error"]
+
+
+def tools_call_payload(name: str, arguments: dict[str, Any], request_id: int = 2) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": arguments},
+    }
+
+
+async def raw_post(
+    client: httpx.AsyncClient, url: str, token: str, payload: dict[str, Any]
+) -> httpx.Response:
+    """One JSON-RPC message posted without a handshake (the dev upstream is stateless)."""
+    headers = {
+        "Accept": MCP_ACCEPT,
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+    }
+    return await client.post(url, json=payload, headers=headers)
+
+
+def rpc_message(response: httpx.Response) -> dict[str, Any]:
+    """The JSON-RPC message of a reply, whether it came as JSON or as one SSE event."""
+    if response.headers.get("content-type", "").startswith("text/event-stream"):
+        data = [
+            line.removeprefix("data:").strip()
+            for line in response.text.splitlines()
+            if line.startswith("data:")
+        ]
+        assert data, f"no data event in stream: {response.text[:300]}"
+        body = json.loads(data[-1])
+    else:
+        body = response.json()
+    assert isinstance(body, dict), body
+    return body
+
+
+RETRY_AFTER_META_KEY = "club.alien/retryAfterSeconds"
+RATE_LIMITED = -32014
+
+
+def is_rate_limited_tool_result(response: httpx.Response) -> bool:
+    """The refusal shape of a rate-limited ``tools/call`` (HTTP 200, isError, Retry-After)."""
+    if response.status_code != 200 or "retry-after" not in response.headers:
+        return False
+    result = rpc_message(response).get("result")
+    return isinstance(result, dict) and result.get("isError") is True
+
+
+def assert_rate_limited_tool_result(response: httpx.Response) -> int:
+    """Assert the full shape and return the advertised retry delay in seconds."""
+    assert response.status_code == 200, (response.status_code, response.text[:300])
+    result = rpc_message(response)["result"]
+    assert result["isError"] is True, result
+    retry_after = result["_meta"][RETRY_AFTER_META_KEY]
+    assert isinstance(retry_after, int) and retry_after >= 1, result
+    assert response.headers["retry-after"] == str(retry_after)
+    return retry_after
 
 
 # ---------------------------------------------------------------------------------------------
@@ -425,6 +494,52 @@ async def read_consumer_event(
     events = await asyncio.to_thread(read)
     assert len(events) == 1, f"expected one new consumer event, got {len(events)}: {events}"
     return events[0]
+
+
+def _persona_events_since(
+    settings: Settings, persona: Persona, baseline: FeedBaseline
+) -> list[dict[str, Any]]:
+    """Every consumer-feed event of the persona that is not in the baseline (any action)."""
+    assert persona.org_id is not None
+    api = settings.sponsor_api()
+    try:
+        events = read_consumption_events(api, persona.org_id, start=baseline.since - FEED_SKEW)
+    finally:
+        api.close()
+    return [
+        e
+        for e in events
+        if str(e["id"]) not in baseline.consumer_known
+        and (e.get("user") or {}).get("id") == persona.user_id
+    ]
+
+
+async def new_consumer_events(
+    settings: Settings, persona: Persona, baseline: FeedBaseline
+) -> list[dict[str, Any]]:
+    """One read of the feed, no waiting: all new events of the persona, whatever the action."""
+    return await asyncio.to_thread(_persona_events_since, settings, persona, baseline)
+
+
+async def wait_for_new_consumer_events(
+    settings: Settings,
+    persona: Persona,
+    baseline: FeedBaseline,
+    *,
+    at_least: int,
+    deadline_s: float = FEED_DEADLINE_SECONDS,
+) -> tuple[list[dict[str, Any]], float]:
+    """Poll (bounded, backing off) until ``at_least`` new events show; returns them and the
+    seconds the metering took to show up."""
+    started = time.monotonic()
+    delay = 1.0
+    while True:
+        events = await new_consumer_events(settings, persona, baseline)
+        elapsed = time.monotonic() - started
+        if len(events) >= at_least or elapsed >= deadline_s:
+            return events, elapsed
+        await asyncio.sleep(delay)
+        delay = min(delay * 2, 8.0)
 
 
 async def read_sponsor_event(
