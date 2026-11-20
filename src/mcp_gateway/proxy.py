@@ -283,30 +283,40 @@ class UpstreamProxy:
         )
         audit.upstream = self._name
         reply_id = rpc.id if rpc.expects_reply else None
+        step = audit.observer.begin_upstream(self._name)
         try:
             response, gone = await watching_disconnect(
                 receive, lambda: self._client.send(request, stream=True)
             )
         except httpx.TimeoutException as exc:
+            step.finish(status=None, error="timeout")
             logger.error("upstream %s timed out (%s)", self._name, type(exc).__name__)
             audit.emit(status=504, outcome="upstream_error")
             return json_rpc_response(
                 504, UPSTREAM_TIMEOUT, "The service did not answer in time.", reply_id
             )
         except httpx.TransportError as exc:
+            step.finish(status=None, error="unreachable")
             logger.error("upstream %s unreachable (%s)", self._name, type(exc).__name__)
             audit.emit(status=502, outcome="upstream_error")
             return json_rpc_response(
                 502, UPSTREAM_UNREACHABLE, "The service could not be reached.", reply_id
             )
+        except BaseException:
+            step.finish(status=None, error="aborted")
+            raise
         if gone:
+            step.finish(status=None if response is None else response.status_code)
             if response is not None:
                 await _close(response)
             return self._client_gone(audit)
         if response is None:
+            step.finish(status=None, error="unreachable")
             raise RuntimeError("upstream send finished without a response or a disconnect")
 
+        step.finish(status=response.status_code)
         audit.upstream_status = response.status_code
+        audit.upstream_request_id = response.headers.get("x-request-id")
         audit.upstream_session = "mcp-session-id" in response.headers
         session_id = _request_session_id(inbound_headers)
         if response.status_code in _AUTH_REPLIES:
@@ -383,6 +393,8 @@ class UpstreamProxy:
     ) -> Response:
         release = _Release(response, self._sessions, self._name, session_id, audit)
         headers = filter_response_headers(response.headers.multi_items())
+        # The client is given the gateway's request id; the upstream's is in the audit record.
+        headers.pop("x-request-id", None)
         if _is_event_stream(response) and has_content_encoding(response.headers.multi_items()):
             # Never relayed: the gateway reports the failure in the clear instead.
             headers.pop("content-encoding", None)

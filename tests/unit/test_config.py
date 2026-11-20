@@ -45,6 +45,8 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("limits",),
         ("limits", "request_body_timeout_seconds"),
         ("audit", "enabled"),
+        ("observability",),
+        ("observability", "otlp"),
         ("limits", "max_sse_event_bytes"),
         ("sessions",),
         ("sessions", "max_entries"),

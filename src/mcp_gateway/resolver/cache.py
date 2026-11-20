@@ -17,6 +17,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Literal
 
 from mcp_gateway.config import ResolverCacheConfig
 from mcp_gateway.identity import Identity
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 type CacheKey = tuple[str, str | None, str | None, tuple[str, ...]]
 type Outcome = Credential | Denied
+type CacheResult = Literal["hit", "negative", "miss"]
 
 
 def cache_key(identity: Identity) -> CacheKey:
@@ -99,16 +101,24 @@ class CachingResolver:
         return flight
 
     async def resolve(self, identity: Identity) -> Outcome:
+        outcome, _ = await self.resolve_detailed(identity)
+        return outcome
+
+    async def resolve_detailed(self, identity: Identity) -> tuple[Outcome, CacheResult]:
+        """Resolve, and say how the cache answered: hit, negative (a cached denial) or miss.
+
+        A caller that joins a lookup already in flight is a miss: the backend was asked.
+        """
         key = cache_key(identity)
         cached = self._lookup(key)
         if cached is not None:
-            return cached
+            return cached, "negative" if isinstance(cached, Denied) else "hit"
         flight = self._flights.get(key)
         if flight is None:
             flight = self._start(key, identity)
         flight.waiters += 1
         try:
-            return await asyncio.shield(flight.task)
+            return await asyncio.shield(flight.task), "miss"
         finally:
             flight.waiters -= 1
             if flight.waiters == 0 and not flight.task.done():
