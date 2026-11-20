@@ -69,5 +69,6 @@ testpaths = ["tests"]
 pythonpath = ["src", "scripts"]
 markers = [
     "integration: needs real PostgreSQL and Redis servers (MCP_GATEWAY_TEST_PG_DSN, MCP_GATEWAY_TEST_REDIS_URL)",
-    "e2e: runs against the docker compose dev stack, the real dev Alien platform and a real dev MCP server",
+    "e2e: runs against the docker compose dev target, the real dev Alien platform and a real dev MCP server",
+    "e2e_stub: runs against the docker compose stub target (real OAuth servers, fault-injection upstream stub)",
 ]

@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 import httpx2
@@ -260,8 +260,15 @@ class Grant:
         }
 
 
+class HasUserPassword(Protocol):
+    """What the OAuth journey needs from a harness's settings: the test users' password."""
+
+    @property
+    def user_password(self) -> str: ...
+
+
 async def obtain_grant(
-    settings: Settings,
+    settings: HasUserPassword,
     provider: Provider,
     persona: Persona,
     *,
