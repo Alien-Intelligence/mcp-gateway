@@ -690,13 +690,20 @@ class UpstreamProxy:
             logger.warning(
                 "draining upstream %d body failed (%s)", upstream_status, type(exc).__name__
             )
-        # The upstream rejected the credential whether or not the client is still there to be told.
+        # A client that left is audited first: a failing invalidation below must not turn that
+        # line into a 503. The upstream rejected the credential whether or not the client is
+        # still there to be told, so it is invalidated either way.
+        gone_response = self._client_gone(audit) if gone else None
         try:
             await resolver.invalidate(identity)
         except ResolverError:
             logger.exception("credential invalidation failed after upstream %d", upstream_status)
-        if gone:
-            return self._client_gone(audit)
+        except StateUnavailableError:
+            if gone_response is None:
+                raise
+            logger.error("credential invalidation failed after upstream %d", upstream_status)
+        if gone_response is not None:
+            return gone_response
         code, message = _AUTH_REPLIES[upstream_status]
         status = 200 if rpc.expects_reply else 502
         audit.emit(status=status, outcome="upstream_auth_rejected")

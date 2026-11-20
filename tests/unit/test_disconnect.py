@@ -23,7 +23,7 @@ from starlette.applications import Starlette
 from mcp_gateway.app import create_app
 from mcp_gateway.detached import DetachedReads, ReadsClosedError
 from mcp_gateway.resolver import StaticResolver
-from mcp_gateway.state import MemorySessionStore
+from mcp_gateway.state import MemorySessionStore, StateUnavailableError
 
 from .conftest import (
     FailingStream,
@@ -718,3 +718,31 @@ async def test_a_session_issued_after_the_client_left_is_not_bound(
     )
     assert bound == [], "the client never learned this session id: it expires upstream by itself"
     assert stream.closed
+
+
+async def test_a_failing_invalidation_cannot_turn_a_disconnect_into_a_503(
+    mapping_dir: Path, idp: Any, token: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    stream = GatedStream([b"denied"])
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, stream=stream)
+
+    class Unavailable(SpyResolver):
+        async def invalidate(self, identity: Any) -> None:
+            raise StateUnavailableError("shared state is down")
+
+    resolver = Unavailable(
+        StaticResolver(mapping_dir / "mapping.json", ["main"], email_matching=True)
+    )
+    rig = Rig(mapping_dir, idp, upstream, token, resolver=resolver)
+    call = rig.call(RPC_BODY)
+    with caplog.at_level(logging.INFO):
+        running = call.start()
+        await stream.started.wait()
+        call.leave.set()
+        await running
+    assert_one_disconnect_audit_line(caplog)
+    assert "credential invalidation failed" in caplog.text
+    stream.gate.set()
+    await rig.idle()
