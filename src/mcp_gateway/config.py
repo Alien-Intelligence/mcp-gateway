@@ -333,6 +333,9 @@ class LimitsConfig(_Model):
     request_body_timeout_seconds: float = Field(gt=0)
     # One SSE event larger than this aborts the stream: the relay never buffers beyond one event.
     max_sse_event_bytes: int = Field(gt=0)
+    # The largest ``tools/list`` JSON response the gateway buffers to filter it. Only read when
+    # ``policies.tools`` is set; a larger response is replaced by an error, never relayed.
+    max_filtered_response_bytes: int = Field(gt=0)
 
 
 class AuditConfig(_Model):
@@ -460,10 +463,74 @@ class RedisStateConfig(_Model):
 StateConfig = Annotated[MemoryStateConfig | RedisStateConfig, Field(discriminator="type")]
 
 
+MAX_TOOL_PATTERN_LENGTH = 256
+# Non-empty, no whitespace, no control characters (a pattern is compared with tool names).
+_TOOL_PATTERN = re.compile(r"[^\s\x00-\x1f\x7f]+")
+
+
+def _tool_patterns(values: list[str], *, what: str) -> list[str]:
+    for value in values:
+        if len(value) > MAX_TOOL_PATTERN_LENGTH or _TOOL_PATTERN.fullmatch(value) is None:
+            raise ValueError(
+                f"{what} entries must be 1 to {MAX_TOOL_PATTERN_LENGTH} characters "
+                "without whitespace or control characters"
+            )
+    return values
+
+
+class ToolAccessConfig(_Model):
+    """Which tools a caller may see and call: exact names, ``*`` as the only wildcard."""
+
+    # null allows every tool; a list allows only the tools it matches.
+    allow: list[str] | None
+    # A tool matching any entry is refused, whatever ``allow`` says.
+    deny: list[str]
+
+    @field_validator("allow")
+    @classmethod
+    def _allow_patterns(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else _tool_patterns(value, what="allow")
+
+    @field_validator("deny")
+    @classmethod
+    def _deny_patterns(cls, value: list[str]) -> list[str]:
+        return _tool_patterns(value, what="deny")
+
+
+class OrganizationMatchConfig(_Model):
+    """Matches ``Identity.organization`` (the token's organization claim)."""
+
+    organization: str = Field(min_length=1)
+
+
+class LabelSelectorConfig(_Model):
+    name: str = Field(min_length=1)
+    value: str
+
+
+class LabelMatchConfig(_Model):
+    """Matches one of the labels the credential resolver returned."""
+
+    label: LabelSelectorConfig
+
+
+class ToolRuleConfig(ToolAccessConfig):
+    match: OrganizationMatchConfig | LabelMatchConfig
+
+
+class ToolsPolicyConfig(_Model):
+    # Applies to every caller that matches no rule.
+    default: ToolAccessConfig
+    # Tried in order; the first rule that matches is the caller's policy.
+    rules: list[ToolRuleConfig]
+
+
 class PoliciesConfig(_Model):
     # Browser origins allowed on the MCP endpoint, as scheme://host[:port]. An empty list
     # refuses every request that carries an Origin header; requests without one pass.
     allowed_origins: list[str]
+    # null: no tool policy, responses are relayed byte for byte and never parsed.
+    tools: ToolsPolicyConfig | None
 
     @field_validator("allowed_origins")
     @classmethod

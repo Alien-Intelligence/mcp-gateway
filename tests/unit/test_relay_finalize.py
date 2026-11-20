@@ -80,9 +80,9 @@ def build_relay(
             "pool_timeout_seconds": 1,
         }
     )
-    proxy = UpstreamProxy(UPSTREAM, config, build_client(config, None), sessions, 65536)
+    proxy = UpstreamProxy(UPSTREAM, config, build_client(config, None), sessions, 65536, 65536)
     request_with_id = RpcInfo(method="tools/call", id=7, tool="x", target="x", expects_reply=True)
-    response = proxy.stream(upstream, request_with_id, SESSION, audit)
+    response = proxy.stream(upstream, request_with_id, SESSION, audit, None)
     assert isinstance(response, RelayResponse)
     return response
 
@@ -216,6 +216,7 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
         build_client(config, httpx.MockTransport(upstream_answers)),
         sessions,
         65536,
+        65536,
     )
 
     async def receive() -> Message:
@@ -235,5 +236,6 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
             resolver=NoResolver(),
             subject_key="alice",
             audit=AuditRecord(http_method="POST", enabled=False),
+            tool_policy=None,
         )
     assert stream.closed

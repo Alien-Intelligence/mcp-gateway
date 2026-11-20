@@ -62,12 +62,13 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
             "max_request_body_bytes": 1048576,
             "request_body_timeout_seconds": 30,
             "max_sse_event_bytes": 65536,
+            "max_filtered_response_bytes": 1048576,
         },
         "audit": {"enabled": True},
         "observability": {"otlp": None},
         "sessions": {"max_entries": 100, "max_entries_per_subject": 20, "idle_ttl_seconds": 600},
         "state": {"type": "memory"},
-        "policies": {"allowed_origins": ["https://app.example.com"]},
+        "policies": {"allowed_origins": ["https://app.example.com"], "tools": None},
     }
 
 

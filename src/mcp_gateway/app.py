@@ -32,6 +32,7 @@ from mcp_gateway.jsonrpc import (
     DENY_CODES,
     GATEWAY_ERROR,
     HEADER_MISMATCH,
+    INVALID_PARAMS,
     INVALID_REQUEST,
     NO_RPC,
     ORIGIN_REFUSED,
@@ -40,6 +41,7 @@ from mcp_gateway.jsonrpc import (
     STATE_UNAVAILABLE,
     RpcInfo,
     check_mcp_headers,
+    is_tool_batch,
     parse_request,
 )
 from mcp_gateway.origin import OriginPolicy
@@ -67,6 +69,7 @@ from mcp_gateway.state import (
     build_state,
 )
 from mcp_gateway.telemetry import Telemetry, build_telemetry
+from mcp_gateway.tool_policy import EffectivePolicy, ToolPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +80,8 @@ INTERNAL_ERROR_MESSAGE = "The gateway failed to handle this request."
 REQUEST_ID_HEADER = "x-request-id"
 ORIGIN_REFUSED_MESSAGE = "The request origin is not allowed."
 SESSION_NOT_FOUND_MESSAGE = "The session was not found. Start a new session."
+BATCH_REFUSED_MESSAGE = "Batched tool requests are not accepted. Send one request per call."
+INVALID_PARAMS_MESSAGE = "Invalid params"
 
 # RFC 6750 section 3: a quoted auth-param value may hold only %x20-21 / %x23-5B / %x5D-7E.
 _QUOTED_UNSAFE = re.compile(r"[^\x20\x21\x23-\x5b\x5d-\x7e]")
@@ -149,6 +154,8 @@ class Gateway:
         self._verifier = verifier
         self._resolver = resolver
         self._proxies = proxies
+        tools = config.policies.tools
+        self._tool_policy = None if tools is None else ToolPolicy(tools)
 
     def _challenge(
         self, *, scope: list[str], error: str | None = None, description: str | None = None
@@ -373,6 +380,15 @@ class Gateway:
             audit.emit(status=404, outcome="session_not_found")
             return json_rpc_response(404, SESSION_NOT_FOUND, SESSION_NOT_FOUND_MESSAGE, reply_id)
 
+        tool_policy = (
+            None if self._tool_policy is None else self._tool_policy.effective(identity, credential)
+        )
+        if tool_policy is not None:
+            audit.upstream = credential.upstream
+            refusal = self._refuse_tool_request(tool_policy, rpc, body, audit)
+            if refusal is not None:
+                return refusal
+
         return await self._proxies[credential.upstream].forward(
             method=request.method,
             inbound_headers=inbound_headers,
@@ -384,7 +400,35 @@ class Gateway:
             resolver=self._resolver,
             subject_key=subject_key,
             audit=audit,
+            tool_policy=tool_policy,
         )
+
+    @staticmethod
+    def _refuse_tool_request(
+        policy: EffectivePolicy, rpc: RpcInfo, body: bytes, audit: AuditRecord
+    ) -> Response | None:
+        """Refuse a tool request the policy does not allow, or None to forward it.
+
+        A denied tool is answered exactly like a tool that does not exist. A request whose tool
+        cannot be read is refused too: the gateway never forwards what it cannot check.
+        """
+        if rpc.method is None and body and is_tool_batch(body):
+            # A batch is invisible to the single-request checks, so it is refused outright.
+            audit.emit(status=400, outcome="batch_refused")
+            return json_rpc_response(400, INVALID_REQUEST, BATCH_REFUSED_MESSAGE, None)
+        if rpc.method != "tools/call":
+            return None
+        # Without an id no reply can be correlated: the refusal is an HTTP error.
+        status = 200 if rpc.expects_reply else 400
+        reply_id = rpc.id if rpc.expects_reply else None
+        if rpc.tool is None:
+            audit.reason = "invalid_params"
+            audit.emit(status=status, outcome="tool_denied")
+            return json_rpc_response(status, INVALID_PARAMS, INVALID_PARAMS_MESSAGE, reply_id)
+        if policy.allows(rpc.tool):
+            return None
+        audit.emit(status=status, outcome="tool_denied")
+        return json_rpc_response(status, INVALID_PARAMS, f"Unknown tool: {rpc.tool}", reply_id)
 
 
 def create_app(
@@ -431,7 +475,12 @@ def create_app(
     sessions = state.sessions
     proxies = {
         name: UpstreamProxy(
-            name, config.upstreams[name], client, sessions, config.limits.max_sse_event_bytes
+            name,
+            config.upstreams[name],
+            client,
+            sessions,
+            config.limits.max_sse_event_bytes,
+            config.limits.max_filtered_response_bytes,
         )
         for name, client in clients.items()
     }

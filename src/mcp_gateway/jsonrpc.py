@@ -24,6 +24,7 @@ STATE_UNAVAILABLE = -32013
 # Allocated by the MCP 2026-07-28 transport spec for a header that disagrees with the body.
 HEADER_MISMATCH = -32020
 INVALID_REQUEST = -32600
+INVALID_PARAMS = -32602
 
 DENY_CODES: dict[str, int] = {
     "no_mapping": NO_MAPPING,
@@ -80,6 +81,25 @@ def parse_request(body: bytes) -> RpcInfo:
     tool = target if method == "tools/call" else None
     return RpcInfo(
         method=method, id=rpc_id, tool=tool, target=target, expects_reply=rpc_id is not None
+    )
+
+
+# Methods whose answer or arguments the tool policy governs.
+TOOL_METHODS = frozenset({"tools/call", "tools/list"})
+
+
+def is_tool_batch(body: bytes) -> bool:
+    """True for a JSON array body holding any ``tools/call`` or ``tools/list`` element.
+
+    ``parse_request`` reads single objects only, so a batch is invisible to it; the tool
+    policy needs to know when one hides a tool request.
+    """
+    try:
+        document: Any = json.loads(body)
+    except ValueError:
+        return False
+    return isinstance(document, list) and any(
+        isinstance(element, dict) and element.get("method") in TOOL_METHODS for element in document
     )
 
 
