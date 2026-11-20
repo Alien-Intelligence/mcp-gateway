@@ -460,14 +460,40 @@ class UpstreamProxy:
         )
 
     async def _send_or_discard(
-        self, request: httpx.Request, handle: ReadHandle[httpx.Response | None]
+        self,
+        request: httpx.Request,
+        handle: ReadHandle[httpx.Response | None],
+        orphaned: Callable[[httpx.Response], Awaitable[None]],
     ) -> httpx.Response | None:
         """Send the request and return the response; if the client left meanwhile, finish it here."""
         response = await self._client.send(request, stream=True)
         if handle.detached:
-            await _discard(response)
+            await orphaned(response)
             return None
         return response
+
+    async def _settle_orphan(
+        self,
+        response: httpx.Response,
+        session_id: str | None,
+        identity: Identity,
+        resolver: CredentialResolver,
+    ) -> None:
+        """A response nobody is waiting for: what it says about the credential and the session
+        still counts, then it is read to its end and discarded. A session id it issues is not
+        bound: the client never learned it, and the upstream expires it by itself.
+        """
+        try:
+            status = response.status_code
+            try:
+                if status in _AUTH_REPLIES:
+                    await resolver.invalidate(identity)
+                elif status == 404 and session_id is not None:
+                    await self._sessions.drop(self._name, session_id)
+            except (ResolverError, StateUnavailableError):
+                logger.error("bookkeeping for an upstream %d failed after the client left", status)
+        finally:
+            await _discard(response)
 
     async def _own_response[T](
         self,
@@ -486,12 +512,18 @@ class UpstreamProxy:
         ownership.taken = True
         return read
 
-    async def _release_unowned(self, response: httpx.Response, *, detachable: bool) -> None:
+    async def _release_unowned(
+        self,
+        response: httpx.Response,
+        *,
+        detachable: bool,
+        orphaned: Callable[[httpx.Response], Awaitable[None]],
+    ) -> None:
         """Dispose of a response that arrived in the instant its client left."""
         if not detachable:
             await _close(response)
             return
-        self._own(True, lambda _handle: _discard(response)).leave()
+        self._own(True, lambda _handle: orphaned(response)).leave()
 
     async def forward(
         self,
@@ -532,7 +564,14 @@ class UpstreamProxy:
         detachable = method == "POST" and rpc.expects_reply
         step = audit.observer.begin_upstream(self._name)
         try:
-            read = self._own(detachable, lambda handle: self._send_or_discard(request, handle))
+            session_id = _request_session_id(inbound_headers)
+
+            async def orphaned(late: httpx.Response) -> None:
+                await self._settle_orphan(late, session_id, identity, resolver)
+
+            read = self._own(
+                detachable, lambda handle: self._send_or_discard(request, handle, orphaned)
+            )
             response, gone = await await_read(read, receive)
         except httpx.TimeoutException as exc:
             step.finish(status=None, error="timeout")
@@ -554,7 +593,7 @@ class UpstreamProxy:
         if gone:
             step.finish(status=None if response is None else response.status_code)
             if response is not None:
-                await self._release_unowned(response, detachable=detachable)
+                await self._release_unowned(response, detachable=detachable, orphaned=orphaned)
             return self._client_gone(audit)
         if response is None:
             step.finish(status=None, error="unreachable")
@@ -566,7 +605,6 @@ class UpstreamProxy:
             audit.upstream_status = response.status_code
             audit.upstream_request_id = response.headers.get("x-request-id")
             audit.upstream_session = "mcp-session-id" in response.headers
-            session_id = _request_session_id(inbound_headers)
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(
                     response, ownership, receive, rpc, identity, resolver, audit, detachable

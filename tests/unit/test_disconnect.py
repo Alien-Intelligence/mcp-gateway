@@ -624,3 +624,97 @@ async def test_a_read_refused_after_shutdown_began_closes_the_upstream_response(
     await call.run()
     assert stream.closed, "the response whose read could not start is closed, not leaked"
     assert [m["status"] for m in call.sent if m["type"] == "http.response.start"] == [500]
+
+
+# --- what a response that arrives after the client left still does ------------------------------
+
+
+async def answer_after_leaving(
+    rig_factory: Callable[[Handler], Rig],
+    response: Callable[[], httpx.Response],
+    *,
+    session: bool = False,
+    document: dict[str, Any] = RPC_BODY,
+) -> Rig:
+    asked = asyncio.Event()
+    answer = asyncio.Event()
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        asked.set()
+        await answer.wait()
+        return response()
+
+    rig = rig_factory(upstream)
+    call = rig.call(document)
+    if session:
+        call.add_header(b"mcp-session-id", b"s-1")
+    running = call.start()
+    await asked.wait()
+    call.leave.set()
+    await running
+    answer.set()
+    await rig.idle()
+    return rig
+
+
+async def test_a_401_that_arrives_after_the_client_left_still_invalidates_the_credential(
+    mapping_dir: Path, idp: Any, token: str
+) -> None:
+    stream = GatedStream([b"denied"])
+    stream.gate.set()
+    resolver = SpyResolver(
+        StaticResolver(mapping_dir / "mapping.json", ["main"], email_matching=True)
+    )
+    await answer_after_leaving(
+        lambda handler: Rig(mapping_dir, idp, handler, token, resolver=resolver),
+        lambda: httpx.Response(401, stream=stream),
+    )
+    assert len(resolver.invalidated) == 1
+    assert stream.closed
+
+
+async def test_a_404_that_arrives_after_the_client_left_still_drops_the_session_binding(
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dropped: list[str] = []
+
+    async def check(self: Any, upstream: str, session_id: str, subject_key: str) -> bool:
+        return True
+
+    async def drop(self: Any, upstream: str, session_id: str) -> None:
+        dropped.append(session_id)
+
+    monkeypatch.setattr(MemorySessionStore, "check", check)
+    monkeypatch.setattr(MemorySessionStore, "drop", drop)
+    stream = GatedStream([b"gone"])
+    stream.gate.set()
+    await answer_after_leaving(
+        lambda handler: Rig(mapping_dir, idp, handler, token),
+        lambda: httpx.Response(404, stream=stream),
+        session=True,
+    )
+    assert dropped == ["s-1"]
+    assert stream.closed
+
+
+async def test_a_session_issued_after_the_client_left_is_not_bound(
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound: list[str] = []
+
+    async def bind(self: Any, upstream: str, session_id: str, subject_key: str) -> bool:
+        bound.append(session_id)
+        return True
+
+    monkeypatch.setattr(MemorySessionStore, "bind", bind)
+    stream = GatedStream([b"{}"])
+    stream.gate.set()
+    await answer_after_leaving(
+        lambda handler: Rig(mapping_dir, idp, handler, token),
+        lambda: httpx.Response(
+            200, headers={**JSON_TYPE, "mcp-session-id": "issued"}, stream=stream
+        ),
+        document={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    assert bound == [], "the client never learned this session id: it expires upstream by itself"
+    assert stream.closed

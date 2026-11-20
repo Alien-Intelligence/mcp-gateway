@@ -245,6 +245,8 @@ A client that disconnects does not cancel an upstream request the gateway alread
 | `POST` notification or client response (no reply expected), `GET` listen stream, `DELETE` | The upstream response is closed at once. There is nothing to complete. |
 | Any request not yet sent upstream (authentication, rate limit, credential lookup, session check) | Abandoned: nothing is in flight, so nothing is forwarded. |
 
+A response that arrives after the client left, during the wait for the headers, still counts for what it says: an upstream `401` or `402` invalidates the credential and a `404` drops the session binding. A session id an `initialize` issues in such a response is not bound (the client never learned it): the upstream session expires on its own.
+
 The request's audit line is written when the client leaves: status `499`, outcome `client_disconnected`. What the upstream does afterwards is not a second audit line, it is the metric and the log line below.
 
 **Ceiling.** The part of a request that runs on after its client left is bounded by the upstream's `read_timeout_seconds` as a wall-clock total, on top of the per-read timeouts (the clock starts when the client leaves). When it expires the upstream response is closed and the request is counted as `timeout`. The reads are owned by the application: at shutdown the lifespan cancels what is left and waits for it to close its responses (10 s at most).
