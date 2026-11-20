@@ -26,6 +26,7 @@ from mcp_gateway.auth import (
 )
 from mcp_gateway.closing import close_all
 from mcp_gateway.config import GatewayConfig
+from mcp_gateway.detached import DetachedReads
 from mcp_gateway.identity import Identity, IdentityError, build_identity
 from mcp_gateway.jsonrpc import (
     DENIED,
@@ -102,6 +103,9 @@ def _quoted(value: str) -> str:
     """Make ``value`` safe inside a quoted WWW-Authenticate parameter (no quote, backslash, controls)."""
     return _QUOTED_UNSAFE.sub(" ", value)
 
+
+# How long the lifespan waits for upstream reads it cancelled to close their responses.
+DETACHED_READS_SHUTDOWN_SECONDS = 10.0
 
 RESOLVER_UNAVAILABLE_MESSAGE = "Credentials are temporarily unavailable. Retry shortly."
 RESOLVER_RETRY_AFTER_SECONDS = 5
@@ -565,6 +569,8 @@ def create_app(
     )
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
     sessions = state.sessions
+    reads = DetachedReads(telemetry)
+    telemetry.observe_detached(lambda: reads.active)
     proxies = {
         name: UpstreamProxy(
             name,
@@ -573,6 +579,7 @@ def create_app(
             sessions,
             config.limits.max_sse_event_bytes,
             config.limits.max_filtered_response_bytes,
+            reads,
         )
         for name, client in clients.items()
     }
@@ -614,14 +621,19 @@ def create_app(
             return JSONResponse({"status": "state_unavailable"}, status_code=503)
         return JSONResponse({"status": "ready"})
 
+    async def close_reads() -> None:
+        await reads.aclose(DETACHED_READS_SHUTDOWN_SECONDS)
+
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
         try:
             yield
         finally:
+            # The reads first: they hold upstream responses and use the clients closed below.
             # Telemetry last: it flushes what the requests above produced while closing.
             await close_all(
                 [
+                    close_reads,
                     resolver.aclose,
                     jwks_client.aclose,
                     state.aclose,
@@ -630,7 +642,7 @@ def create_app(
                 ]
             )
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
             Route("/readyz", readyz, methods=["GET"]),
@@ -639,3 +651,6 @@ def create_app(
         ],
         lifespan=lifespan,
     )
+    # Exposed for tests: the reads still running (and the set must be empty once they ended).
+    app.state.upstream_reads = reads
+    return app

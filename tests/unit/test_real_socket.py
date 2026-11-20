@@ -4,7 +4,6 @@ These cover what an in-process ASGI transport cannot: connection aborts, disconn
 propagation and incremental streaming. Every wait is bounded.
 """
 
-import asyncio
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -136,41 +135,56 @@ async def test_complete_stream_is_relayed_whole(stack: Stack) -> None:
 # --- client disconnect ----------------------------------------------------------------
 
 
-async def test_closing_an_idle_sse_response_aborts_the_upstream_request(stack: Stack) -> None:
+async def leave_after_first_event(stack: Stack, tool: str, **arguments: Any) -> None:
+    """Call ``tool`` as carol, read one event of the answer, then drop the connection."""
+    async with stack.client.stream(
+        "POST",
+        f"{stack.gateway}/mcp",
+        json=rpc_call(tool, **arguments),
+        headers=stack.headers("carol", **ACCEPT),
+    ) as response:
+        async for _first in response.aiter_raw():
+            break
+
+
+async def test_leaving_mid_sse_does_not_abort_the_upstream_request(stack: Stack) -> None:
+    """Decision of 2026-11-20: a disconnect is not a cancellation; the upstream finishes its work."""
     with anyio.fail_after(TEST_SECONDS):
-        async with stack.client.stream(
-            "POST",
-            f"{stack.gateway}/mcp",
-            json=rpc_call("slow_sse", count=1, delay_seconds=0, hold=True),
-            headers=stack.headers("carol", **ACCEPT),
-        ) as response:
-            async for _first in response.aiter_raw():
-                break  # one event arrived; the stream is now idle
+        await leave_after_first_event(stack, "slow_sse", count=4, delay_seconds=0.2)
         record = await stack.wait_for_stub(
-            lambda r: r["tool"] == "slow_sse" and r["disconnected"], timeout=DISCONNECT_SECONDS
+            lambda r: r["tool"] == "slow_sse" and (r["completed"] or r["disconnected"]),
+            timeout=DISCONNECT_SECONDS,
         )
     assert record["persona"] == "carol"
+    assert record["completed"] is True, "the stub sent its whole response to the gateway"
+    assert record["disconnected"] is False
 
 
-async def test_client_going_away_during_a_hanging_call_aborts_the_upstream_request(
-    stack: Stack,
+@pytest.fixture
+async def short_ceiling_stack(
+    tmp_path: Path, idp: FakeIdp, rsa_key: rsa.RSAPrivateKey
+) -> AsyncIterator[Stack]:
+    def shorten(data: dict[str, Any]) -> None:
+        for upstream in data["upstreams"].values():
+            upstream["read_timeout_seconds"] = 1
+
+    async with running_stack(tmp_path, idp, rsa_key, config_edit=shorten) as running:
+        yield running
+
+
+async def test_an_upstream_that_keeps_going_is_closed_at_the_ceiling_after_the_client_left(
+    short_ceiling_stack: Stack,
 ) -> None:
+    """Events every 0.2 s never trip httpx's per-read timeout: only the wall-clock ceiling can."""
+    stack = short_ceiling_stack
     with anyio.fail_after(TEST_SECONDS):
-        call = asyncio.create_task(
-            stack.client.post(
-                f"{stack.gateway}/mcp",
-                json=rpc_call("hang"),
-                headers=stack.headers("carol", **ACCEPT),
-            )
-        )
-        await stack.wait_for_stub(lambda r: r["tool"] == "hang")
-        call.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await call
+        await leave_after_first_event(stack, "slow_sse", count=100, delay_seconds=0.2)
         record = await stack.wait_for_stub(
-            lambda r: r["tool"] == "hang" and r["disconnected"], timeout=DISCONNECT_SECONDS
+            lambda r: r["tool"] == "slow_sse" and (r["completed"] or r["disconnected"]),
+            timeout=DISCONNECT_SECONDS,
         )
-    assert record["persona"] == "carol"
+    assert record["disconnected"] is True
+    assert record["completed"] is False
 
 
 async def test_closing_a_get_stream_aborts_the_upstream_stream(stack: Stack) -> None:

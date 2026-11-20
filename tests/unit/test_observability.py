@@ -648,6 +648,9 @@ async def _client_disconnected(env: Env) -> None:
 
     observed = env.rebuild(transport=routed_transport(env.idp, never_answers))
     await call_then_disconnect(observed.app, env.token, after_seconds=0.1)
+    # The request went upstream, so it runs on without its client (it is not cancelled): the
+    # scenario ends it, as shutdown would.
+    await observed.app.state.upstream_reads.aclose(5)
 
 
 async def _internal_error(env: Env) -> None:

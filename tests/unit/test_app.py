@@ -492,57 +492,6 @@ async def test_midstream_failure_after_the_reply_is_aborted_not_ended_cleanly(
     assert line["reason"] == "ReadError"
 
 
-async def test_client_disconnect_aborts_the_upstream_request(
-    app: Starlette, token: str, upstream: FakeUpstream, caplog: pytest.LogCaptureFixture
-) -> None:
-    stream = TrackedStream([b"data: first\n\n"], hang=True)
-    upstream.responder = lambda _r: httpx.Response(
-        200, headers={"Content-Type": "text/event-stream"}, stream=stream
-    )
-    body = json.dumps(RPC_BODY).encode()
-    disconnect = asyncio.Event()
-    delivered = False
-
-    async def receive() -> dict[str, Any]:
-        nonlocal delivered
-        if not delivered:
-            delivered = True
-            return {"type": "http.request", "body": body, "more_body": False}
-        await disconnect.wait()
-        return {"type": "http.disconnect"}
-
-    sent: list[dict[str, Any]] = []
-
-    async def send(message: dict[str, Any]) -> None:
-        sent.append(message)
-        if message["type"] == "http.response.body" and message["body"]:
-            disconnect.set()  # the client goes away after the first event
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.4"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "https",
-        "path": "/mcp",
-        "raw_path": b"/mcp",
-        "query_string": b"",
-        "headers": [
-            (b"host", b"gw.example.com"),
-            (b"authorization", f"Bearer {token}".encode()),
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(body)).encode()),
-        ],
-        "server": ("gw.example.com", 443),
-        "client": ("203.0.113.9", 1234),
-    }
-    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
-        await asyncio.wait_for(app(scope, receive, send), timeout=5)
-    assert stream.closed, "the upstream response must be closed when the client disconnects"
-    assert [m for m in sent if m["type"] == "http.response.body" and m["body"]]
-    assert audit_lines(caplog)[0]["outcome"] == "client_disconnected"
-
-
 class FailingCloseResolver(FixedResolver):
     async def aclose(self) -> None:
         raise ResolverError("resolver close failed")
@@ -982,53 +931,6 @@ async def call_then_disconnect(
     started = asyncio.get_running_loop().time()
     await asyncio.wait_for(app(asgi_scope(token, body), receive, send), timeout=5)
     return sent, asyncio.get_running_loop().time() - started
-
-
-async def test_client_disconnect_while_waiting_for_upstream_headers_aborts_the_request(
-    mapping_dir: Path,
-    idp: FakeIdp,
-    token: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    cancelled = asyncio.Event()
-
-    async def never_answers(request: httpx.Request) -> httpx.Response:
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            cancelled.set()
-            raise
-        raise AssertionError("unreachable")
-
-    app = build_app(mapping_dir, routed_transport(idp, never_answers))
-    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
-        sent, elapsed = await call_then_disconnect(app, token, after_seconds=0.1)
-    assert cancelled.is_set(), "the in-flight upstream request must be cancelled"
-    assert elapsed < 2
-    assert not [m for m in sent if m["type"] == "http.response.start" and m["status"] != 499]
-    (line,) = audit_lines(caplog)
-    assert line["outcome"] == "client_disconnected"
-    assert line["status"] == 499
-
-
-async def test_client_disconnect_while_draining_an_upstream_401_stops_the_drain(
-    mapping_dir: Path,
-    idp: FakeIdp,
-    token: str,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    stream = TrackedStream([b"denied"], hang=True)
-
-    async def rejects_slowly(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, stream=stream)
-
-    app = build_app(mapping_dir, routed_transport(idp, rejects_slowly))
-    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
-        _, elapsed = await call_then_disconnect(app, token, after_seconds=0.1)
-    assert elapsed < 2
-    assert stream.closed
-    (line,) = audit_lines(caplog)
-    assert line["outcome"] == "client_disconnected"
 
 
 # --- request body timeout -----------------------------------------------------------------
