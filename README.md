@@ -203,6 +203,8 @@ Reading the results:
 - `stats-summary.json`: per container, peak and mean CPU (percent of one core) and memory (MiB), from `stats.jsonl`.
 - The run parameters, the start and end times (UTC) and the git commit (`LOADTEST_GIT_COMMIT`) are in `summary.json`.
 
+OAuth tokens: every persona logs in once (one grant per persona, sequentially) before the workers start, so the measurement never includes a login. A token is obtained again when less than `max(5 s, 0.2 x its lifetime)` is left (lifetime = `exp - iat`; a token without both claims is refused). The dev realm issues 60-second tokens, so a long run still logs in again about every 48 s per persona; that is bounded (personas x run minutes x 1.25 grants) but not zero, and each login registers a new client: the realm caps dynamic client registration at 200 clients, so keep personas x run minutes well under it. `summary.json` carries `oauth_grants` (grants per target) so a run that keeps logging in is visible; a stub-key target reports 0.
+
 Against another target (the real dev MCP, any gateway) run the client directly from `tests/` with `src/` and `scripts/` on `PYTHONPATH`: `python -m load.loadtest --target-url NAME=URL --target-auth NAME=oauth:<issuer> ...` (the users' password in `E2E_USER_PASSWORD`), or `NAME=stub-key` with `--state-dir` for the stub's keys.
 
 ### `e2e`: the real-dev suite

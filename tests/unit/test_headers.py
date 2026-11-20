@@ -102,6 +102,13 @@ def test_response_strips_hop_by_hop_challenge_and_cookies() -> None:
     assert set(out) == {"x-accel-buffering"}
 
 
+def test_response_drops_the_headers_the_gateways_own_server_sets() -> None:
+    """``Date`` and ``Server`` describe the hop that answers the client: the ASGI server adds its
+    own, so relaying the upstream's would send every response with two of each."""
+    upstream = [("Date", "Fri, 20 Nov 2026 12:00:00 GMT"), ("Server", "uvicorn"), ("X-Keep", "1")]
+    assert set(filter_response_headers(upstream)) == {"x-keep", "x-accel-buffering"}
+
+
 def test_response_keeps_protocol_headers_and_disables_buffering() -> None:
     upstream = [
         ("Content-Type", "text/event-stream"),

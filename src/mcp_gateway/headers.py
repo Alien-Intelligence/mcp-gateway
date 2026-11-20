@@ -56,8 +56,10 @@ MUST_STRIP_REQUEST_HEADERS = frozenset(
 HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
     {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade"}
 )
-# Removed from every upstream response regardless of hop-by-hop rules.
-ALWAYS_STRIPPED_RESPONSE_HEADERS = frozenset({"www-authenticate", "set-cookie"})
+# Removed from every upstream response regardless of hop-by-hop rules. ``date`` and ``server``
+# are set by the ASGI server that answers the client; relaying the upstream's too would send
+# each of them twice, which proxies in front of the gateway reject or warn about.
+ALWAYS_STRIPPED_RESPONSE_HEADERS = frozenset({"www-authenticate", "set-cookie", "date", "server"})
 
 
 def _is_forwardable(name: str) -> bool:
