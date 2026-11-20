@@ -85,6 +85,16 @@ async def _read_bounded_body(request: Request, limit: int) -> bytes | None:
     return b"".join(chunks)
 
 
+_SINGLE_VALUE_HEADERS = ("Mcp-Session-Id", "Mcp-Protocol-Version")
+
+
+def _repeated_header(request: Request) -> str | None:
+    for name in _SINGLE_VALUE_HEADERS:
+        if len(request.headers.getlist(name)) > 1:
+            return name
+    return None
+
+
 def _bearer_token(request: Request) -> str | None:
     scheme, _, token = request.headers.get("authorization", "").partition(" ")
     token = token.strip()
@@ -240,6 +250,15 @@ class Gateway:
         if mismatch is not None:
             audit.emit(status=400, outcome="mcp_header_mismatch")
             return json_rpc_response(400, HEADER_MISMATCH, mismatch, reply_id)
+
+        repeated = _repeated_header(request)
+        if repeated is not None:
+            # Two values would let a front proxy and the upstream disagree about which one counts,
+            # and the binding check would look at the other one.
+            audit.emit(status=400, outcome="duplicate_header")
+            return json_rpc_response(
+                400, INVALID_REQUEST, f"The {repeated} header must appear once.", reply_id
+            )
 
         credential = await self._resolve(identity, rpc, audit)
         if isinstance(credential, Response):

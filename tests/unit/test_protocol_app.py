@@ -582,3 +582,26 @@ async def test_compressed_event_stream_is_a_stream_failure(
     assert stream.closed
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "encoded_event_stream")
+
+
+@pytest.mark.parametrize("header", ["Mcp-Session-Id", "Mcp-Protocol-Version"])
+async def test_a_repeated_single_value_header_is_400_and_not_forwarded(
+    http: httpx.AsyncClient,
+    alice: dict[str, str],
+    bob: dict[str, str],
+    upstream: FakeUpstream,
+    caplog: pytest.LogCaptureFixture,
+    header: str,
+) -> None:
+    await initialize(http, upstream, alice, "sess-a")
+    # Bob's own (unbound) id first, alice's bound id second: a parser that picks the other value
+    # than the gateway did would hand bob alice's session.
+    pairs = [*bob.items(), (header, "unbound"), (header, "sess-a")]
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        response = await http.post("/mcp", json=RPC_BODY, headers=pairs)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == -32600
+    assert header in response.json()["error"]["message"]
+    assert upstream.requests == []
+    (line,) = audit_lines(caplog)
+    assert (line["status"], line["outcome"]) == (400, "duplicate_header")
