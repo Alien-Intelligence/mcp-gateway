@@ -36,6 +36,7 @@ OTLP: dict[str, Any] = {
     "endpoint": "http://collector.example.com:4318",
     "protocol": "http/protobuf",
     "headers_file": None,
+    "allow_insecure_http": False,
     "timeout_seconds": 5,
     "export_interval_seconds": 10,
     "service_name": "mcp-gateway-test",
@@ -91,6 +92,9 @@ def test_unknown_observability_keys_are_rejected() -> None:
         ({"timeout_seconds": 30, "export_interval_seconds": 10}, "export_interval_seconds"),
         ({"service_name": ""}, "service_name"),
         ({"headers_file": ""}, "headers_file"),
+        ({"allow_insecure_http": "yes"}, "allow_insecure_http"),
+        ({"headers_file": "/run/secrets/otlp-headers"}, "allow_insecure_http"),
+        ({"endpoint": "http://collector.example.com", "headers_file": "h"}, "allow_insecure_http"),
         ({"resource_attributes": {"service.name": "x"}}, "service_name"),
         ({"resource_attributes": {"": "x"}}, "non-empty"),
         ({"resource_attributes": {"k": 1}}, "resource_attributes"),
@@ -156,7 +160,7 @@ def test_a_missing_headers_file_fails_startup(tmp_path: Path) -> None:
 def test_the_gateway_refuses_to_start_when_the_headers_file_is_missing(
     tmp_path: Path, mapping_dir: Path
 ) -> None:
-    data = with_otlp(headers_file=str(tmp_path / "absent"))
+    data = with_otlp(headers_file=str(tmp_path / "absent"), allow_insecure_http=True)
     data["resolver"]["mapping_file"] = str(mapping_dir / "mapping.json")
     with pytest.raises(ConfigError, match="cannot be read"):
         create_app(config_from(data))
@@ -239,6 +243,7 @@ async def test_spans_and_metrics_reach_an_otlp_http_receiver_with_the_file_heade
             **OTLP,
             "endpoint": receiver.url,
             "headers_file": str(headers_file),
+            "allow_insecure_http": True,
             "export_interval_seconds": 30,
             "service_name": "gateway-under-test",
             "resource_attributes": {"deployment.environment": "unit"},
@@ -338,3 +343,28 @@ async def test_a_grpc_config_builds_exporters_and_shuts_down_cleanly() -> None:
     assert len(telemetry.closers) == 2
     for close in telemetry.closers:
         await close()
+
+
+def test_the_allow_insecure_http_key_is_required() -> None:
+    otlp = {k: v for k, v in OTLP.items() if k != "allow_insecure_http"}
+    data = base_config_dict()
+    data["observability"] = {"otlp": otlp}
+    with pytest.raises(ConfigError, match="allow_insecure_http"):
+        parse_config(json.dumps(data))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"endpoint": "https://collector.example.com", "headers_file": "/run/h"},
+        {"endpoint": "http://collector.example.com", "headers_file": None},
+        {
+            "endpoint": "http://collector.example.com",
+            "headers_file": "/run/h",
+            "allow_insecure_http": True,
+        },
+    ],
+    ids=["https-with-headers", "http-without-headers", "http-with-headers-allowed"],
+)
+def test_the_auth_header_travels_in_clear_only_when_allowed(changes: dict[str, Any]) -> None:
+    parse_config(json.dumps(with_otlp(**changes)))

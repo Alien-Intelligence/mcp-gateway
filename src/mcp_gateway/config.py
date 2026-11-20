@@ -346,6 +346,8 @@ class OtlpConfig(_Model):
     protocol: Literal["grpc", "http/protobuf"]
     # File of ``key=value`` lines sent with every export (an auth header); never inline.
     headers_file: str | None
+    # Lets an http endpoint carry the headers_file auth header in clear (dev and test only).
+    allow_insecure_http: bool
     # Per export attempt.
     timeout_seconds: float = Field(gt=0)
     # Metric collection period; also the span batch delay.
@@ -379,6 +381,19 @@ class OtlpConfig(_Model):
         if "service.name" in value:
             raise ValueError("set service_name instead of the service.name resource attribute")
         return value
+
+    @model_validator(mode="after")
+    def _auth_header_needs_https(self) -> Self:
+        if (
+            self.headers_file is not None
+            and urlsplit(self.endpoint).scheme != "https"
+            and not self.allow_insecure_http
+        ):
+            raise ValueError(
+                "otlp endpoint must be https when headers_file is set "
+                "(allow_insecure_http=true is for dev and test only)"
+            )
+        return self
 
     @model_validator(mode="after")
     def _interval_covers_timeout(self) -> Self:
