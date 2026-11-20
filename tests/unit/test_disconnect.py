@@ -575,3 +575,25 @@ async def test_beyond_the_cap_a_leaving_clients_read_is_shed_not_detached(
     await rig.idle()
     assert rig.detached() == {"shed": 1, "completed": 2}
     assert all(s.closed for s in streams)
+
+
+# --- ownership --------------------------------------------------------------------------------
+
+
+async def test_cancelling_the_request_task_leaves_the_read_it_started_to_finish(
+    mapping_dir: Path, idp: Any, token: str
+) -> None:
+    stream = GatedStream([LIST_REPLY[:20]])
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers=JSON_TYPE, stream=stream)
+
+    rig = Rig(mapping_dir, idp, upstream, token, policy=ALLOW_ALL)
+    running = rig.call(LIST).start()
+    await stream.started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    assert not stream.closed, "the response belongs to the read, not to the cancelled request"
+    await finish_and_check(rig, stream)
+    assert rig.detached() == {"completed": 1}

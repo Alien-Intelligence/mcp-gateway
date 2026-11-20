@@ -235,6 +235,13 @@ def _request_session_id(headers: list[tuple[str, str]]) -> str | None:
     return values[0] if values else None
 
 
+@dataclass
+class _Ownership:
+    """Who must close an upstream response: ``forward`` until a read takes it over."""
+
+    taken: bool = False
+
+
 class _Release:
     """Releases one upstream response and records the request, each exactly once.
 
@@ -456,6 +463,18 @@ class UpstreamProxy:
             return None
         return response
 
+    def _own_response[T](
+        self,
+        response: httpx.Response,
+        ownership: _Ownership,
+        detachable: bool,
+        body: Callable[[ReadHandle[T]], Awaitable[T]],
+    ) -> ReadHandle[T]:
+        """Start the read that takes the response over (its body closes it)."""
+        read = self._own(detachable, body)
+        ownership.taken = True
+        return read
+
     async def _release_unowned(self, response: httpx.Response, *, detachable: bool) -> None:
         """Dispose of a response that arrived in the instant its client left."""
         if not detachable:
@@ -530,6 +549,7 @@ class UpstreamProxy:
             step.finish(status=None, error="unreachable")
             raise RuntimeError("upstream send finished without a response or a disconnect")
 
+        ownership = _Ownership()
         try:
             step.finish(status=response.status_code)
             audit.upstream_status = response.status_code
@@ -538,21 +558,32 @@ class UpstreamProxy:
             session_id = _request_session_id(inbound_headers)
             if response.status_code in _AUTH_REPLIES:
                 return await self._reject(
-                    response, receive, rpc, identity, resolver, audit, detachable
+                    response, ownership, receive, rpc, identity, resolver, audit, detachable
                 )
             await self._track_session(method, session_id, response, subject_key)
             if tool_policy is not None and rpc.method == "tools/list" and rpc.expects_reply:
                 if not response.is_success:
-                    return await self._replace_failure(response, rpc, receive, audit, detachable)
+                    return await self._replace_failure(
+                        response, ownership, rpc, receive, audit, detachable
+                    )
                 if not _is_event_stream(response):
                     # A JSON body answers exactly its own POST: only a tools/list one is filtered.
                     return await self._respond_filtered(
-                        response, rpc, tool_policy, session_id, receive, audit, detachable
+                        response,
+                        ownership,
+                        rpc,
+                        tool_policy,
+                        session_id,
+                        receive,
+                        audit,
+                        detachable,
                     )
             return self.stream(response, rpc, session_id, audit, tool_policy, detachable=detachable)
         except BaseException:
-            # Nothing owns the response yet: close it rather than leak the connection.
-            await _close(response)
+            # Close it rather than leak the connection, unless a read owns it now: that read
+            # closes it when it ends, and must not be cut short by this request failing.
+            if not ownership.taken:
+                await _close(response)
             raise
 
     async def _track_session(
@@ -591,6 +622,7 @@ class UpstreamProxy:
     async def _reject(
         self,
         response: httpx.Response,
+        ownership: _Ownership,
         receive: Receive,
         rpc: RpcInfo,
         identity: Identity,
@@ -602,7 +634,10 @@ class UpstreamProxy:
         gone = False
         try:
             _, gone = await await_read(
-                self._own(detachable, lambda _handle: _drain_and_close(response)), receive
+                self._own_response(
+                    response, ownership, detachable, lambda _handle: _drain_and_close(response)
+                ),
+                receive,
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -636,6 +671,7 @@ class UpstreamProxy:
     async def _replace_failure(
         self,
         response: httpx.Response,
+        ownership: _Ownership,
         rpc: RpcInfo,
         receive: Receive,
         audit: AuditRecord,
@@ -654,7 +690,12 @@ class UpstreamProxy:
         gone = False
         try:
             _, gone = await await_read(
-                self._own(detachable, lambda _handle: self._drain_within_read_timeout(response)),
+                self._own_response(
+                    response,
+                    ownership,
+                    detachable,
+                    lambda _handle: self._drain_within_read_timeout(response),
+                ),
                 receive,
             )
         except (httpx.HTTPError, TimeoutError) as exc:
@@ -708,6 +749,7 @@ class UpstreamProxy:
     async def _respond_filtered(
         self,
         response: httpx.Response,
+        ownership: _Ownership,
         rpc: RpcInfo,
         policy: EffectivePolicy,
         session_id: str | None,
@@ -727,7 +769,9 @@ class UpstreamProxy:
         try:
             try:
                 raw, gone = await await_read(
-                    self._own(
+                    self._own_response(
+                        response,
+                        ownership,
                         detachable,
                         lambda handle: self._read_filterable_body(response, handle, release),
                     ),
