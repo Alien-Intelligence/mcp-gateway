@@ -389,3 +389,26 @@ def test_an_unknown_discriminator_value_is_never_echoed_in_the_error(
     assert f"{section}: " in message
     for name in known.split(", "):
         assert name in message
+
+
+@pytest.mark.parametrize("key", ["max_connections", "max_detached_reads"])
+def test_upstream_connection_caps_are_required(config_dict: dict[str, Any], key: str) -> None:
+    del config_dict["upstreams"]["main"][key]
+    with pytest.raises(ConfigError, match=key):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize(("connections", "detached"), [(10, 0), (0, 0), (10, 10), (10, 11), (1, 1)])
+def test_detached_reads_must_leave_room_in_the_connection_pool(
+    config_dict: dict[str, Any], connections: int, detached: int
+) -> None:
+    config_dict["upstreams"]["main"]["max_connections"] = connections
+    config_dict["upstreams"]["main"]["max_detached_reads"] = detached
+    with pytest.raises(ConfigError, match="max_detached_reads|max_connections"):
+        _parse(config_dict)
+
+
+def test_detached_reads_below_the_pool_size_are_accepted(config_dict: dict[str, Any]) -> None:
+    config_dict["upstreams"]["main"]["max_connections"] = 10
+    config_dict["upstreams"]["main"]["max_detached_reads"] = 9
+    assert config_from(config_dict).upstreams["main"].max_detached_reads == 9

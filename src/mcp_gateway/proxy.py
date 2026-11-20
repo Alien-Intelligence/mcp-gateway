@@ -84,6 +84,10 @@ def build_client(
             write=config.write_timeout_seconds,
             pool=config.pool_timeout_seconds,
         ),
+        limits=httpx.Limits(
+            max_connections=config.max_connections,
+            max_keepalive_connections=config.max_connections,
+        ),
         follow_redirects=False,
     )
 
@@ -428,6 +432,7 @@ class UpstreamProxy:
         self._max_filtered_bytes = max_filtered_bytes
         self._read_timeout = config.read_timeout_seconds
         self._reads = reads
+        self._max_detached = config.max_detached_reads
 
     def _own[T](
         self, detachable: bool, body: Callable[[ReadHandle[T]], Awaitable[T]]
@@ -437,6 +442,7 @@ class UpstreamProxy:
             upstream=self._name,
             ceiling_seconds=self._read_timeout,
             detachable=detachable,
+            detach_limit=self._max_detached,
             body=body,
         )
 

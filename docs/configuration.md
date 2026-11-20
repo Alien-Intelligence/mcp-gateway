@@ -228,6 +228,8 @@ An object from upstream name to settings. The name is what resolvers return in `
 | `read_timeout_seconds` | number | gt 0 | Longest silence on a response. It is also the ceiling for an upstream request that runs on after its client left (see [Client disconnects](#client-disconnects)). Under `policies.tools` it is also the wall-clock total for reading a buffered `tools/list` JSON body (see `limits.max_filtered_response_bytes`): a body still arriving after that many seconds ends the request with `504` (`-32004`). |
 | `write_timeout_seconds` | number | gt 0 | |
 | `pool_timeout_seconds` | number | gt 0 | Wait for a pooled connection. |
+| `max_connections` | integer | gt 0 | Size of the connection pool to this upstream: the most connections open at once, requests in flight and requests running on after their client left alike. |
+| `max_detached_reads` | integer | gt 0, below `max_connections` | The most upstream requests of this upstream that may run on after their client left (see [Client disconnects](#client-disconnects)). Beyond it a leaving client's request is cancelled and closed instead (counted `shed`), so clients who left can never hold every connection and starve those still here. Size `max_connections` for the expected concurrent requests plus this. |
 
 Only these client headers reach the upstream: `Accept`, `Content-Type`, `Mcp-Session-Id`, `Mcp-Protocol-Version`, `Last-Event-ID`, `Mcp-Method`, `Mcp-Name`, `Mcp-Param-*` and `User-Agent`. The gateway adds `Authorization: Bearer <api key>` and `Accept-Encoding: identity`. Trace context is not propagated to the upstream. On the way back, hop-by-hop headers, `WWW-Authenticate`, `Set-Cookie` and `X-Request-Id` are removed.
 
@@ -247,7 +249,7 @@ The request's audit line is written when the client leaves: status `499`, outcom
 
 **Ceiling.** The part of a request that runs on after its client left is bounded by the upstream's `read_timeout_seconds` as a wall-clock total, on top of the per-read timeouts (the clock starts when the client leaves). When it expires the upstream response is closed and the request is counted as `timeout`. The reads are owned by the application: at shutdown the lifespan cancels what is left and waits for it to close its responses (10 s at most).
 
-**Metrics.** `mcp_gateway.upstream.detached` counts upstream requests that ran on after their client left, by `upstream` and `result`: `completed` (the response was read to its end), `timeout` (the ceiling, or an upstream read timeout) or `failed` (the upstream broke the stream, or the read was cancelled at shutdown). `mcp_gateway.upstream.detached.active` is the number running now. Each one also logs one INFO line (`detached upstream read ended`) with the upstream name, the result and the duration.
+**Metrics.** `mcp_gateway.upstream.detached` counts upstream requests that ran on after their client left, by `upstream` and `result`: `completed` (the response was read to its end), `timeout` (the ceiling, or an upstream read timeout), `failed` (the upstream broke the stream or the read was cancelled at shutdown) or `shed` (the upstream already had `max_detached_reads` such requests, so this one was cancelled and closed, with a WARNING log). `mcp_gateway.upstream.detached.active` is the number running now. Each one also logs one INFO line (`detached upstream read ended`) with the upstream name, the result and the duration.
 
 ## `limits`
 
@@ -489,7 +491,7 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.request.duration` | histogram | `s` | same as `mcp_gateway.requests` |
 | `mcp_gateway.upstream.duration` | histogram | `s` | `upstream`, `status_class` (`error` when no response came). Time to the response headers. |
 | `mcp_gateway.resolver.lookups` | counter | `{lookup}` | `resolver_type`, `cache`, `result` (values as in the resolver span) |
-| `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`). Upstream requests that ran on after their client left. |
+| `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`, `shed`). Upstream requests that ran on after their client left. |
 | `mcp_gateway.upstream.detached.active` | observable gauge | `{request}` | none |
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
 | `mcp_gateway.telemetry.failures` | observable counter | `{failure}` | `signal`: `record` (recording a finished request in process raised), `traces` or `metrics` (an OTLP export returned a failure or raised). All three are always reported, `0` included. |
@@ -552,14 +554,18 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
       "connect_timeout_seconds": 10,
       "read_timeout_seconds": 130,
       "write_timeout_seconds": 30,
-      "pool_timeout_seconds": 10
+      "pool_timeout_seconds": 10,
+      "max_connections": 200,
+      "max_detached_reads": 50
     },
     "legal": {
       "url": "https://alien.example.com/mcp/legal",
       "connect_timeout_seconds": 10,
       "read_timeout_seconds": 130,
       "write_timeout_seconds": 30,
-      "pool_timeout_seconds": 10
+      "pool_timeout_seconds": 10,
+      "max_connections": 200,
+      "max_detached_reads": 50
     }
   },
   "limits": {

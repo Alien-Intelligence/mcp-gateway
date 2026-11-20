@@ -58,7 +58,11 @@ class Rig:
                 self.closed = True
 
         handle = self.reads.start(
-            upstream="main", ceiling_seconds=ceiling, detachable=detachable, body=run
+            upstream="main",
+            ceiling_seconds=ceiling,
+            detachable=detachable,
+            detach_limit=100,
+            body=run,
         )
         await running.wait()
         return handle

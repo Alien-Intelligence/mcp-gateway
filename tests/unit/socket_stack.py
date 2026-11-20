@@ -136,6 +136,8 @@ async def running_stack(
             "read_timeout_seconds": 30,
             "write_timeout_seconds": 5,
             "pool_timeout_seconds": 5,
+            "max_connections": 50,
+            "max_detached_reads": 10,
         }
         data["upstreams"] = {
             "stateful": {"url": f"{stub_url}/stateful/mcp", **timeouts},

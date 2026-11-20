@@ -56,6 +56,8 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
                 "read_timeout_seconds": 130,
                 "write_timeout_seconds": 30,
                 "pool_timeout_seconds": 10,
+                "max_connections": 200,
+                "max_detached_reads": 50,
             }
         },
         "limits": {

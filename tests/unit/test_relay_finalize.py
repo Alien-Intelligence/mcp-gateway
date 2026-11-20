@@ -104,6 +104,8 @@ def build_relay(
             "read_timeout_seconds": 1,
             "write_timeout_seconds": 1,
             "pool_timeout_seconds": 1,
+            "max_connections": 10,
+            "max_detached_reads": 5,
         }
     )
     proxy = UpstreamProxy(
@@ -267,6 +269,8 @@ async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None
             "read_timeout_seconds": 1,
             "write_timeout_seconds": 1,
             "pool_timeout_seconds": 1,
+            "max_connections": 10,
+            "max_detached_reads": 5,
         }
     )
     sessions = ExplodingRegistry(

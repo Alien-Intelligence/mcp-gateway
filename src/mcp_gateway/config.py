@@ -322,11 +322,23 @@ class UpstreamConfig(_Model):
     read_timeout_seconds: float = Field(gt=0)
     write_timeout_seconds: float = Field(gt=0)
     pool_timeout_seconds: float = Field(gt=0)
+    # Upper bound on the connections to this upstream, requests in flight and requests that ran on
+    # after their client left alike.
+    max_connections: int = Field(gt=0)
+    # Upstream requests allowed to run on after their client left. It stays below the pool size so
+    # that clients who left can never take every connection from the clients who are still here.
+    max_detached_reads: int = Field(gt=0)
 
     @field_validator("url")
     @classmethod
     def _upstream_url(cls, value: str) -> str:
         return _require_http_url(value, what="upstream url")
+
+    @model_validator(mode="after")
+    def _detached_reads_leave_room(self) -> "UpstreamConfig":
+        if self.max_detached_reads >= self.max_connections:
+            raise ValueError("max_detached_reads must be below max_connections")
+        return self
 
 
 class LimitsConfig(_Model):

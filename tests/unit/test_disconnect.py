@@ -111,8 +111,10 @@ class Rig:
         resolver: Any = None,
         read_timeout: float = 130,
         policy: dict[str, Any] | None = None,
+        max_detached_reads: int = 50,
     ) -> None:
         data = base_config_dict(str(mapping_dir / "mapping.json"))
+        data["upstreams"]["main"]["max_detached_reads"] = max_detached_reads
         data["upstreams"]["main"]["read_timeout_seconds"] = read_timeout
         data["policies"]["tools"] = policy
         self.metrics = InMemoryMetricReader()
@@ -542,3 +544,34 @@ async def test_a_client_that_left_during_the_session_check_is_not_forwarded(
     await rig.idle()
     assert sent == [], "nothing was in flight, so nothing is sent for a client that is gone"
     assert rig.detached() == {}
+
+
+# --- the cap on detached reads ----------------------------------------------------------------
+
+
+async def test_beyond_the_cap_a_leaving_clients_read_is_shed_not_detached(
+    mapping_dir: Path, idp: Any, token: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    streams = [GatedStream([EVENT]) for _ in range(3)]
+    handed_out = iter(streams)
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return sse_response(next(handed_out))
+
+    rig = Rig(mapping_dir, idp, upstream, token, max_detached_reads=2)
+    calls = [rig.call(RPC_BODY) for _ in streams]
+    with caplog.at_level(logging.INFO):
+        for call in calls:
+            running = call.start()
+            await call.first_body.wait()
+            call.leave.set()
+            await running
+        assert rig.gauge() == 2
+        assert rig.detached() == {"shed": 1}
+        assert "result=shed" in caplog.text
+    assert [s.closed for s in streams] == [False, False, True], "the third was cut, not detached"
+    for stream in streams[:2]:
+        stream.gate.set()
+    await rig.idle()
+    assert rig.detached() == {"shed": 1, "completed": 2}
+    assert all(s.closed for s in streams)

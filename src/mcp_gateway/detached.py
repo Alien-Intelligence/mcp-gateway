@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 COMPLETED = "completed"
 TIMEOUT = "timeout"
 FAILED = "failed"
+SHED = "shed"
 
 # How long a cancelled read gets to close its upstream response and finish.
 _SETTLE_SECONDS = 10.0
@@ -35,8 +36,17 @@ _SETTLE_SECONDS = 10.0
 class ReadHandle[T]:
     """One owned read: lets the request side hand it over, and the read see that it was."""
 
-    def __init__(self, *, upstream: str, ceiling_seconds: float, detachable: bool) -> None:
+    def __init__(
+        self,
+        *,
+        upstream: str,
+        ceiling_seconds: float,
+        detachable: bool,
+        admit: Callable[[], bool],
+    ) -> None:
         self.upstream = upstream
+        self._admit = admit
+        self.shed = False
         self.started = time.monotonic()
         self._ceiling_seconds = ceiling_seconds
         self._detachable = detachable
@@ -85,12 +95,17 @@ class ReadHandle[T]:
             self.task.cancel()
             return
         if not self._detached:
+            if not self._admit():
+                # Too many reads already run on for clients that left: this one is cut instead.
+                self.shed = True
+                self.task.cancel()
+                return
             self._detached = True
             self._arm()
 
     async def settled(self) -> None:
         """Wait (bounded, shielded) for a cancelled read to finish closing its response."""
-        if self._detachable:
+        if self._detachable and not self.shed:
             return
         with anyio.CancelScope(shield=True), anyio.move_on_after(_SETTLE_SECONDS) as scope:
             await asyncio.wait({self.task})
@@ -109,6 +124,9 @@ class DetachedReads:
     def __len__(self) -> int:
         return len(self._handles)
 
+    def _detached_count(self, upstream: str) -> int:
+        return sum(1 for h in self._handles if h.detached and h.upstream == upstream)
+
     @property
     def active(self) -> int:
         """Reads whose client left and that are still running."""
@@ -120,18 +138,23 @@ class DetachedReads:
         upstream: str,
         ceiling_seconds: float,
         detachable: bool,
+        detach_limit: int,
         body: Callable[[ReadHandle[T]], Awaitable[T]],
     ) -> ReadHandle[T]:
         """Run ``body`` as an owned task.
 
         ``ceiling_seconds`` is the wall-clock bound on the part of the read that happens after
-        the client left (httpx's per-read timeouts still apply on top of it). ``body`` closes
-        the upstream response itself, in every case.
+        the client left (httpx's per-read timeouts still apply on top of it). At most
+        ``detach_limit`` reads of one upstream run on after their client left; a read beyond that
+        is cancelled instead (``shed``). ``body`` closes the upstream response itself, in every case.
         """
         if self._closed:
             raise RuntimeError("the upstream reads are closed")
         handle = ReadHandle[T](
-            upstream=upstream, ceiling_seconds=ceiling_seconds, detachable=detachable
+            upstream=upstream,
+            ceiling_seconds=ceiling_seconds,
+            detachable=detachable,
+            admit=lambda: self._detached_count(upstream) < detach_limit,
         )
         task = asyncio.create_task(self._run(handle, body))
         handle.attach_task(task)
@@ -152,7 +175,9 @@ class DetachedReads:
         try:
             value = await self._supervise(handle, body)
         except asyncio.CancelledError:
-            if handle.detached:
+            if handle.shed:
+                self._finish(handle, SHED, None)
+            elif handle.detached:
                 self._finish(handle, FAILED, "cancelled")
             raise
         except Exception as exc:
@@ -178,7 +203,8 @@ class DetachedReads:
 
     def _finish(self, handle: ReadHandle[Any], result: str, reason: str | None) -> None:
         self._telemetry.record_detached(handle.upstream, result)
-        logger.info(
+        logger.log(
+            logging.WARNING if result == SHED else logging.INFO,
             "detached upstream read ended: upstream=%s result=%s duration=%.1fs%s",
             handle.upstream,
             result,
