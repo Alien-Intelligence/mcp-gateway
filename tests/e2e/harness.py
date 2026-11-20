@@ -27,7 +27,6 @@ from dev_fixture import (
     find_consumption_events,
     probe_key,
     read_consumption_events,
-    read_dev_tokens,
     sponsor_predicate,
     write_atomic,
 )
@@ -51,7 +50,7 @@ REVOCATION_DEADLINE_SECONDS = 60.0
 PASSWORD_VARIABLE = "E2E_USER_PASSWORD"
 REQUIRED_ENV = (
     "E2E_STATE_DIR",
-    "E2E_TOKENS_FILE",
+    "E2E_SPONSOR_KEY_FILE",
     "E2E_API_BASE",
     "E2E_UPSTREAM_URL",
     "E2E_RUN_DIR",
@@ -89,7 +88,7 @@ class Persona:
 @dataclass(frozen=True)
 class Settings:
     state_dir: Path
-    tokens_file: Path
+    sponsor_key_file: Path
     api_base: str
     upstream_url: str
     run_dir: Path
@@ -105,9 +104,13 @@ class Settings:
     def dataset_ref(self) -> str:
         return f"{self.cluster_id}:{self.dataset_id}"
 
-    def admin_api(self) -> FixtureApi:
-        admin, _ = read_dev_tokens(self.tokens_file)
-        return FixtureApi(self.api_base, admin)
+    def sponsor_api(self) -> FixtureApi:
+        """The sponsor's service account: it reads the feeds of the managed client orgs and
+        runs their users' keys (the platform admin is not a member of a managed org)."""
+        key = self.sponsor_key_file.read_text(encoding="utf-8").strip()
+        if not key:
+            raise ValueError("the sponsor key file is empty")
+        return FixtureApi(self.api_base, key)
 
     def key_path(self, persona: Persona) -> Path:
         if persona.key_file is None:
@@ -147,7 +150,7 @@ def load_settings() -> Settings:
     personas["nomap"] = Persona("nomap", NOMAP_EMAIL, None, None, None)
     return Settings(
         state_dir=state_dir,
-        tokens_file=Path(os.environ["E2E_TOKENS_FILE"]),
+        sponsor_key_file=Path(os.environ["E2E_SPONSOR_KEY_FILE"]),
         api_base=os.environ["E2E_API_BASE"].rstrip("/"),
         upstream_url=os.environ["E2E_UPSTREAM_URL"],
         run_dir=Path(os.environ["E2E_RUN_DIR"]),
@@ -368,7 +371,7 @@ async def take_feed_baseline(settings: Settings, persona: Persona) -> FeedBaseli
     since = datetime.now(UTC)
 
     def read() -> FeedBaseline:
-        api = settings.admin_api()
+        api = settings.sponsor_api()
         try:
             return FeedBaseline(
                 since,
@@ -388,7 +391,7 @@ async def read_consumer_event(
     assert persona.org_id is not None and persona.user_id is not None
 
     def read() -> list[dict[str, Any]]:
-        api = settings.admin_api()
+        api = settings.sponsor_api()
         try:
             return find_consumption_events(
                 api,
@@ -413,7 +416,7 @@ async def read_sponsor_event(
     beneficiary = sponsor_predicate(settings.group_id, persona.org_id)
 
     def read() -> list[dict[str, Any]]:
-        api = settings.admin_api()
+        api = settings.sponsor_api()
         try:
             return find_consumption_events(
                 api,
@@ -440,15 +443,13 @@ def mint_revoked_key(settings: Settings, persona: Persona) -> str:
     knew and now rejects."""
     assert persona.org_id is not None and persona.user_id is not None
     base = f"/organizations/{persona.org_id}/users/{persona.user_id}/tokens"
-    api = settings.admin_api()
+    api = settings.sponsor_api()
     try:
-        minted = api.post(
-            base, {"name": REVOKED_TOKEN_NAME, "scope": "api-key"}, org_id=persona.org_id
-        )
+        minted = api.post(base, {"name": REVOKED_TOKEN_NAME, "scope": "api-key"})
         key, identifier = minted["token"], minted["identifier"]
         if not isinstance(key, str) or not key.startswith("oat_"):
             raise ValueError("the platform did not return an oat_ token")
-        api.delete(f"{base}/{identifier}", org_id=persona.org_id)
+        api.delete(f"{base}/{identifier}")
     finally:
         api.close()
     return key

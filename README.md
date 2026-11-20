@@ -88,17 +88,17 @@ The gateways read `mapping.json` and the key files from `MCP_GATEWAY_STATE_DIR`,
 
 ### Alien fixture (dev platform)
 
-`scripts/dev_fixture.py` sets up, through the real Alien API, two enterprise client organizations attached to a sponsored group of a sponsor organization that owns a private cluster, one client-managed user per client organization, and an `api-key` token for each. It is idempotent: organizations cannot be deleted on Alien, so every object is found by name and reused. It writes `mapping.json`, the key files (mode 600) and a non-secret `fixture.json` into the state directory.
+`scripts/dev_fixture.py` sets up, through the real Alien API, two managed client organizations created inside a sponsored group of a sponsor organization that owns a private cluster, one client-managed user per client organization, and an `api-key` token for each. Everything runs as the sponsor's service account (a client-managed `org-admin` user, authenticated by its `api-secret` key). It is idempotent: organizations cannot be deleted on Alien, so every object is found by name (or user by email) and reused, and a key is reused while `GET /users/me` accepts it. It writes `mapping.json`, the key files (mode 600) and a non-secret `fixture.json` into the state directory.
 
 ```bash
 uv run python scripts/dev_fixture.py \
-  --tokens-file <markdown file with the dev Admin/Normal tokens> \
+  --sponsor-key-file <file with the sponsor service account's api-secret key> \
   --api-base <Alien dev API> --mcp-url <dev MCP URL> \
   --sponsor-org-id <id> --cluster-id <id> --dataset-id <id> \
   --state-dir <MCP_GATEWAY_STATE_DIR>
 ```
 
-The tokens are read from the file and never passed on the command line or printed.
+The key is read from the file and never passed on the command line or printed. The IdP personas keep their addresses (`alice@client-x.test`); `fixture.json` records each persona's Alien-side address as `alien_email`.
 
 ## Tests
 
@@ -107,11 +107,11 @@ uv run pytest tests/unit -q                       # unit tests, no network
 uv run ruff check src tests scripts dev && uv run pyright src
 ```
 
-The end-to-end suite (`-m e2e`) behaves like a real MCP client against both providers: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It then reads the Alien consumption feeds back and asserts the call was billed to the expected client-managed user and client organization, with the sponsorship applied. Negative cases: wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), and forged `X-Job-Id` / `X-Organization-Id` (not recorded by Alien), each with a positive control that goes direct to the upstream.
+The end-to-end suite (`-m e2e`) behaves like a real MCP client against both providers: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It then reads the Alien consumption feeds back and asserts the call was billed to the expected client-managed user and client organization, with the sponsorship applied. Negative cases: wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), and forged `X-Job-Id` / `X-Organization-Id` (stripped: the call succeeds and the metered event carries neither, whereas sent straight to the upstream the foreign job id is refused), each with a positive control that goes direct to the upstream.
 
 ```bash
-E2E_STATE_DIR=<state dir> E2E_TOKENS_FILE=<tokens file> E2E_API_BASE=<Alien dev API> \
-E2E_UPSTREAM_URL=<dev MCP URL> E2E_EXISTING_JOB_ID=<an existing dev job id> \
+E2E_STATE_DIR=<state dir> E2E_SPONSOR_KEY_FILE=<sponsor key file> E2E_API_BASE=<Alien dev API> \
+E2E_UPSTREAM_URL=<dev MCP URL> E2E_EXISTING_JOB_ID=<an existing dev job id the personas do not own> \
 E2E_RUN_DIR=<evidence dir> uv run pytest tests/e2e -m e2e -v
 ```
 

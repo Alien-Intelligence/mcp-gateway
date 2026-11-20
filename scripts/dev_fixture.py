@@ -3,15 +3,20 @@
 Sets up (finding every object by name first and reusing it, since organizations cannot be
 deleted):
 
-* two enterprise client organizations, each with one client-managed user and one api-key token,
+* two managed client organizations, created inside the sponsored group by the sponsor's service
+  account (a client-managed org-admin user, authenticated by its api-secret key), each with one
+  client-managed user and one api-key token minted by that same service account,
 * a read grant on one dataset of a sponsor organization's private cluster,
 * a sponsored group in the sponsor organization holding that grant and both client organizations.
+
+Everything, including the consumption feed reads, runs as the sponsor service account: the
+platform admin is not a member of a managed organization and cannot read its feed.
 
 It then proves each minted key through the real MCP server, reads the consumption feeds (consumer
 and sponsor side) as a positive control, and writes the gateway's static mapping plus the key files
 and a non-secret ``fixture.json`` into the state directory.
 
-Secrets: tokens are read from a markdown file, never from argv, never printed. Key files are
+Secrets: the sponsor key is read from a key file, never from argv, never printed. Key files are
 written mode 600 atomically. Only token identifiers are printed.
 
 The reusable read helpers (``find_consumption_events``, ``call_mcp_tool``, ``probe_key``) are
@@ -24,12 +29,10 @@ import argparse
 import base64
 import json
 import os
-import re
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,7 +56,6 @@ MAX_FEED_PAGES = 20
 FEED_SKEW = timedelta(seconds=60)
 FORGED_JOB_ID = 999999999
 MAX_JOB_LOOKUPS = 15
-STAGING_MARKER = "for the staging environment"
 
 
 class FixtureError(Exception):
@@ -73,26 +75,38 @@ class AlienApiError(FixtureError):
 
 @dataclass(frozen=True)
 class ClientSpec:
-    """One client persona: an enterprise org with one client-managed user."""
+    """One client persona: a managed org with one client-managed user.
+
+    ``email`` is the persona's identity at the IdPs (what the gateway's mapping matches);
+    ``alien_email`` is the client-managed user's own address on the Alien platform.
+    """
 
     name: str
     email: str
+    alien_email: str
     key_file: str
 
     @property
     def org_name(self) -> str:
-        return f"mcp-gateway-e2e-{self.name}"
+        return f"mcp-gateway-e2e-managed-{self.name}"
 
 
 CLIENTS: tuple[ClientSpec, ...] = (
-    ClientSpec("client-x", "alice@client-x.test", "client-x-alice.key"),
-    ClientSpec("client-y", "bob@client-y.test", "client-y-bob.key"),
+    ClientSpec(
+        "client-x",
+        "alice@client-x.test",
+        "alice@managed-client-x.test",
+        "managed-client-x-alice.key",
+    ),
+    ClientSpec(
+        "client-y", "bob@client-y.test", "bob@managed-client-y.test", "managed-client-y-bob.key"
+    ),
 )
 
 
 @dataclass(frozen=True)
 class Config:
-    tokens_file: Path
+    sponsor_key_file: Path
     api_base: str
     mcp_url: str
     sponsor_org_id: int
@@ -132,36 +146,6 @@ def log(message: str) -> None:
 # --------------------------------------------------------------------------------------------
 # Credentials and files
 # --------------------------------------------------------------------------------------------
-
-
-def read_dev_tokens(tokens_file: Path) -> tuple[str, str]:
-    """Return (admin, normal) dev tokens from the ``### Access`` section of a markdown file.
-
-    Only lines before the one mentioning the staging environment count (the dev pair).
-    """
-    in_access = False
-    admin: str | None = None
-    normal: str | None = None
-    for line in tokens_file.read_text(encoding="utf-8").splitlines():
-        if line.strip().lower().startswith("### access"):
-            in_access = True
-            continue
-        if not in_access:
-            continue
-        if STAGING_MARKER in line:
-            break
-        admin_match = re.match(r"\s*Admin user:\s*(oat_\S+)", line)
-        normal_match = re.match(r"\s*Normal user:\s*(oat_\S+)", line)
-        if admin_match and admin is None:
-            admin = admin_match.group(1)
-        elif normal_match and normal is None:
-            normal = normal_match.group(1)
-    if admin is None or normal is None:
-        raise FixtureError(
-            f"dev 'Admin user' / 'Normal user' tokens not found in the Access section of "
-            f"{tokens_file}"
-        )
-    return admin, normal
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -323,50 +307,47 @@ def verify_dataset(api: FixtureApi, cfg: Config) -> None:
     log(f"dataset {cfg.cluster_id}:{cfg.dataset_id} present")
 
 
-def ensure_org(api: FixtureApi, admin_id: int, spec: ClientSpec, tally: Tally) -> dict[str, Any]:
-    """Find the client org by name (admin listing), else create it; make it enterprise."""
-    org = _find_org(api, spec.org_name)
+def ensure_org(
+    sponsor: FixtureApi, cfg: Config, group_id: int, spec: ClientSpec, tally: Tally
+) -> dict[str, Any]:
+    """Find the managed client org by name among the group's organizations, else create it
+    through the group's managed-organization route (which also attaches it to the group)."""
+    org = _find_group_org(sponsor, cfg, group_id, spec.org_name)
     if org is None:
-        result = api.request(
-            "POST",
-            "/organizations",
-            json_body={
-                "name": spec.org_name,
-                "slug": spec.org_name,
-                "description": "mcp-gateway end-to-end fixture client organization",
-            },
-            handled=(409,),
+        created = require_dict(
+            sponsor.post(
+                f"/groups/{group_id}/organizations/managed",
+                {"name": spec.org_name, "slug": spec.org_name},
+                org_id=cfg.sponsor_org_id,
+            ),
+            "create managed organization",
         )
-        if result.status == 409:
-            org = _find_org(api, spec.org_name)
-            if org is None:
-                raise FixtureError(f"{spec.org_name}: create answered 409 but no org is listed")
-        else:
-            tally.add(f"organization {spec.org_name}")
-            org = require_dict(result.data, "create organization")
-    org_id = int(org["id"])
-    member_ids = {int(o["id"]) for o in require_list(api.get("/organizations"), "my organizations")}
-    if org_id not in member_ids:
+        tally.add(f"managed organization {spec.org_name} (id {created['id']})")
+        org = created
+    if org.get("accountType") != "managed":
         raise FixtureError(
-            f"organization {spec.org_name} (id {org_id}) exists but admin user {admin_id} is not "
-            "a member; cannot reuse it"
+            f"organization {spec.org_name} (id {org['id']}) is {org.get('accountType')!r}, "
+            "not managed"
         )
-    if org.get("accountType") != "enterprise":
-        api.patch(f"/organizations/{org_id}", {"accountType": "enterprise"}, org_id=org_id)
-        tally.add(f"accountType=enterprise on organization {org_id}")
-    return {"id": org_id, "name": spec.org_name}
+    return {"id": int(org["id"]), "name": spec.org_name}
 
 
-def _find_org(api: FixtureApi, name: str) -> dict[str, Any] | None:
-    orgs = require_list(api.get("/admin/organizations"), "admin organizations")
-    matches = [o for o in orgs if o.get("name") == name or o.get("slug") == name]
+def _find_group_org(
+    sponsor: FixtureApi, cfg: Config, group_id: int, name: str
+) -> dict[str, Any] | None:
+    orgs = require_list(
+        sponsor.get(f"/groups/{group_id}/organizations", org_id=cfg.sponsor_org_id),
+        "group organizations",
+    )
+    matches = [o for o in orgs if o.get("name") == name]
     if len(matches) > 1:
-        raise FixtureError(f"{len(matches)} organizations match name/slug {name!r}")
+        raise FixtureError(f"{len(matches)} organizations of group {group_id} are named {name!r}")
     return matches[0] if matches else None
 
 
-def ensure_user(api: FixtureApi, org_id: int, email: str, tally: Tally) -> int:
-    users = require_list(api.get(f"/organizations/{org_id}/users", org_id=org_id), "org users")
+def ensure_user(api: FixtureApi, org_id: int, spec: ClientSpec, tally: Tally) -> int:
+    email = spec.alien_email
+    users = require_list(api.get(f"/organizations/{org_id}/users"), "org users")
     for user in users:
         if str(user.get("email", "")).lower() == email:
             if user.get("userType") != "client-managed":
@@ -379,7 +360,6 @@ def ensure_user(api: FixtureApi, org_id: int, email: str, tally: Tally) -> int:
             "email": email,
             "description": "mcp-gateway end-to-end fixture user",
         },
-        org_id=org_id,
     )
     user_id = int(require_dict(created, "create user")["id"])
     tally.add(f"client-managed user {email} (id {user_id}) in org {org_id}")
@@ -387,9 +367,7 @@ def ensure_user(api: FixtureApi, org_id: int, email: str, tally: Tally) -> int:
 
 
 def list_named_tokens(api: FixtureApi, org_id: int, user_id: int) -> list[dict[str, Any]]:
-    tokens = require_list(
-        api.get(f"/organizations/{org_id}/users/{user_id}/tokens", org_id=org_id), "user tokens"
-    )
+    tokens = require_list(api.get(f"/organizations/{org_id}/users/{user_id}/tokens"), "user tokens")
     return [t for t in tokens if str(t.get("name", "")).endswith(TOKEN_NAME)]
 
 
@@ -406,39 +384,36 @@ def probe_key(api_base: str, key: str) -> dict[str, Any] | None:
 
 
 def ensure_key(
-    admin: FixtureApi, cfg: Config, org_id: int, user_id: int, spec: ClientSpec, tally: Tally
+    sponsor: FixtureApi, cfg: Config, org_id: int, user_id: int, spec: ClientSpec, tally: Tally
 ) -> tuple[str, bool]:
     """Return (token identifier, minted). Reuse a live key unless rotation is requested."""
     key_path = cfg.state_dir / spec.key_file
-    named = list_named_tokens(admin, org_id, user_id)
+    named = list_named_tokens(sponsor, org_id, user_id)
     existing_key = read_key_file(key_path)
     if existing_key is not None and named and not cfg.rotate:
         me = probe_key(cfg.api_base, existing_key)
         if me is not None and me.get("id") == user_id:
             if me.get("currentOrganizationId") != org_id:
-                raise FixtureError(f"{spec.email}: key's current org is not {org_id}")
+                raise FixtureError(f"{spec.alien_email}: key's current org is not {org_id}")
             identifier = _identifier_of(existing_key, named)
-            _revoke_others(admin, org_id, user_id, named, identifier)
-            log(f"reused key for {spec.email}: token {identifier}")
+            _revoke_others(sponsor, org_id, user_id, named, identifier)
+            log(f"reused key for {spec.alien_email}: token {identifier}")
             return identifier, False
     for token in named:
-        admin.delete(
-            f"/organizations/{org_id}/users/{user_id}/tokens/{token['identifier']}", org_id=org_id
-        )
-        log(f"revoked stale token {token['identifier']} of {spec.email}")
+        sponsor.delete(f"/organizations/{org_id}/users/{user_id}/tokens/{token['identifier']}")
+        log(f"revoked stale token {token['identifier']} of {spec.alien_email}")
     minted = require_dict(
-        admin.post(
+        sponsor.post(
             f"/organizations/{org_id}/users/{user_id}/tokens",
             {"name": TOKEN_NAME, "scope": "api-key"},
-            org_id=org_id,
         ),
         "mint token",
     )
     raw = minted.get("token")
     if not isinstance(raw, str) or not raw.startswith("oat_"):
-        raise FixtureError(f"mint token for {spec.email}: no oat_ token in the answer")
+        raise FixtureError(f"mint token for {spec.alien_email}: no oat_ token in the answer")
     write_atomic(key_path, raw + "\n", 0o600)
-    tally.add(f"token {minted['identifier']} for {spec.email}")
+    tally.add(f"token {minted['identifier']} for {spec.alien_email}")
     return str(minted["identifier"]), True
 
 
@@ -459,14 +434,11 @@ def _identifier_of(key: str, named: list[dict[str, Any]]) -> str:
 
 
 def _revoke_others(
-    admin: FixtureApi, org_id: int, user_id: int, named: list[dict[str, Any]], keep: str
+    sponsor: FixtureApi, org_id: int, user_id: int, named: list[dict[str, Any]], keep: str
 ) -> None:
     for token in named:
         if str(token["identifier"]) != keep:
-            admin.delete(
-                f"/organizations/{org_id}/users/{user_id}/tokens/{token['identifier']}",
-                org_id=org_id,
-            )
+            sponsor.delete(f"/organizations/{org_id}/users/{user_id}/tokens/{token['identifier']}")
             log(f"revoked duplicate token {token['identifier']}")
 
 
@@ -738,7 +710,8 @@ def read_consumption_events(
 ) -> list[dict[str, Any]]:
     """The org's MCP consumption feed from ``start`` on (ascending; every page is read).
 
-    The caller must be admin of the org. Paging is bounded by ``MAX_FEED_PAGES``.
+    The caller must be able to read the org's feed (a member admin, or the sponsor of a managed
+    org). Paging is bounded by ``MAX_FEED_PAGES``.
     """
     events: list[dict[str, Any]] = []
     cursor: str | None = None
@@ -860,7 +833,7 @@ def find_existing_job_id(api: FixtureApi, org_id: int) -> int | None:
 
 
 def probe_forged_headers(
-    admin: FixtureApi,
+    sponsor: FixtureApi,
     cfg: Config,
     key: str,
     consumer_org_id: int,
@@ -877,7 +850,7 @@ def probe_forged_headers(
             {"x-job-id": str(FORGED_JOB_ID), "x-organization-id": str(foreign_org_id)},
         ),
     ]
-    real_job = find_existing_job_id(admin, cfg.sponsor_org_id)
+    real_job = find_existing_job_id(sponsor, cfg.sponsor_org_id)
     if real_job is not None:
         cases.append((f"existing job id {real_job}", {"x-job-id": str(real_job)}))
     outcomes: list[dict[str, Any]] = []
@@ -895,7 +868,7 @@ def probe_forged_headers(
         }
         if outcome.status == 200 and outcome.is_error is False:
             events = find_consumption_events(
-                admin,
+                sponsor,
                 consumer_org_id,
                 lambda e: (e.get("user") or {}).get("id") == consumer_user_id,
                 since=since,
@@ -948,6 +921,7 @@ def write_outputs(cfg: Config, group_id: int, grant_id: int, clients: list[Clien
                 "org_name": c.spec.org_name,
                 "user_id": c.user_id,
                 "email": c.spec.email,
+                "alien_email": c.spec.alien_email,
                 "token_identifier": c.token_identifier,
                 "abilities": c.abilities,
                 "key_file": c.spec.key_file,
@@ -964,65 +938,47 @@ def write_outputs(cfg: Config, group_id: int, grant_id: int, clients: list[Clien
 # --------------------------------------------------------------------------------------------
 
 
-@contextmanager
-def restored_current_org(admin: FixtureApi) -> Iterator[int]:
-    """Yield the admin's current org id; switch back to it on exit and verify."""
-    me = require_dict(admin.get("/users/me"), "admin users/me")
-    original = int(me["currentOrganizationId"])
-    log(f"admin user {me['id']} current org at start: {original}")
-    try:
-        yield int(me["id"])
-    finally:
-        admin.post(f"/organizations/{original}/switch")
-        after = require_dict(admin.get("/users/me"), "admin users/me")
-        if after.get("currentOrganizationId") != original:
-            raise FixtureError(
-                f"failed to restore current org {original}; is {after.get('currentOrganizationId')}"
-            )
-        log(f"admin current org restored: {original}")
-
-
 def run(cfg: Config) -> int:
-    admin_token, normal_token = read_dev_tokens(cfg.tokens_file)
+    sponsor_key = read_key_file(cfg.sponsor_key_file)
+    if sponsor_key is None:
+        raise FixtureError(f"sponsor key file {cfg.sponsor_key_file} does not exist")
     ensure_private_dir(cfg.state_dir)
-    admin = FixtureApi(cfg.api_base, admin_token)
-    normal = FixtureApi(cfg.api_base, normal_token)
+    sponsor = FixtureApi(cfg.api_base, sponsor_key)
     tally = Tally()
     try:
-        normal_me = require_dict(normal.get("/users/me"), "normal users/me")
-        log(f"normal user sanity read ok: user {normal_me['id']}")
-        with restored_current_org(admin) as admin_id:
-            clients, group_id, grant_id = build_chain(admin, cfg, admin_id, tally)
-            started = datetime.now(UTC)
-            for client in clients:
-                key = _require_key(cfg, client.spec)
-                prove_mcp_access(cfg, key, client.spec.email)
-            for client in clients:
-                read_back_feeds(admin, cfg, group_id, client, started)
-            if cfg.probe_forged_headers:
-                run_probe(admin, cfg, clients)
-            write_outputs(cfg, group_id, grant_id, clients)
+        sponsor_me = require_dict(sponsor.get("/users/me"), "sponsor users/me")
+        log(f"sponsor service account: user {sponsor_me['id']} {sponsor_me.get('userType')}")
+        clients, group_id, grant_id = build_chain(sponsor, cfg, tally)
+        started = datetime.now(UTC)
+        for client in clients:
+            key = _require_key(cfg, client.spec)
+            prove_mcp_access(cfg, key, client.spec.alien_email)
+        for client in clients:
+            read_back_feeds(sponsor, cfg, group_id, client, started)
+        if cfg.probe_forged_headers:
+            run_probe(sponsor, cfg, clients)
+        write_outputs(cfg, group_id, grant_id, clients)
     finally:
-        admin.close()
-        normal.close()
+        sponsor.close()
     print_summary(cfg, tally, group_id, grant_id, clients)
     return 0
 
 
 def build_chain(
-    admin: FixtureApi, cfg: Config, admin_id: int, tally: Tally
+    sponsor: FixtureApi, cfg: Config, tally: Tally
 ) -> tuple[list[ClientState], int, int]:
-    verify_dataset(admin, cfg)
-    orgs = [ensure_org(admin, admin_id, spec, tally) for spec in CLIENTS]
-    grant_id = ensure_grant(admin, cfg, tally)
-    group = ensure_group(admin, cfg, tally)
-    group_id = configure_group(admin, cfg, group, grant_id, [int(o["id"]) for o in orgs], tally)
+    verify_dataset(sponsor, cfg)
+    grant_id = ensure_grant(sponsor, cfg, tally)
+    group = ensure_group(sponsor, cfg, tally)
+    group_id = int(group["id"])
+    orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in CLIENTS]
+    configure_group(sponsor, cfg, group, grant_id, [int(o["id"]) for o in orgs], tally)
     clients: list[ClientState] = []
     for spec, org in zip(CLIENTS, orgs, strict=True):
-        user_id = ensure_user(admin, int(org["id"]), spec.email, tally)
-        identifier, minted = ensure_key(admin, cfg, int(org["id"]), user_id, spec, tally)
+        user_id = ensure_user(sponsor, int(org["id"]), spec, tally)
+        identifier, minted = ensure_key(sponsor, cfg, int(org["id"]), user_id, spec, tally)
         key = _require_key(cfg, spec)
-        abilities = verify_key(cfg, key, user_id, int(org["id"]), spec.email)
+        abilities = verify_key(cfg, key, user_id, int(org["id"]), spec.alien_email)
         clients.append(ClientState(spec, int(org["id"]), user_id, identifier, abilities, minted))
     return clients, group_id, grant_id
 
@@ -1034,10 +990,10 @@ def _require_key(cfg: Config, spec: ClientSpec) -> str:
     return key
 
 
-def run_probe(admin: FixtureApi, cfg: Config, clients: list[ClientState]) -> None:
+def run_probe(sponsor: FixtureApi, cfg: Config, clients: list[ClientState]) -> None:
     alice, bob = clients[0], clients[1]
     outcomes = probe_forged_headers(
-        admin, cfg, _require_key(cfg, alice.spec), alice.org_id, alice.user_id, bob.org_id
+        sponsor, cfg, _require_key(cfg, alice.spec), alice.org_id, alice.user_id, bob.org_id
     )
     write_atomic(
         cfg.state_dir / "forged-probe.json", json.dumps(outcomes, indent=2, default=str), 0o600
@@ -1060,7 +1016,12 @@ def print_summary(
 
 def parse_args(argv: Sequence[str]) -> Config:
     parser = argparse.ArgumentParser(description=DESCRIPTION)
-    parser.add_argument("--tokens-file", type=Path, required=True)
+    parser.add_argument(
+        "--sponsor-key-file",
+        type=Path,
+        required=True,
+        help="file holding the api-secret key of the sponsor's service account",
+    )
     parser.add_argument("--api-base", required=True)
     parser.add_argument("--mcp-url", required=True)
     parser.add_argument("--sponsor-org-id", type=int, required=True)
@@ -1075,7 +1036,7 @@ def parse_args(argv: Sequence[str]) -> Config:
     )
     args = parser.parse_args(argv)
     return Config(
-        tokens_file=args.tokens_file,
+        sponsor_key_file=args.sponsor_key_file,
         api_base=args.api_base,
         mcp_url=args.mcp_url,
         sponsor_org_id=args.sponsor_org_id,
