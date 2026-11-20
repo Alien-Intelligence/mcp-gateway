@@ -29,6 +29,9 @@ Anything else (other status, extra or missing keys, wrong types) is a resolver e
 The URL must be ``https`` (the answer carries the API key). ``allow_insecure_http`` lifts that
 for dev and test stacks only.
 
+A TLS certificate the gateway cannot verify is a configuration error: ``ResolverError`` at
+once, never retried.
+
 Failure handling: each attempt has a timeout and the whole resolution (attempts and backoff
 pauses) has ``total_timeout_seconds``, after which the resolver raises
 ``ResolverUnavailableError``. Connection errors, timeouts, 429, 502, 503 and
@@ -104,6 +107,18 @@ class _Deny(BaseModel):
 _DECISION: TypeAdapter[_Allow | _Deny] = TypeAdapter(
     Annotated[_Allow | _Deny, Field(discriminator="decision")]
 )
+
+
+def _is_certificate_failure(exc: BaseException) -> bool:
+    """True when a transport error was caused by a failed certificate verification."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class _TransientError(Exception):
@@ -190,6 +205,9 @@ class WebhookResolver:
         except (TimeoutError, httpx.TimeoutException) as exc:
             raise _TransientError("timeout") from exc
         except httpx.TransportError as exc:
+            if _is_certificate_failure(exc):
+                # Retrying cannot fix a certificate the gateway does not trust.
+                raise ResolverError("webhook TLS certificate verification failed") from exc
             raise _TransientError(type(exc).__name__) from exc
         except httpx.HTTPError as exc:
             raise ResolverError(f"webhook request failed ({type(exc).__name__})") from exc

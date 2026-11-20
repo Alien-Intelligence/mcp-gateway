@@ -384,7 +384,9 @@ async def test_mtls_rejects_a_client_certificate_from_an_untrusted_ca(tmp_path: 
         await server.stop()
 
 
-async def test_server_certificate_from_an_unknown_ca_is_not_trusted(tmp_path: Path) -> None:
+async def test_server_certificate_from_an_unknown_ca_is_a_config_error_not_retried(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     pki = make_pki(tmp_path)
     server = WebhookServer()
     server.responders = [json_responder(ALLOW)]
@@ -398,14 +400,16 @@ async def test_server_certificate_from_an_unknown_ca_is_not_trusted(tmp_path: Pa
                 "client_cert_file": pki.client_cert,
                 "client_key_file": pki.client_key,
             },
-            max_attempts=1,
+            max_attempts=3,
         )
         resolver = WebhookResolver(config, UPSTREAMS)
         try:
-            with pytest.raises(ResolverUnavailableError):
+            with pytest.raises(ResolverError, match="verif") as caught:
                 await resolver.resolve(identity())
+            assert not isinstance(caught.value, ResolverUnavailableError)
         finally:
             await resolver.aclose()
+        assert not [r for r in caplog.records if "webhook attempt" in r.getMessage()]
     finally:
         await server.stop()
 
