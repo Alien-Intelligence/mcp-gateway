@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hashlib
 import logging
 import os
 import time
@@ -18,11 +19,13 @@ from unit.conftest import base_config_dict, config_from
 from unit.test_app import client_for
 
 from mcp_gateway.app import create_app
-from mcp_gateway.config import ResolverCacheConfig
+from mcp_gateway.config import RateLimitsConfig, ResolverCacheConfig, TokenBucketConfig
 from mcp_gateway.identity import Identity
+from mcp_gateway.ratelimit import BucketSpec, build_rate_limiter
 from mcp_gateway.resolver import CachingResolver, Credential, Denied
-from mcp_gateway.resolver.cache import cache_key
+from mcp_gateway.resolver.cache import cache_key, canonical_cache_key
 from mcp_gateway.state import State, StateUnavailableError, build_state
+from mcp_gateway.state.redis_cache import RedisCacheStore
 
 pytestmark = pytest.mark.integration
 
@@ -157,6 +160,21 @@ class Backend:
 def cached(state: State, backend: Backend) -> CachingResolver:
     assert state.cache is not None
     return CachingResolver(backend, ResolverCacheConfig.model_validate(CACHE_CONFIG), state.cache)
+
+
+def store_with_key(state: State, key: bytes) -> RedisCacheStore:
+    """A cache store on the state's Redis, prefix and key-name digest, sealing with ``key``.
+
+    Key names derive from the encryption key, so two replicas with different keys never meet on
+    the same name. Sharing the digest and changing only the sealing key is how a test puts a
+    value sealed by another key where this replica looks.
+    """
+    assert state.redis is not None and state.key_prefix is not None and state.digest is not None
+    return RedisCacheStore(state.redis, state.key_prefix, key, state.digest)
+
+
+def resolver_on(store: RedisCacheStore, backend: Backend) -> CachingResolver:
+    return CachingResolver(backend, ResolverCacheConfig.model_validate(CACHE_CONFIG), store)
 
 
 # --- sessions ---------------------------------------------------------------------------
@@ -365,14 +383,15 @@ async def test_an_entry_encrypted_with_another_key_is_a_miss_and_is_deleted(
     prefix: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    writer = make_state(key=os.urandom(32))
-    reader = make_state(key=os.urandom(32))
-    await cached(writer, Backend(credential())).resolve(identity())
+    state = make_state()
+    writer = store_with_key(state, os.urandom(32))
+    await resolver_on(writer, Backend(credential())).resolve(identity())
     assert len([key async for key in admin.scan_iter(match=f"{prefix}c:*")]) == 1
 
     backend = Backend(credential())
+    reader = store_with_key(state, os.urandom(32))
     with caplog.at_level(logging.WARNING, logger="mcp_gateway.state.redis_cache"):
-        _, how = await cached(reader, backend).resolve_detailed(identity())
+        _, how = await resolver_on(reader, backend).resolve_detailed(identity())
     assert how == "miss"
     assert backend.calls == 1
     assert [r.getMessage() for r in caplog.records][0].startswith(
@@ -419,6 +438,42 @@ async def test_redis_holds_no_identifier_and_no_api_key_in_clear(
     for secret in (API_KEY, SUBJECT, EMAIL, SESSION, ISSUER, "client-x", UP + "\x1f"):
         assert secret not in everything
     assert {key.split(":")[-2] for key in dump if key.startswith(prefix)} <= {"s", "ss", "c", "cg"}
+
+
+async def test_key_names_are_keyed_digests_never_a_plain_sha256_of_an_identifier(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    """A plain hash of a known subject or session id could be recomputed by anyone who can list keys."""
+
+    def plain(*parts: str) -> str:
+        return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
+
+    state = make_state()
+    await state.sessions.bind(UP, SESSION, subject_key())
+    await cached(state, Backend(credential())).resolve(identity())
+    limits = RateLimitsConfig(
+        per_subject=TokenBucketConfig(burst=5, per_minute=60.0),
+        per_organization=TokenBucketConfig(burst=5, per_minute=60.0),
+    )
+    limiter = build_rate_limiter(limits, state)
+    assert limiter is not None
+    await limiter.acquire(
+        [
+            BucketSpec("subject", subject_key(), 5, 60.0),
+            BucketSpec("organization", "client-x", 5, 60.0),
+        ]
+    )
+
+    names = [key async for key in admin.scan_iter(match=f"{prefix}*")]
+    guessable = {
+        plain(UP, SESSION),
+        plain(subject_key()),
+        plain(canonical_cache_key(cache_key(identity()))),
+        plain("client-x"),
+    }
+    assert len(names) == 5, "binding, subject set, cache entry and two buckets"
+    for name in names:
+        assert name.rsplit(":", 1)[-1] not in guessable, name
 
 
 # --- failure ----------------------------------------------------------------------------

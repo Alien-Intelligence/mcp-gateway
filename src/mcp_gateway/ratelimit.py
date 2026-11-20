@@ -9,7 +9,6 @@ Two implementations share the algorithm. ``MemoryRateLimiter`` is exact for one 
 ``RedisRateLimiter`` keeps the buckets in Redis so several replicas share them.
 """
 
-import hashlib
 import math
 import time
 from collections.abc import Callable, Sequence
@@ -17,6 +16,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from mcp_gateway.config import RateLimitsConfig
+from mcp_gateway.state.digest import KeyDigest
 from mcp_gateway.state.errors import StateUnavailableError
 from mcp_gateway.state.redis_client import BoundedRedis
 from mcp_gateway.state.state import State
@@ -210,29 +210,26 @@ return {1, 0, 0}
 """
 
 
-def _digest(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
 class RedisRateLimiter:
     """Buckets in Redis, shared by every replica that uses the same ``key_prefix``.
 
     The Redis handle is the state backend's: it is built and closed by the state, and every call
     goes through its bounded ``run`` so the limiter shares the state's timeout and error mapping.
-    Keys hold a hash of the subject or organization, never the value. A failure raises
+    Keys hold a keyed digest of the subject or organization, never the value. A failure raises
     ``StateUnavailableError`` so the caller fails closed instead of letting traffic through
     unmetered.
     """
 
     _SCOPE_TAG: dict[Scope, str] = {"subject": "s", "organization": "o"}
 
-    def __init__(self, redis: BoundedRedis, key_prefix: str) -> None:
+    def __init__(self, redis: BoundedRedis, key_prefix: str, digest: KeyDigest) -> None:
         self._redis = redis
+        self._digest = digest
         self._script = redis.client.register_script(_ACQUIRE_LUA)
         self._prefix = key_prefix
 
     def _key(self, spec: BucketSpec) -> str:
-        return f"{self._prefix}rl:{self._SCOPE_TAG[spec.scope]}:{_digest(spec.key)}"
+        return f"{self._prefix}rl:{self._SCOPE_TAG[spec.scope]}:{self._digest(spec.key)}"
 
     async def acquire(self, buckets: Sequence[BucketSpec]) -> Decision:
         keys = [self._key(spec) for spec in buckets]
@@ -264,6 +261,6 @@ def build_rate_limiter(config: RateLimitsConfig | None, state: State) -> RateLim
         return None
     if state.redis is None:
         return MemoryRateLimiter(clock=time.monotonic)
-    if state.key_prefix is None:
-        raise ValueError("a state with a Redis client must carry its key prefix")
-    return RedisRateLimiter(state.redis, state.key_prefix)
+    if state.key_prefix is None or state.digest is None:
+        raise ValueError("a state with a Redis client must carry its key prefix and digest")
+    return RedisRateLimiter(state.redis, state.key_prefix, state.digest)

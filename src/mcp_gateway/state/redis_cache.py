@@ -1,6 +1,6 @@
 """Resolver cache shared by every replica, kept in Redis with its values encrypted.
 
-Layout (``p`` is the key prefix, ``d`` the SHA-256 of the canonical identity key):
+Layout (``p`` is the key prefix, ``d`` the keyed digest of the canonical identity key):
 
 * ``{p}c:{d}`` holds the outcome (a credential or a denial) as ``base64(nonce || ciphertext)``,
   AES-256-GCM with a random 12-byte nonce and ``d`` as associated data, so a value moved to
@@ -28,7 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, Valid
 from mcp_gateway.config import ConfigError
 from mcp_gateway.resolver.base import Credential, Denied
 from mcp_gateway.resolver.cache import CacheKey, Outcome, canonical_cache_key
-from mcp_gateway.state.digest import digest
+from mcp_gateway.state.digest import KeyDigest
 from mcp_gateway.state.redis_client import BoundedRedis, read_text_file
 
 logger = logging.getLogger(__name__)
@@ -114,8 +114,11 @@ def _deserialize(raw: bytes) -> Outcome:
 
 
 class RedisCacheStore:
-    def __init__(self, redis: BoundedRedis, prefix: str, encryption_key: bytes) -> None:
+    def __init__(
+        self, redis: BoundedRedis, prefix: str, encryption_key: bytes, digest: KeyDigest
+    ) -> None:
         self._redis = redis
+        self._digest = digest
         self._prefix = prefix
         self._cipher = AESGCM(encryption_key)
         self._put = redis.client.register_script(_PUT)
@@ -123,7 +126,7 @@ class RedisCacheStore:
 
     def _names(self, key: CacheKey) -> tuple[str, str, str]:
         """Entry key, generation key and the digest that is the entry's associated data."""
-        entry = digest(canonical_cache_key(key))
+        entry = self._digest(canonical_cache_key(key))
         return f"{self._prefix}c:{entry}", f"{self._prefix}cg:{entry}", entry
 
     def _seal(self, outcome: Outcome, entry: str) -> str:

@@ -59,4 +59,4 @@ def state_with(*failing: str, cache_down: bool = False) -> tuple[State, BrokenSe
     """A memory-like state whose session operations named in ``failing`` raise."""
     sessions = BrokenSessions(*failing)
     cache = BrokenCache() if cache_down else MemoryCacheStore(100)
-    return State(sessions=sessions, cache=cache, redis=None, key_prefix=None), sessions
+    return State(sessions=sessions, cache=cache, redis=None, key_prefix=None, digest=None), sessions

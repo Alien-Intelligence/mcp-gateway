@@ -286,14 +286,14 @@ State that must agree between replicas lives here: the session bindings (`sessio
 
 With `redis`, `sessions.max_entries` and `resolver_cache.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
 
-Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold SHA-256 digests and values hold digests or ciphertext.
+Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold keyed digests and values hold digests or ciphertext. `h(...)` below is HMAC-SHA256 under a key derived (HKDF-SHA256, `info` `mcp-gateway key names`) from the key in `encryption_key_file`, so a key name cannot be recomputed from a guessed subject or session id without that key. The consequence: every replica sharing a Redis must share the key file, and changing the key renames every key (see the rotation note below).
 
 | Key | Holds | Expiry |
 |---|---|---|
-| `{p}s:{sha256(upstream, session id)}` | `sha256(subject key)`: the binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
-| `{p}ss:{sha256(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
-| `{p}c:{sha256(identity)}` | The cached credential or denial, AES-256-GCM encrypted (random 12-byte nonce, the key digest as associated data). | The entry's TTL. |
-| `{p}cg:{sha256(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
+| `{p}s:{h(upstream, session id)}` | `h(subject key)`: the binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}ss:{h(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
+| `{p}c:{h(identity)}` | The cached credential or denial, AES-256-GCM encrypted (random 12-byte nonce, the key digest as associated data). | The entry's TTL. |
+| `{p}cg:{h(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
 
 Binding, checking and dropping a session are each one Lua script, so replicas cannot race a binding or the per-subject cap. The scripts derive the per-subject key from a stored digest: use one Redis (a primary with replicas is fine), not a sharded Redis Cluster. A cached value that cannot be decrypted (rotated key, tampering) is deleted and counted as a miss, with a warning that carries no content. Rotating `encryption_key_file` therefore empties the cache without an outage.
 
@@ -380,7 +380,7 @@ The refusal has three shapes, chosen so that the sender can read it:
 
 Why not `429` everywhere: of the failures a gateway can return, only a tool execution error reliably reaches the model, which can then wait or tell the user. The MCP TypeScript SDK and the Python SDK 1.x treat any non-2xx answer as a transport failure (the error text is generic, `Retry-After` is not read, and the failure can spill into sibling requests), and VS Code puts the whole server in an error state on any status of 300 or more. A `200` never disturbs the connection. `N` is whole seconds, at least 1. The audit line has outcome `rate_limited` and `reason` `subject` or `organization` (the bucket that takes longest to refill); the request is never forwarded.
 
-Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<sha256>` and `{p}rl:o:<sha256>`, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.redis.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
+Where the buckets live: they follow [`state`](#state). With `memory` each replica keeps its own buckets, which is exact for a single replica only; behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. Buckets that have refilled completely are dropped, so memory follows the subjects active within one refill window and needs no setting. With `redis` all replicas share one set of buckets in the same Redis (keys `{p}rl:s:<h>` and `{p}rl:o:<h>`, `h` being the same keyed digest, never the subject or organization in clear), refilled by the Redis server clock so replicas never disagree on time, and every call is bounded by `state.redis.operation_timeout_seconds`. When Redis fails the gateway fails closed: `503` with `Retry-After`, JSON-RPC error `-32013` ("The gateway's shared state is unavailable. Retry shortly.") and audit outcome `state_unavailable`; the request is never passed unmetered.
 
 ## `audit`
 
