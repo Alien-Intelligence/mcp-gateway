@@ -516,7 +516,7 @@ async def test_failure_of_a_json_body_aborts_instead_of_ending_cleanly(
     assert line["outcome"] == "upstream_stream_failed"
 
 
-async def test_event_over_the_cap_aborts_even_while_the_reply_is_owed(
+async def test_event_over_the_cap_while_the_reply_is_owed_reports_the_failure(
     two_user_dir: Path,
     transport: httpx.MockTransport,
     upstream: FakeUpstream,
@@ -530,8 +530,27 @@ async def test_event_over_the_cap_aborts_even_while_the_reply_is_owed(
     sse_responder(upstream, stream)
     with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
         async with client_for(app) as client:
-            with pytest.raises(UpstreamStreamAbortedError):
-                await client.post("/mcp", json=RPC_BODY, headers=alice)
+            response = await client.post("/mcp", json=RPC_BODY, headers=alice)
+    assert response.content.startswith(b"event: message\ndata: ")
+    assert b"x" * 20 not in response.content
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "event_too_large")
+    assert stream.closed
+
+
+async def test_event_over_the_cap_after_the_reply_aborts(
+    two_user_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    alice: dict[str, str],
+) -> None:
+    data = base_config_dict(str(two_user_dir / "mapping.json"))
+    data["limits"]["max_sse_event_bytes"] = 64
+    app = create_app(config_from(data), http_transport=transport)
+    stream = TrackedStream([REPLY, b"x" * 200, b"\n\n"])
+    sse_responder(upstream, stream)
+    async with client_for(app) as client:
+        with pytest.raises(UpstreamStreamAbortedError):
+            await client.post("/mcp", json=RPC_BODY, headers=alice)
     assert stream.closed

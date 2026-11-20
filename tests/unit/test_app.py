@@ -538,7 +538,7 @@ async def test_client_disconnect_aborts_the_upstream_request(
         await asyncio.wait_for(app(scope, receive, send), timeout=5)
     assert stream.closed, "the upstream response must be closed when the client disconnects"
     assert [m for m in sent if m["type"] == "http.response.body" and m["body"]]
-    assert audit_lines(caplog)[0]["outcome"] == "forwarded"
+    assert audit_lines(caplog)[0]["outcome"] == "client_disconnected"
 
 
 # --- upstream auth failures -----------------------------------------------------------
