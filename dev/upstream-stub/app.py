@@ -277,7 +277,12 @@ class StubApp:
             }
             return JSONResponse(rpc_result(request_id, result), headers=headers)
         if method == "tools/list":
-            return JSONResponse(rpc_result(request_id, {"tools": [{"name": n} for n in TOOLS]}))
+            return JSONResponse(
+                rpc_result(
+                    request_id,
+                    {"tools": [{"name": n, "inputSchema": {"type": "object"}} for n in TOOLS]},
+                )
+            )
         if method == "tools/call":
             name = params.get("name")
             arguments = params.get("arguments")

@@ -17,6 +17,9 @@ Authentication of the caller is configured by environment, with no defaults:
   require and verify a client certificate, i.e. mTLS).
 
 At least one of HMAC or a client CA must be configured: this service never runs open.
+
+``GET /_stats`` (unauthenticated, counters only) reports the signed resolve calls served and
+the rejected ones; it is a test aid, so keep this service on loopback or a private network.
 """
 
 import hashlib
@@ -120,11 +123,16 @@ def _find_entry(
 
 
 def create_app(settings: Settings) -> Starlette:
+    # Test aid: how many resolve calls arrived, so a test can prove a cache hit.
+    stats = {"resolve_requests": 0, "rejected_requests": 0}
+
     async def resolve(request: Request) -> Response:
         body = await request.body()
         if not signature_is_valid(settings, request.headers, body):
+            stats["rejected_requests"] += 1
             logger.warning("rejected a request with a bad or stale signature")
             return JSONResponse({"error": "invalid signature"}, status_code=401)
+        stats["resolve_requests"] += 1
         try:
             identity = json.loads(body)
             mapping = json.loads((settings.state_dir / "mapping.json").read_text(encoding="utf-8"))
@@ -148,9 +156,13 @@ def create_app(settings: Settings) -> Starlette:
     async def healthz(request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
+    async def request_stats(request: Request) -> Response:
+        return JSONResponse(stats)
+
     return Starlette(
         routes=[
             Route("/healthz", healthz, methods=["GET"]),
+            Route("/_stats", request_stats, methods=["GET"]),
             Route("/resolve", resolve, methods=["POST"]),
         ]
     )

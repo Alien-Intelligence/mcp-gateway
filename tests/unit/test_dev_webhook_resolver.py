@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from types import ModuleType
 
+import httpx
 import pytest
 import uvicorn
 
@@ -100,6 +101,33 @@ async def test_allow_and_no_mapping_over_hmac(hmac_port: int, tmp_path: Path) ->
         assert await resolver.resolve(identity(email="nobody@x.example")) == Denied("no_mapping")
     finally:
         await resolver.aclose()
+
+
+async def test_stats_count_signed_and_rejected_resolve_calls(
+    hmac_port: int, tmp_path: Path
+) -> None:
+    async def stats() -> dict[str, int]:
+        async with httpx.AsyncClient(timeout=5) as client:
+            return (await client.get(f"http://127.0.0.1:{hmac_port}/_stats")).json()
+
+    assert await stats() == {"resolve_requests": 0, "rejected_requests": 0}
+    secrets = {"good": SECRET, "bad": "not-the-secret"}
+    for name, secret_value in secrets.items():
+        secret = tmp_path / name
+        secret.write_text(secret_value)
+        config = webhook_config(
+            f"http://127.0.0.1:{hmac_port}/resolve", {"type": "hmac", "secret_file": str(secret)}
+        )
+        resolver = WebhookResolver(config, UPSTREAMS)
+        try:
+            if name == "good":
+                await resolver.resolve(identity())
+            else:
+                with pytest.raises(ResolverError):
+                    await resolver.resolve(identity())
+        finally:
+            await resolver.aclose()
+    assert await stats() == {"resolve_requests": 1, "rejected_requests": 1}
 
 
 async def test_a_wrong_secret_is_refused(hmac_port: int, tmp_path: Path) -> None:
