@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from pydantic import SecretStr
 from starlette.applications import Starlette
 
 from mcp_gateway.app import create_app
@@ -25,7 +26,7 @@ from mcp_gateway.resolver.cache import CacheKey
 from mcp_gateway.state import StateUnavailableError, build_state
 
 from .conftest import FAKE_API_KEY, FakeUpstream, TrackedStream, base_config_dict, config_from, mint
-from .state_fakes import BrokenCache, state_with
+from .state_fakes import BrokenCache, FlakyCache, state_with
 from .test_app import RPC_BODY, audit_lines, bearer, client_for, open_session
 
 INITIALIZE = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
@@ -137,6 +138,49 @@ async def test_a_cache_that_is_down_never_lets_the_resolver_run(
         response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert_state_unavailable(response)
     assert calls == [], "the resolver must not be called around a broken cache"
+    assert upstream.requests == []
+
+
+@pytest.mark.parametrize(
+    ("failing", "backend_calls"),
+    [("generation", 0), ("put", 1)],
+)
+async def test_a_cache_that_fails_on_one_operation_still_fails_closed(
+    mapping_dir: Path,
+    transport: httpx.MockTransport,
+    upstream: FakeUpstream,
+    token: str,
+    failing: str,
+    backend_calls: int,
+) -> None:
+    """The cache answered the lookup (a miss) and then failed: generation before the backend
+    is asked, or put after it answered. Either way the request is a 503 and is not forwarded."""
+    calls: list[str] = []
+
+    class CountingResolver:
+        async def resolve(self, identity: Any) -> Credential | Denied:
+            calls.append("resolve")
+            return Credential(
+                api_key=SecretStr(FAKE_API_KEY), upstream="main", labels={}, ttl_seconds=None
+            )
+
+        async def invalidate(self, identity: Any) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    state, _ = state_with()
+    cached = CachingResolver(
+        CountingResolver(),
+        ResolverCacheConfig(positive_ttl_seconds=60, negative_ttl_seconds=5, max_entries=None),
+        FlakyCache(failing),
+    )
+    app = app_with(mapping_dir, transport, state, resolver=cached)
+    async with client_for(app) as http:
+        response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
+    assert_state_unavailable(response)
+    assert len(calls) == backend_calls
     assert upstream.requests == []
 
 

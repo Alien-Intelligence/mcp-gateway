@@ -55,6 +55,36 @@ class BrokenCache:
         raise StateUnavailableError("shared state unavailable (FakeError)")
 
 
+class FlakyCache:
+    """A working cache store whose listed operations raise ``StateUnavailableError``."""
+
+    def __init__(self, *failing: str) -> None:
+        self._failing = set(failing)
+        self._inner = MemoryCacheStore(100)
+
+    def _enter(self, name: str) -> None:
+        if name in self._failing:
+            raise StateUnavailableError("shared state unavailable (FakeError)")
+
+    async def get(self, key: CacheKey) -> Outcome | None:
+        self._enter("get")
+        return await self._inner.get(key)
+
+    async def generation(self, key: CacheKey) -> str:
+        self._enter("generation")
+        return await self._inner.generation(key)
+
+    async def put(
+        self, key: CacheKey, outcome: Outcome, ttl_seconds: float, generation: str
+    ) -> None:
+        self._enter("put")
+        await self._inner.put(key, outcome, ttl_seconds, generation)
+
+    async def invalidate(self, key: CacheKey) -> None:
+        self._enter("invalidate")
+        await self._inner.invalidate(key)
+
+
 def state_with(*failing: str, cache_down: bool = False) -> tuple[State, BrokenSessions]:
     """A memory-like state whose session operations named in ``failing`` raise."""
     sessions = BrokenSessions(*failing)

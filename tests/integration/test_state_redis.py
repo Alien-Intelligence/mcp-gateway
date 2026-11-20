@@ -31,7 +31,7 @@ pytestmark = pytest.mark.integration
 
 UP = "main"
 CACHE_CONFIG = {"positive_ttl_seconds": 60, "negative_ttl_seconds": 5, "max_entries": None}
-API_KEY = "fake-alien-key-do_not_leak_0123456789"
+API_KEY = "fake-api-key-do-not-leak-0123456789"
 SUBJECT = "alice-subject-id"
 EMAIL = "alice@client-x.example"
 SESSION = "session-id-do-not-leak"
@@ -655,3 +655,70 @@ async def test_readyz_waits_for_a_connection_while_the_pool_is_saturated(
         response = await http.get("/readyz")
     assert (response.status_code, response.json()) == (200, {"status": "ready"})
     await asyncio.gather(*holders)
+
+
+# --- keys of the wrong type -------------------------------------------------------------
+
+
+async def only_key(admin: aioredis.Redis, pattern: str) -> str:
+    (key,) = [key async for key in admin.scan_iter(match=pattern)]
+    return key
+
+
+async def replace_with_wrong_type(admin: aioredis.Redis, key: str, kind: str) -> None:
+    """Leave something else under ``key``: a string where a structure is read, or a hash."""
+    await admin.delete(key)
+    if kind == "string":
+        await admin.set(key, "not a structure")
+    else:
+        await admin.hset(key, "field", "value")
+
+
+async def test_a_session_set_of_the_wrong_type_is_state_unavailable_not_a_crash(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    state = make_state()
+    await state.sessions.bind(UP, SESSION, subject_key())
+    await replace_with_wrong_type(admin, await only_key(admin, f"{prefix}ss:*"), "string")
+    with pytest.raises(StateUnavailableError):
+        await state.sessions.check(UP, SESSION, subject_key())
+    with pytest.raises(StateUnavailableError):
+        await state.sessions.bind(UP, "another-session", subject_key())
+
+
+async def test_a_session_binding_of_the_wrong_type_is_state_unavailable(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    state = make_state()
+    await state.sessions.bind(UP, SESSION, subject_key())
+    await replace_with_wrong_type(admin, await only_key(admin, f"{prefix}s:*"), "hash")
+    with pytest.raises(StateUnavailableError):
+        await state.sessions.check(UP, SESSION, subject_key())
+
+
+async def test_a_cache_generation_of_the_wrong_type_is_state_unavailable(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    state = make_state()
+    backend = Backend(credential())
+    await cached(state, backend).invalidate(identity())
+    await replace_with_wrong_type(admin, await only_key(admin, f"{prefix}cg:*"), "hash")
+    with pytest.raises(StateUnavailableError):
+        await cached(state, backend).resolve(identity())
+    assert backend.calls == 0, "the backend is not asked around a broken cache"
+
+
+async def test_a_rate_limit_bucket_of_the_wrong_type_is_state_unavailable(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    state = make_state()
+    limits = RateLimitsConfig(
+        per_subject=TokenBucketConfig(burst=5, per_minute=60.0), per_organization=None
+    )
+    limiter = build_rate_limiter(limits, state)
+    assert limiter is not None
+    spec = BucketSpec("subject", subject_key(), 5, 60.0)
+    assert (await limiter.acquire([spec])).allowed
+    await replace_with_wrong_type(admin, await only_key(admin, f"{prefix}rl:s:*"), "string")
+    with pytest.raises(StateUnavailableError):
+        await limiter.acquire([spec])
