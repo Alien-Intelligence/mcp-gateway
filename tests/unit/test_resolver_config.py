@@ -12,7 +12,7 @@ from .conftest import base_config_dict
 
 WEBHOOK: dict[str, Any] = {
     "type": "webhook",
-    "url": "https://erp.example.com/resolve",
+    "url": "https://crm.example.com/resolve",
     "auth": {"type": "hmac", "secret_file": "/run/secrets/hmac"},
     "ca_file": None,
     "default_upstream": "primary",
@@ -183,7 +183,7 @@ def test_mtls_needs_https_and_both_files() -> None:
             {
                 **WEBHOOK,
                 "auth": mtls,
-                "url": "http://erp.example.com/r",
+                "url": "http://crm.example.com/r",
                 "allow_insecure_http": True,
             }
         )

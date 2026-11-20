@@ -1,4 +1,4 @@
-"""Development webhook for the gateway's ``webhook`` resolver (a stand-in for a customer's ERP).
+"""Development webhook for the gateway's ``webhook`` resolver (a stand-in for a customer's identity-to-key service).
 
 It answers from a mapping file in ``WEBHOOK_STATE_DIR/mapping.json``, re-read on every request
 so the state can change while the stack runs::
