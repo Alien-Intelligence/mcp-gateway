@@ -314,15 +314,20 @@ class UpstreamProxy:
             step.finish(status=None, error="unreachable")
             raise RuntimeError("upstream send finished without a response or a disconnect")
 
-        step.finish(status=response.status_code)
-        audit.upstream_status = response.status_code
-        audit.upstream_request_id = response.headers.get("x-request-id")
-        audit.upstream_session = "mcp-session-id" in response.headers
-        session_id = _request_session_id(inbound_headers)
-        if response.status_code in _AUTH_REPLIES:
-            return await self._reject(response, receive, rpc, identity, resolver, audit)
-        self._track_session(method, session_id, response, subject_key)
-        return self.stream(response, rpc, session_id, audit)
+        try:
+            step.finish(status=response.status_code)
+            audit.upstream_status = response.status_code
+            audit.upstream_request_id = response.headers.get("x-request-id")
+            audit.upstream_session = "mcp-session-id" in response.headers
+            session_id = _request_session_id(inbound_headers)
+            if response.status_code in _AUTH_REPLIES:
+                return await self._reject(response, receive, rpc, identity, resolver, audit)
+            self._track_session(method, session_id, response, subject_key)
+            return self.stream(response, rpc, session_id, audit)
+        except BaseException:
+            # Nothing owns the response yet: close it rather than leak the connection.
+            await _close(response)
+            raise
 
     def _track_session(
         self,

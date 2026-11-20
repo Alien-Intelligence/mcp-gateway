@@ -8,12 +8,15 @@ from typing import Any
 import anyio
 import httpx
 import pytest
+from pydantic import SecretStr
 from starlette.types import Message
 
 from mcp_gateway.audit import AuditRecord
 from mcp_gateway.config import UpstreamConfig
+from mcp_gateway.identity import Identity
 from mcp_gateway.jsonrpc import RpcInfo
 from mcp_gateway.proxy import RelayResponse, UpstreamProxy, build_client
+from mcp_gateway.resolver.base import Credential, Denied
 from mcp_gateway.sessions import SessionRegistry
 
 from .conftest import TrackedStream
@@ -164,3 +167,68 @@ async def test_a_stream_that_ends_cleanly_is_forwarded_and_finalised_once(
     assert harness.stream.closed
     (line,) = harness.audit_lines()
     assert line["outcome"] == "forwarded"
+
+
+class ExplodingRegistry(SessionRegistry):
+    """A registry whose bookkeeping fails between the upstream answering and the relay existing."""
+
+    def bind(self, upstream: str, session_id: str, subject_key: str) -> bool:
+        raise RuntimeError("registry failed")
+
+
+class NoResolver:
+    async def resolve(self, identity: Identity) -> Credential | Denied:
+        raise AssertionError("not reached")
+
+    async def invalidate(self, identity: Identity) -> None:
+        raise AssertionError("not reached")
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_response_is_closed_when_the_setup_after_the_send_raises() -> None:
+    stream = TrackedStream([EVENT], hang=True)
+
+    def upstream_answers(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={**SSE, "mcp-session-id": "issued"}, stream=stream)
+
+    config = UpstreamConfig.model_validate(
+        {
+            "url": "https://upstream.example.com/mcp",
+            "connect_timeout_seconds": 1,
+            "read_timeout_seconds": 1,
+            "write_timeout_seconds": 1,
+            "pool_timeout_seconds": 1,
+        }
+    )
+    sessions = ExplodingRegistry(
+        max_entries=10, max_entries_per_subject=10, idle_ttl_seconds=600, clock=Clock()
+    )
+    proxy = UpstreamProxy(
+        UPSTREAM,
+        config,
+        build_client(config, httpx.MockTransport(upstream_answers)),
+        sessions,
+        65536,
+    )
+
+    async def receive() -> Message:
+        await anyio.sleep_forever()
+        raise AssertionError("unreachable")
+
+    identity = Identity(subject="alice", email=None, organization=None, groups=(), claims={})
+    with pytest.raises(RuntimeError, match="registry failed"), anyio.fail_after(5):
+        await proxy.forward(
+            method="POST",
+            inbound_headers=[],
+            body=b"{}",
+            receive=receive,
+            rpc=RpcInfo(method="initialize", id=1, tool=None, target=None, expects_reply=True),
+            credential=Credential(api_key=SecretStr("k"), upstream=UPSTREAM, labels={}),
+            identity=identity,
+            resolver=NoResolver(),
+            subject_key="alice",
+            audit=AuditRecord(http_method="POST", enabled=False),
+        )
+    assert stream.closed
