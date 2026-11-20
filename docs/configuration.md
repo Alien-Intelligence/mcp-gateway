@@ -24,7 +24,7 @@ In the tables, "required" means the key must be present. Durations are in second
 | `audit` | object | The audit log. |
 | `observability` | object | Traces and metrics export. |
 | `sessions` | object | Binding of upstream session ids to subjects. |
-| `policies` | object | Origin policy. |
+| `policies` | object | Origin policy and tool policy. |
 
 `GET /healthz` answers `{"status":"ok"}` without authentication.
 
@@ -239,6 +239,7 @@ Gateway-made errors: an upstream `401` or `402` is never relayed; the client get
 | `max_request_body_bytes` | integer | gt 0 | Larger bodies get `413` without reaching an upstream. |
 | `request_body_timeout_seconds` | number | gt 0 | The whole body must arrive within it, else `408`. |
 | `max_sse_event_bytes` | integer | gt 0 | One SSE event above it aborts the stream: the relay never buffers more than one event. |
+| `max_filtered_response_bytes` | integer | gt 0 | The largest `application/json` `tools/list` response the gateway buffers to filter it (see `policies.tools`). A larger one is replaced by a `-32005` error, never relayed. Not used while `policies.tools` is `null`. |
 
 ## `sessions`
 
@@ -255,6 +256,37 @@ An upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to.
 | Key | Type | Meaning |
 |---|---|---|
 | `allowed_origins` | list of strings | Browser origins allowed on the MCP endpoint, `scheme://host[:port]`, http or https only. Scheme and host are lowercased and a default port is dropped. An entry with a path, query, fragment or userinfo is refused, and so is `null`. A request with an `Origin` header not in the list gets `403` (`-32008`) before authentication. An empty list refuses every request that carries an `Origin`; requests without one pass. |
+| `tools` | object or `null` | Tool allow/deny policy, see below. `null` means no policy: the gateway never parses or rewrites a response, and relays bytes exactly as the upstream sent them. |
+
+### `policies.tools`
+
+```json
+{
+  "default": {"allow": ["search", "get_*"], "deny": []},
+  "rules": [
+    {"match": {"organization": "example-org"}, "allow": null, "deny": ["delete_*"]},
+    {"match": {"label": {"name": "tier", "value": "basic"}}, "allow": ["search"], "deny": []}
+  ]
+}
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `default` | object | The policy of every caller that matches no rule. |
+| `rules` | list | Tried in order; the first rule that matches is the caller's policy, `default` is not merged into it. |
+
+A policy (`default` and each rule) has two required keys: `allow` is `null` (every tool is allowed) or a list of patterns (only the tools they match); `deny` is a list of patterns, and a tool that matches one is refused whatever `allow` says. A rule adds `match`, which is exactly one of `{"organization": "<value>"}`, compared with the organization claim of the token, or `{"label": {"name": "<name>", "value": "<value>"}}`, compared with the labels the credential resolver returned. A caller without an organization claim never matches an `organization` rule.
+
+A pattern is a tool name, or a name with `*` standing for any run of characters (`get_*`, `*_read`, `a*b`). `*` is the only wildcard: every other character, regular-expression characters included, is literal. A pattern is 1 to 256 characters with no whitespace or control characters.
+
+What a caller sees:
+
+- `tools/call` of a tool outside its policy: HTTP `200` with JSON-RPC error `-32602`, message `Unknown tool: <name>`, the request id. A denied tool answers exactly like a tool that does not exist, and the request is never forwarded. Audit outcome `tool_denied`. A `tools/call` whose `params.name` is missing or not a string is refused the same way with message `Invalid params`, because the gateway never forwards what it cannot check. A `tools/call` without an id cannot be answered in the body, so the refusal is HTTP `400` with `id` `null`.
+- `tools/list`: the upstream result is relayed with the tools outside the policy removed (a tool without a string `name` is removed too). Every other field, `ttlMs` and `nextCursor` included, is untouched, except `cacheScope`: when the result has that key it is set to `"private"` (a filtered list varies per caller); a result without it stays without it. The same applies to a JSON response and to the event that carries the reply in an SSE stream; the other events of the stream (progress, notifications) are relayed byte for byte. An upstream JSON-RPC error is relayed unchanged.
+- A `tools/list` reply the gateway cannot filter (not JSON, not the expected shape, a different id, a content encoding other than identity, larger than `limits.max_filtered_response_bytes`, an SSE event larger than `limits.max_sse_event_bytes` once rewritten) is never relayed as it came. The client gets HTTP `200` with JSON-RPC error `-32005` ("The gateway could not apply its tool policy to this response.") and the request id, as a JSON body or as the reply event of the stream. Audit outcome `tool_policy_failed`, with the failure class in `reason`. Only successful (2xx) upstream responses are filtered.
+- A JSON-RPC batch (an array body) that holds a `tools/call` or a `tools/list` is refused with HTTP `400`, `-32600`, "Batched tool requests are not accepted. Send one request per call.", and is not forwarded. Audit outcome `batch_refused`. Batches of other methods are forwarded.
+
+The policy runs after the credential is resolved and the session checked, before the request is forwarded.
 
 ## `audit`
 
@@ -281,7 +313,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `tool` | string or null | `params.name` of a `tools/call`. |
 | `status` | integer | HTTP status the gateway answered (the upstream's for a relayed response, `499` when the client left). |
 | `outcome` | string | See below. |
-| `reason` | string or null | Machine reason: a resolver denial reason, or the failure class of a broken stream. |
+| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a `tools/list` reply the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name. |
 | `upstream` | string or null | Upstream name, once one was chosen. |
 | `latency_ms` | number | From receipt to the end of the response (the end of the stream for SSE). |
 | `upstream_status` | integer or null | Status the upstream answered. |
@@ -412,7 +444,8 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
   "limits": {
     "max_request_body_bytes": 1048576,
     "request_body_timeout_seconds": 30,
-    "max_sse_event_bytes": 65536
+    "max_sse_event_bytes": 65536,
+    "max_filtered_response_bytes": 1048576
   },
   "audit": {"enabled": true},
   "observability": {
@@ -428,7 +461,7 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
     }
   },
   "sessions": {"max_entries": 10000, "max_entries_per_subject": 20, "idle_ttl_seconds": 1800},
-  "policies": {"allowed_origins": ["https://app.example.com"]}
+  "policies": {"allowed_origins": ["https://app.example.com"], "tools": null}
 }
 ```
 
