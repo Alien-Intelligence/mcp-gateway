@@ -3,10 +3,13 @@
 Layout (``p`` is the key prefix, ``d`` the keyed digest of the canonical identity key):
 
 * ``{p}c:{d}`` holds the outcome (a credential or a denial) as
-  ``base64(key id || nonce || ciphertext)``: AES-256-GCM with a random 12-byte nonce and ``d`` as
-  associated data, so a value moved to another entry fails to decrypt. The key id (4 bytes
-  derived from the encryption key) says which key sealed it, so a replica still holding the
-  previous key leaves the new key's entries alone and the reverse. It expires after the TTL.
+  ``base64(key id || nonce || ciphertext)``: AES-256-GCM with a random 12-byte nonce and
+  ``p || d`` as associated data, so a value moved to another entry or to another gateway's
+  prefix fails to decrypt. The key id (4 bytes derived from the encryption key) says which key
+  sealed it, so a replica still holding the previous key leaves the new key's entries alone
+  and the reverse. The absolute expiry (the writer's wall clock) is sealed inside the plaintext:
+  a value replayed into Redis without its TTL is refused once past it. Redis also expires the
+  entry after the TTL.
 * ``{p}cg:{d}`` is the invalidation generation. ``invalidate`` deletes the entry and increments
   the generation; a lookup reads the generation before asking the backend and its answer is
   written only if the generation is unchanged (one Lua script). A lookup still running on
@@ -21,6 +24,7 @@ import binascii
 import logging
 import math
 import os
+import time
 from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidTag
@@ -70,6 +74,7 @@ class _StoredCredential(BaseModel):
     upstream: str
     labels: dict[str, str]
     ttl_seconds: float | None
+    expires_at: float
 
 
 class _StoredDenial(BaseModel):
@@ -77,6 +82,7 @@ class _StoredDenial(BaseModel):
 
     kind: Literal["denied"]
     reason: str
+    expires_at: float
 
 
 _Stored = Annotated[_StoredCredential | _StoredDenial, Field(discriminator="kind")]
@@ -102,27 +108,34 @@ def key_id(encryption_key: bytes) -> bytes:
     ).derive(encryption_key)
 
 
-def _serialize(outcome: Outcome) -> str:
+def _serialize(outcome: Outcome, expires_at: float) -> str:
     if isinstance(outcome, Denied):
-        return _StoredDenial(kind="denied", reason=outcome.reason).model_dump_json()
+        return _StoredDenial(
+            kind="denied", reason=outcome.reason, expires_at=expires_at
+        ).model_dump_json()
     return _StoredCredential(
         kind="credential",
         api_key=outcome.api_key.get_secret_value(),
         upstream=outcome.upstream,
         labels=dict(outcome.labels),
         ttl_seconds=outcome.ttl_seconds,
+        expires_at=expires_at,
     ).model_dump_json()
 
 
-def _deserialize(raw: bytes) -> Outcome:
+def _deserialize(raw: bytes) -> tuple[Outcome, float]:
+    """The outcome and the absolute time (epoch seconds) after which it must not be used."""
     stored = _STORED.validate_json(raw, strict=True)
     if isinstance(stored, _StoredDenial):
-        return Denied(stored.reason)
-    return Credential(
-        api_key=SecretStr(stored.api_key),
-        upstream=stored.upstream,
-        labels=stored.labels,
-        ttl_seconds=stored.ttl_seconds,
+        return Denied(stored.reason), stored.expires_at
+    return (
+        Credential(
+            api_key=SecretStr(stored.api_key),
+            upstream=stored.upstream,
+            labels=stored.labels,
+            ttl_seconds=stored.ttl_seconds,
+        ),
+        stored.expires_at,
     )
 
 
@@ -143,16 +156,24 @@ class RedisCacheStore:
         entry = self._digest(canonical_cache_key(key))
         return f"{self._prefix}c:{entry}", f"{self._prefix}cg:{entry}", entry
 
-    def _seal(self, outcome: Outcome, entry: str) -> str:
+    def _associated_data(self, entry: str) -> bytes:
+        """Bind a value to its entry and to this gateway's prefix."""
+        return f"{self._prefix}\x1f{entry}".encode()
+
+    def _seal(self, outcome: Outcome, entry: str, expires_at: float) -> str:
         nonce = os.urandom(_NONCE_BYTES)
-        sealed = self._cipher.encrypt(nonce, _serialize(outcome).encode(), entry.encode())
+        sealed = self._cipher.encrypt(
+            nonce, _serialize(outcome, expires_at).encode(), self._associated_data(entry)
+        )
         return base64.b64encode(self._key_id + nonce + sealed).decode("ascii")
 
-    def _open(self, raw: bytes, entry: str) -> Outcome:
+    def _open(self, raw: bytes, entry: str) -> tuple[Outcome, float]:
         """Authenticate and decode ``raw`` (key id already checked). Raises on any failure."""
         body = raw[_KEY_ID_BYTES:]
         return _deserialize(
-            self._cipher.decrypt(body[:_NONCE_BYTES], body[_NONCE_BYTES:], entry.encode())
+            self._cipher.decrypt(
+                body[:_NONCE_BYTES], body[_NONCE_BYTES:], self._associated_data(entry)
+            )
         )
 
     async def _drop(self, entry_key: str, why: str) -> None:
@@ -179,11 +200,18 @@ class RedisCacheStore:
             logger.debug("shared cache entry sealed by another key; treated as a miss")
             return None
         try:
-            return self._open(raw, entry)
+            outcome, expires_at = self._open(raw, entry)
         except (InvalidTag, ValueError, ValidationError) as exc:
             # Our key id on a value that does not authenticate: it was altered or truncated.
             await self._drop(entry_key, f"failed authentication ({type(exc).__name__})")
             return None
+        if expires_at <= time.time():
+            # Redis' TTL did not do its job (a replay without TTL, a persisted dump restored
+            # late): the sealed expiry is the authority.
+            logger.debug("shared cache entry past its sealed expiry; dropped")
+            await self._redis.run(self._redis.client.delete(entry_key))
+            return None
+        return outcome
 
     async def generation(self, key: CacheKey) -> str:
         _, generation_key, _ = self._names(key)
@@ -198,7 +226,7 @@ class RedisCacheStore:
         stored = await self._redis.run(
             self._put(
                 keys=[entry_key, generation_key],
-                args=[generation, self._seal(outcome, entry), ttl_ms],
+                args=[generation, self._seal(outcome, entry, time.time() + ttl_seconds), ttl_ms],
             )
         )
         if stored == 0:

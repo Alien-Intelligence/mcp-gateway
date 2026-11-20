@@ -438,6 +438,48 @@ async def test_garbage_in_an_entry_is_a_miss_and_is_deleted(
     assert await admin.exists(entry) == 0
 
 
+async def test_a_replayed_ciphertext_past_its_expiry_is_a_miss(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    """Redis' TTL is not the only clock: the expiry rides inside the sealed value."""
+    state = make_state()
+    await cached(state, Backend(credential(ttl=0.3))).resolve(identity())
+    (entry,) = [key async for key in admin.scan_iter(match=f"{prefix}c:*")]
+    sealed = await admin.get(entry)
+    assert sealed is not None
+
+    async def expired() -> bool:
+        return await admin.exists(entry) == 0
+
+    await eventually(expired, "the entry to expire in Redis")
+    await admin.set(entry, sealed)  # replayed with no TTL at all
+    assert state.cache is not None
+    assert await state.cache.get(cache_key(identity())) is None
+    assert await admin.exists(entry) == 0, "an expired value is not kept"
+
+
+async def test_a_ciphertext_copied_under_another_key_prefix_is_a_miss(
+    make_state: MakeState, admin: aioredis.Redis, prefix: str
+) -> None:
+    """Two gateways on one Redis and one key file must not be able to read each other's entries."""
+    key = os.urandom(32)
+    state = make_state(key=key)
+    await cached(state, Backend(credential())).resolve(identity())
+    (entry,) = [key async for key in admin.scan_iter(match=f"{prefix}c:*")]
+    sealed = await admin.get(entry)
+    assert sealed is not None and state.redis is not None and state.digest is not None
+    other_prefix = f"{prefix}other:"
+    other = RedisCacheStore(state.redis, other_prefix, key, state.digest)
+
+    copied = entry.replace(prefix, other_prefix, 1)
+    await admin.set(copied, sealed)
+    assert await other.get(cache_key(identity())) is None
+    # Positive control: the same store reads an entry it sealed itself.
+    generation = await other.generation(cache_key(identity()))
+    await other.put(cache_key(identity()), credential(), 30.0, generation)
+    assert await other.get(cache_key(identity())) is not None
+
+
 # --- what Redis holds -------------------------------------------------------------------
 
 
