@@ -24,6 +24,16 @@
           "name": "client-z",
           "path": "/clients/client-z",
           "subGroups": []
+        },
+        {
+          "name": "client-r",
+          "path": "/clients/client-r",
+          "subGroups": []
+        },
+        {
+          "name": "client-p",
+          "path": "/clients/client-p",
+          "subGroups": []
         }
       ]
     }
@@ -91,6 +101,78 @@
       },
       "groups": [
         "/clients/client-z"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol@client-x.test",
+      "email": "carol@client-x.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Carol",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-x"
+        ]
+      },
+      "groups": [
+        "/clients/client-x"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "revoked@client-r.test",
+      "email": "revoked@client-r.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Revoked",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-r"
+        ]
+      },
+      "groups": [
+        "/clients/client-r"
+      ],
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${E2E_USER_PASSWORD}",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "unpaid@client-p.test",
+      "email": "unpaid@client-p.test",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Unpaid",
+      "lastName": "Example",
+      "attributes": {
+        "org": [
+          "client-p"
+        ]
+      },
+      "groups": [
+        "/clients/client-p"
       ],
       "requiredActions": [],
       "credentials": [
@@ -562,8 +644,41 @@
             "id.token.claim": "false",
             "introspection.token.claim": "true"
           }
+        },
+        {
+          "name": "gateway-chain-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "http://localhost:18002/mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "name": "gateway-unreachable-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "http://localhost:18003/mcp",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
         }
       ]
+    },
+    {
+      "name": "mcp-write",
+      "protocol": "openid-connect",
+      "description": "Required by the chain gateway: a token without it gets 403 insufficient_scope",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
     }
   ],
   "defaultDefaultClientScopes": [
@@ -577,7 +692,8 @@
   ],
   "defaultOptionalClientScopes": [
     "offline_access",
-    "mcp-gateway"
+    "mcp-gateway",
+    "mcp-write"
   ],
   "components": {
     "org.keycloak.services.clientregistration.policy.ClientRegistrationPolicy": [
