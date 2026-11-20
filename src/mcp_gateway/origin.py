@@ -4,18 +4,15 @@ from collections.abc import Iterable
 from urllib.parse import urlsplit
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
-# The serialisation browsers send for opaque origins (sandboxed frames, file:, redirects).
-OPAQUE_ORIGIN = "null"
 
 
 def normalize_origin(value: str) -> str | None:
     """Return ``scheme://host[:port]`` with scheme and host lowercased and a default port elided.
 
     None when ``value`` is not an origin: no scheme or host, userinfo, a path, query or
-    fragment, or an invalid port.
+    fragment, or an invalid port. The opaque origin ``null`` (sandboxed frames, ``file:``,
+    redirects) is not an origin either: it identifies no site, so no policy can name it.
     """
-    if value == OPAQUE_ORIGIN:
-        return OPAQUE_ORIGIN
     if "://" not in value:
         return None
     try:

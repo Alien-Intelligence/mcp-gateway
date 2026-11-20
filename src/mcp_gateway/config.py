@@ -344,9 +344,10 @@ class PoliciesConfig(_Model):
         normalised: list[str] = []
         for item in value:
             origin = normalize_origin(item)
-            if origin is None:
+            if origin is None or urlsplit(origin).scheme not in ("http", "https"):
                 raise ValueError(
-                    "allowed_origins entries must be origins such as 'https://app.example.com'"
+                    "allowed_origins entries must be http(s) origins such as "
+                    "'https://app.example.com' ('null' is refused)"
                 )
             normalised.append(origin)
         return normalised
