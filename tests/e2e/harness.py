@@ -517,11 +517,14 @@ def audiences(claims: dict[str, Any]) -> list[str]:
 
 
 class DirectJobControl:
-    """The same tools/call sent straight to the upstream with a real key and ``x-job-id``.
+    """The same tools/call sent straight to the upstream with a real key and a foreign ``x-job-id``.
 
-    It proves the header would have been recorded had the gateway let it through. The upstream
-    is called once per session; every provider's test reads the same recorded outcome.
+    Since the backend refuses a job the caller does not own, the MCP answers ``isError`` with a
+    validation failure: that proves the header reaches the backend when nothing strips it. The
+    upstream is called once per session; every provider's test reads the same recorded outcome.
     """
+
+    REFUSAL_TEXT = "Validation failure"
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
@@ -535,7 +538,6 @@ class DirectJobControl:
     async def _run(self) -> dict[str, Any]:
         settings = self._settings
         alice = settings.personas["alice"]
-        baseline = await take_feed_baseline(settings, alice)
         call = await asyncio.to_thread(
             call_mcp_tool,
             settings.upstream_url,
@@ -545,11 +547,11 @@ class DirectJobControl:
             call_headers={"x-job-id": str(settings.existing_job_id)},
             check_arguments=False,
         )
-        assert call.status == 200 and call.is_error is False, call
-        event = await read_consumer_event(settings, alice, baseline)
+        assert call.status == 200 and call.is_error is True, call
+        assert self.REFUSAL_TEXT in call.body_excerpt, call
         return {
             "http_status": call.status,
-            "event_id": event["id"],
-            "job_id": event.get("jobId"),
-            "organization_id": event.get("organizationId"),
+            "is_error": call.is_error,
+            "refusal": self.REFUSAL_TEXT,
+            "foreign_job_id": settings.existing_job_id,
         }

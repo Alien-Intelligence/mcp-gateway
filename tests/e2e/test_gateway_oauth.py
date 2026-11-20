@@ -40,7 +40,6 @@ pytestmark = pytest.mark.e2e
 provider_param = pytest.mark.parametrize("provider", PROVIDERS, ids=lambda p: p.name)
 
 FORGED_HEADERS = {
-    "x-organization-id": "329",
     "x-oauth-access-token": "garbage",
     "x-mcp-config-id": "cfg_forged",
     "Cookie": "a=b",
@@ -216,13 +215,20 @@ async def test_forged_headers_are_not_seen_upstream(
     evidence: dict[str, Any],
 ) -> None:
     alice = settings.personas["alice"]
+    foreign_org_id = settings.personas["bob"].org_id
+    assert foreign_org_id is not None and foreign_org_id != alice.org_id
     control = await direct_job_control.outcome()
-    # Positive control: sent straight to the upstream, the header is recorded on the event.
-    assert control["job_id"] == settings.existing_job_id, control
+    # Positive control: sent straight to the upstream, a foreign job id is refused, so the header
+    # does reach the backend when nothing strips it.
+    assert control["is_error"] is True, control
 
     grant = await obtain_grant(settings, provider, alice)
     baseline = await take_feed_baseline(settings, alice)
-    forged = {"x-job-id": str(settings.existing_job_id), **FORGED_HEADERS}
+    forged = {
+        "x-job-id": str(settings.existing_job_id),
+        "x-organization-id": str(foreign_org_id),
+        **FORGED_HEADERS,
+    }
 
     async with mcp_session(provider.gateway_url, grant.token) as (client, http):
         http.headers.update(forged)
@@ -239,6 +245,8 @@ async def test_forged_headers_are_not_seen_upstream(
         persona=alice.name,
         token=grant.token_evidence,
         forged_headers=sorted(forged),
+        forged_organization_id=foreign_org_id,
+        gateway_tool_is_error=result.is_error,
         gateway_event_id=consumer["id"],
         gateway_event_job_id=consumer["jobId"],
         gateway_event_organization_id=consumer["organizationId"],
