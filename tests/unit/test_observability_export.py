@@ -2,6 +2,7 @@
 
 import copy
 import gzip
+import inspect
 import json
 import logging
 import threading
@@ -391,19 +392,19 @@ def test_the_auth_header_travels_in_clear_only_when_allowed(changes: dict[str, A
 
 
 class _ScriptedSpanExporter(SpanExporter):
-    def __init__(self, outcome: SpanExportResult | Exception) -> None:
+    def __init__(self, outcome: SpanExportResult | BaseException) -> None:
         self.outcome = outcome
         self.calls = 0
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         self.calls += 1
-        if isinstance(self.outcome, Exception):
+        if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome
 
 
 class _ScriptedMetricExporter(MetricExporter):
-    def __init__(self, outcome: MetricExportResult | Exception) -> None:
+    def __init__(self, outcome: MetricExportResult | BaseException) -> None:
         super().__init__(
             preferred_temporality={Counter: AggregationTemporality.DELTA},
             preferred_aggregation={Histogram: DropAggregation()},
@@ -415,7 +416,7 @@ class _ScriptedMetricExporter(MetricExporter):
     def export(
         self, metrics_data: MetricsData, timeout_millis: float = 10_000, **kwargs: object
     ) -> MetricExportResult:
-        if isinstance(self.outcome, Exception):
+        if isinstance(self.outcome, BaseException):
             raise self.outcome
         return self.outcome
 
@@ -471,6 +472,45 @@ def test_a_metric_export_that_raises_is_counted_and_reraised_as_is() -> None:
         wrapper.export(MetricsData(resource_metrics=[]))
     assert raised.value is boom
     assert failures.snapshot()["metrics"] == 1
+
+
+class _Stop(BaseException):
+    """Stands for KeyboardInterrupt, SystemExit or a cancellation: not an export failure."""
+
+
+def test_an_interrupt_in_an_export_is_not_counted_as_an_export_failure() -> None:
+    failures = TelemetryFailures()
+    span = _CountingSpanExporter(_ScriptedSpanExporter(_Stop()), failures)
+    with pytest.raises(_Stop):
+        span.export([])
+    metric = _CountingMetricExporter(_ScriptedMetricExporter(_Stop()), failures)
+    with pytest.raises(_Stop):
+        metric.export(MetricsData(resource_metrics=[]))
+    assert failures.snapshot() == {"record": 0, "traces": 0, "metrics": 0}
+
+
+class _TimedShutdownSpanExporter(_ScriptedSpanExporter):
+    def __init__(self) -> None:
+        super().__init__(SpanExportResult.SUCCESS)
+        self.shut_down: list[float] = []
+
+    def shutdown(self, timeout_millis: float = 30_000, **kwargs: object) -> None:
+        self.shut_down.append(timeout_millis)
+
+
+def test_the_span_wrapper_shows_the_sdk_the_timeout_it_looks_for_and_forwards_it() -> None:
+    """The SDK checks the exporter's shutdown for ``timeout_millis`` and passes the time left."""
+    inner = _TimedShutdownSpanExporter()
+    wrapper = _CountingSpanExporter(inner, TelemetryFailures())
+    assert "timeout_millis" in inspect.getfullargspec(wrapper.shutdown).args
+    wrapper.shutdown(timeout_millis=1234)
+    assert inner.shut_down == [1234]
+
+
+def test_the_span_wrapper_shuts_down_an_exporter_that_takes_no_timeout() -> None:
+    inner = _ScriptedSpanExporter(SpanExportResult.SUCCESS)
+    assert "timeout_millis" not in inspect.signature(inner.shutdown).parameters
+    _CountingSpanExporter(inner, TelemetryFailures()).shutdown(timeout_millis=1234)
 
 
 def test_the_wrappers_delegate_everything_else_to_the_wrapped_exporter() -> None:
