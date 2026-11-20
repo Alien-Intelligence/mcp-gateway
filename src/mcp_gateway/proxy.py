@@ -378,7 +378,9 @@ class RelayResponse(StreamingResponse):
             with anyio.CancelScope(shield=True):
                 await self._events.aclose()
                 self._source.close()
-                reader.leave()
+                if not delivered:
+                    # A client that got everything has nothing to be detached from.
+                    reader.leave()
                 await reader.settled()
                 self._release.record_outcome(delivered=delivered)
         if failure:
@@ -827,10 +829,10 @@ class UpstreamProxy:
             await out.put(_Abort("internal_error"))
             raise
         finally:
-            # The client's stream ends here (after what was put in it), on completion, upstream
-            # failure, cancellation and detachment alike.
-            out.close()
+            # The response is released first: the client's stream ends only afterwards, so a
+            # client that stayed to the end never leaves a read behind to be detached.
             await release.release_response()
+            out.close()
 
     async def _relay(
         self,

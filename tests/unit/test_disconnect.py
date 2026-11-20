@@ -23,6 +23,7 @@ from starlette.applications import Starlette
 from mcp_gateway.app import create_app
 from mcp_gateway.detached import DetachedReads
 from mcp_gateway.resolver import StaticResolver
+from mcp_gateway.state import MemorySessionStore
 
 from .conftest import GatedStream, TrackedStream, base_config_dict, config_from, mint, until
 from .test_app import (
@@ -66,6 +67,9 @@ class Call:
             self.leave.set()
         self.first_body = asyncio.Event()
         self.sent: list[dict[str, Any]] = []
+
+    def add_header(self, name: bytes, value: bytes) -> None:
+        self._scope["headers"].append((name, value))
 
     async def _receive(self) -> dict[str, Any]:
         if not self._delivered:
@@ -442,3 +446,35 @@ async def test_closing_the_application_cancels_and_awaits_the_detached_reads(
     assert stream.closed, "the lifespan closed the response of the read it cancelled"
     assert len(rig.reads) == 0
     assert rig.detached() == {"failed": 1}
+
+
+# --- a request that was fully delivered is not a detached one ---------------------------------
+
+
+async def test_a_request_whose_client_stayed_to_the_end_is_not_counted_as_detached(
+    mapping_dir: Path, idp: Any, token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    touched = asyncio.Event()
+
+    async def check(self: Any, upstream: str, session_id: str, subject_key: str) -> bool:
+        return True
+
+    async def slow_touch(self: Any, upstream: str, session_id: str) -> None:
+        await asyncio.sleep(0.02)  # a shared-state round trip suspends
+        touched.set()
+
+    monkeypatch.setattr(MemorySessionStore, "check", check)
+    monkeypatch.setattr(MemorySessionStore, "touch", slow_touch)
+    stream = GatedStream([EVENT])
+    stream.gate.set()
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        return sse_response(stream)
+
+    rig = Rig(mapping_dir, idp, upstream, token)
+    call = rig.call(RPC_BODY)
+    call.add_header(b"mcp-session-id", b"s-1")
+    await call.run()
+    await rig.idle()
+    assert touched.is_set(), "the session binding was refreshed"
+    assert rig.detached() == {}

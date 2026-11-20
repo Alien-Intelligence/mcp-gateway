@@ -174,11 +174,17 @@ class GatedStream(httpx.AsyncByteStream):
     """
 
     def __init__(
-        self, chunks: list[bytes], gate: asyncio.Event | None = None, *, never_ends: bool = False
+        self,
+        chunks: list[bytes],
+        gate: asyncio.Event | None = None,
+        *,
+        never_ends: bool = False,
+        close_delay: float = 0.0,
     ) -> None:
         self._chunks = chunks
         self.gate = gate or asyncio.Event()
         self._never_ends = never_ends
+        self._close_delay = close_delay
         self.started = asyncio.Event()
         self.finished = False
         self.closed = False
@@ -193,6 +199,8 @@ class GatedStream(httpx.AsyncByteStream):
         self.finished = True
 
     async def aclose(self) -> None:
+        # A real pooled-connection close suspends: so does the session touch that follows it.
+        await asyncio.sleep(self._close_delay)
         self.closed = True
 
 
