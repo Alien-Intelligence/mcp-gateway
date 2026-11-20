@@ -8,7 +8,7 @@ A gateway you host in front of Alien MCP servers.
 
 Your users sign in with their usual accounts, and your MCP endpoint lives on your own domain.
 
-Status: in development (walking skeleton). What exists today is described below; the setup tutorial will be published before the first release.
+Status: in development. What exists today is described below; the setup tutorial will be published before the first release.
 
 ## How it works
 
@@ -44,34 +44,50 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Configuration
 
-One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. See the gateway services in [`compose.yaml`](compose.yaml) for complete examples (static, chain and webhook resolvers).
+One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. The full reference, key by key with bounds and a complete example, is [`docs/configuration.md`](docs/configuration.md). The gateway services in [`compose.yaml`](compose.yaml) are working examples.
 
-- `public_url`: the canonical URL of the MCP endpoint; it must be listed in `auth.audiences`.
-- `auth`: `issuer`, `jwks_uri`, `audiences`, `algorithms` (asymmetric only), `required_scopes`, `scopes_advertised` (the scope in the 401 challenge and the metadata), clock skew, JWKS cache settings (`jwks_cache_ttl_seconds`, and `jwks_max_stale_seconds`: how long past the TTL the cached key set is still served when a refresh fails), and `identity` claim paths. `identity.email_verified` is the path of the boolean claim that must be `true` before the email is trusted; with `null` the email is never trusted and a mapping with `email` matchers is refused.
-- `resolver`: `static` today. It reads a mapping file:
+Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions` and `policies` (allowed origins).
 
-  ```json
-  {"entries": [
-    {"match": {"email": "alice@example.com"}, "api_key_file": "alice.key", "upstream": "main", "labels": {"client": "example"}},
-    {"match": {"organization": "example-org"}, "api_key_file": "example-org.key", "upstream": "main", "labels": {"client": "example-org"}}
-  ]}
-  ```
+- `sessions`: an upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to. A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
+- `policies.allowed_origins`: browser origins allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
+- Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
 
-  A `match` names exactly one of `subject`, `email`, `organization` or `group`, tried in that order. Key files are read relative to the mapping file and re-read on each request, so a rotated key is picked up without a restart. The mapping file is reloaded when it changes.
-- `upstreams`: name to URL and timeouts.
-- `limits` (`max_request_body_bytes`, `request_body_timeout_seconds`: 408 when the body does not arrive in time, `max_sse_event_bytes`: a larger SSE event aborts the stream), `audit`.
-- `sessions` (`max_entries`, `idle_ttl_seconds`): an upstream `Mcp-Session-Id` is bound in memory to the subject it was issued to. A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
-- `policies.allowed_origins`: browser origins (`scheme://host[:port]`) allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
+### Resolvers
 
-Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (`HeaderMismatch`, MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
+The resolver turns the verified identity (subject, verified e-mail, organization, groups) into an Alien API key, an upstream name and labels, or a denial (`403`). Five kinds, selected by `resolver.type`:
+
+| Type | Source of the key | Use it when |
+|---|---|---|
+| `static` | A mapping file plus one key file per entry, re-read on each request. | A few users or organizations, keys managed as files or mounted secrets. |
+| `webhook` | An HTTPS endpoint you run, called with the identity and authenticated by an HMAC signature or mutual TLS. Bounded retries with backoff, fail closed (`503`, `Retry-After`). | You already own the mapping and want it decided on your side. |
+| `store_sql` | One read-only `SELECT` against a PostgreSQL table you fill in. | The mapping lives in a database. |
+| `store_redis` | One key lookup in Redis, under a pattern you choose. | Many users and cheap lookups. |
+| `chain` | Several of the above in order: `no_mapping` moves to the next, any other denial or error stops the chain. | Different populations in different stores. |
+
+Any of them can sit behind the optional `resolver_cache` (positive and negative TTL, single flight, dropped on an upstream `401`/`402`). Secrets (key files, DSN, Redis URL, HMAC secret, client certificates) are always referenced by file path, never inlined. See [`docs/configuration.md`](docs/configuration.md#resolver).
 
 On Alien, an API key is a billed user and an upstream session: users that share a key share a line in the consumption feed. Map one key per user when you need per-user accounting.
 
+### Observability
+
+`observability.otlp` exports traces and metrics over OTLP (`grpc` or `http/protobuf`); `{"otlp": null}` exports nothing. Each request is one root trace with three spans (request, credential resolution, upstream call) and the metrics `mcp_gateway.requests`, `mcp_gateway.request.duration`, `mcp_gateway.upstream.duration`, `mcp_gateway.resolver.lookups` and `mcp_gateway.sessions.bound`. Spans and metrics never carry the subject, e-mail, a token, a key, a session id, arguments or content; resolver labels are span attributes only. Details: [`docs/configuration.md`](docs/configuration.md#observability).
+
+### Request id and audit line
+
+Every response carries an `x-request-id` the gateway generated (a client-sent one is ignored and never forwarded upstream). With `audit.enabled`, each request writes one JSON line to stdout, whatever way it ends:
+
+```json
+{"ts":"2026-11-20T09:14:03.512+00:00","event":"mcp_request","request_id":"6f1c2b0e-5a47-4d8e-9d52-3b0a4c9e7f10","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","subject":"user-1","organization":"example-org","labels":{"client":"example"},"http_method":"POST","rpc_method":"tools/call","rpc_id":7,"tool":"search","status":200,"outcome":"forwarded","reason":null,"upstream":"main","latency_ms":182.4,"upstream_status":200,"upstream_request_id":"req-81c4","upstream_session":false}
+```
+
+The line holds identifiers, the method and tool name, the outcome and the latency; never content, arguments, tokens, keys or session ids. `request_id` joins the line to the trace (`trace_id`) and to the client's response header. Field list and outcomes: [`docs/configuration.md`](docs/configuration.md#audit-line).
+
 ## Development stack
 
-One compose file set (`compose.yaml` plus a target file) runs the whole thing on loopback. Two targets share it:
+One compose file set (`compose.yaml` plus a target file) runs the whole thing on loopback. Three targets share it:
 
 - **dev**: the gateways forward to a real dev MCP server (`compose.dev.yaml`) and read the state that `scripts/dev_fixture.py` writes from the real Alien dev platform.
+- **ci-dev** (`compose.ci-dev.yaml`): the dev target for CI. The state is laid out from CI-provided key files (`scripts/ci_dev_state.py`) into a volume instead of a directory on your machine, so it works against a remote daemon. Run through `scripts/ci_e2e_dev.sh`.
 - **stub**: the gateways forward to a fault-injection upstream (`compose.stub.yaml`) and the stack writes its own state with fake keys, so nothing outside the repository is needed. This is what CI runs.
 
 | Service | Address | Notes |
@@ -82,13 +98,14 @@ One compose file set (`compose.yaml` plus a target file) runs the whole thing on
 | `gateway-hydra` | `http://localhost:18001/mcp` | Hydra, `static` resolver |
 | `gateway-chain` | `http://localhost:18002/mcp` | Keycloak, `chain` of `store_redis`, `store_sql` and `webhook` (HMAC) behind a resolver cache; requires the `mcp-write` scope |
 | `gateway-unreachable` | `http://localhost:18003/mcp` | Keycloak, a `webhook` resolver nobody listens to (the resolver-down case) |
+| `otel-collector` | internal `:4318` | Receives the OTLP export of `gateway-chain` (the other gateways export nothing) and writes it to the `otel` volume as JSON lines; the stub harness reads it |
 | PostgreSQL, Redis | `127.0.0.1:15432`, `127.0.0.1:16379` | credential stores, refilled at every start by the `seed` service |
 | dev webhook | `127.0.0.1:18090` | `dev/webhook-resolver/`, `GET /_stats` counts the calls it served |
 | upstream stub (stub target) | `127.0.0.1:14000` | `dev/upstream-stub/`, control endpoints under `/_stub/` |
 
 Every gateway has two upstreams, `stateful` and `stateless`, chosen per mapping entry. In the stub target they are the stub's `/stateful/mcp` and `/stateless/mcp`; in the dev target both are the real dev MCP (all of them are stateless). Gateway configuration is one JSON block per gateway in `compose.yaml`.
 
-Test users, the same in both identity providers: `alice@client-x.test`, `bob@client-y.test`, `carol@client-x.test`, `nomap@client-z.test` (no mapping), `revoked@client-r.test` and `unpaid@client-p.test` (their keys are refused by the stub with 401 and 402; in the dev target they have no mapping). On `gateway-chain`, alice is resolved by Redis, bob by PostgreSQL and carol by the webhook. Access tokens live 60 seconds. Anonymous DCR is enabled on both providers (Keycloak through Trusted Hosts covering loopback and the compose network gateway). `allowed_origins` is `https://claude.ai` and `http://localhost:6274` (the MCP Inspector).
+Test users, the same in both identity providers: `alice@client-x.test`, `bob@client-y.test`, `carol@client-x.test`, `dave@client-x.test` (behind the webhook, stub target only: the resolver cache test's own persona), `nomap@client-z.test` (no mapping), `revoked@client-r.test` and `unpaid@client-p.test` (their keys are refused by the stub with 401 and 402; in the dev target they have no mapping). On `gateway-chain`, alice is resolved by Redis, bob by PostgreSQL and carol and dave by the webhook. Access tokens live 60 seconds. Anonymous DCR is enabled on both providers (Keycloak through Trusted Hosts covering loopback and the compose network gateway). `allowed_origins` is `https://claude.ai` and `http://localhost:6274` (the MCP Inspector).
 
 ### Dev target
 
@@ -126,18 +143,26 @@ The key is read from the file and never passed on the command line or printed. T
 
 ## Tests
 
+Three layers, from fastest to most real:
+
+| Layer | What it proves | Where it runs | Command |
+|---|---|---|---|
+| Unit (`tests/unit`) | Logic of every module, no network | every push (CI `test` jobs), locally | `uv run pytest -m "not e2e and not e2e_stub and not integration"` |
+| Integration and `e2e_stub` | The resolvers against real PostgreSQL and Redis; the whole gateway against real Keycloak and Hydra, a real OpenTelemetry collector and the fault-injection upstream stub | CI job `e2e-stub`, locally in a throwaway Docker daemon | `sh scripts/ci_e2e_stub.sh` |
+| `e2e` (real dev) | The gateway in front of a real dev MCP server, with the Alien dev platform metering each call, read back from its consumption feeds | CI job `e2e-dev` (merge requests and the default branch), locally | see below |
+
 ```bash
-uv run pytest tests/unit -q                       # unit tests, no network
-uv run ruff check src tests scripts dev && uv run pyright src && uv run pyright scripts tests/e2e
+uv run ruff check src tests scripts dev && uv run ruff format --check src tests scripts dev
+uv run pyright && uv run pyright scripts tests/e2e
+uv run pytest tests/unit -q
 ```
 
-Three suites need the stack, each selected by a marker:
+### `integration` and `e2e_stub`
 
 - `integration`: the PostgreSQL and Redis resolvers against real servers (`MCP_GATEWAY_TEST_PG_DSN`, `MCP_GATEWAY_TEST_REDIS_URL`; a selected test without them fails).
-- `e2e_stub`: the stub-target suite. Every test performs the real OAuth journey (challenge, resource metadata, authorization-server metadata, anonymous DCR, authorization code + PKCE S256 + `resource` through the provider's real login form) with a real test user, then calls the gateway against the stub upstream. It covers: resource metadata (path-specific `200`, root `404`), challenges and `403 insufficient_scope`, the Origin policy, the `Mcp-Method`/`Mcp-Name` check, header stripping and key injection, session binding between two users, `DELETE` and upstream session expiry, `Last-Event-ID` replay, a stateless upstream's `405`, upstream `401`/`402`/`404`/`500`/`502`/`503`, incremental and failing streams, a client disconnect during a hanging call, each resolver of the chain, the resolver cache (counted at the webhook) and an unreachable webhook (`503`, `Retry-After`).
-- `e2e`: the real-dev suite, below.
+- `e2e_stub`: every test performs the real OAuth journey (challenge, resource metadata, authorization-server metadata, anonymous DCR, authorization code + PKCE S256 + `resource` through the provider's real login form) with a real test user, then calls the gateway against the stub upstream. It covers: resource metadata, challenges and `403 insufficient_scope`, the Origin policy, the `Mcp-Method`/`Mcp-Name` check and repeated headers, header stripping and key injection, session binding between two users, `DELETE` and upstream session expiry, `Last-Event-ID` replay, a stateless upstream's `405`, upstream `401`/`402`/`404`/`500`/`502`/`503`, incremental and failing streams, a client disconnect during a hanging call, each resolver of the chain, the resolver cache (counted at the webhook), an unreachable webhook (`503`, `Retry-After`), `x-request-id`, and the telemetry the collector receives (request span, metrics, and a scan proving no token, key, e-mail, subject, session id or tool argument is exported).
 
-`scripts/ci_e2e_stub.sh` runs `integration` and `e2e_stub` in a container on the daemon's host network (so the `localhost` issuers resolve as on a laptop). CI runs it in the `e2e-stub` job on every push, with the daemon as a `docker:dind` service. To reproduce that job before pushing, run the script inside a privileged `docker:<version>-dind` daemon of its own (its ports then never clash with a running dev stack):
+`scripts/ci_e2e_stub.sh` runs both in a container on the daemon's host network (so the `localhost` issuers resolve as on a laptop) and needs only Docker with the compose plugin. To reproduce the CI job before pushing (CI minutes are paid), run it inside a privileged `docker:<version>-dind` daemon of its own, whose ports never clash with a running dev stack:
 
 ```bash
 docker run -d --privileged --name ci-dind -e DOCKER_TLS_CERTDIR= docker:28.3.3-dind
@@ -146,7 +171,12 @@ docker run --rm --link ci-dind:docker -e DOCKER_HOST=tcp://docker:2375 \
   sh -c 'tar cf - -C /src --exclude=./.git --exclude=./.venv --exclude=./.env* . | tar xf - && sh scripts/ci_e2e_stub.sh'
 ```
 
-The real-dev suite (`-m e2e`) behaves like a real MCP client against both providers on the dev target: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It then reads the Alien consumption feeds back and asserts the call was billed to the expected client-managed user and client organization, with the sponsorship applied. Negative cases: wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), and forged `X-Job-Id` / `X-Organization-Id` (stripped: the call succeeds and the metered event carries neither, whereas sent straight to the upstream the foreign job id is refused), each with a positive control that goes direct to the upstream.
+### `e2e`: the real-dev suite
+
+It behaves like a real MCP client against the dev target: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It reads the Alien consumption feeds back and asserts each call was billed to the expected client-managed user and client organization, with the sponsorship applied.
+
+- Both static gateways: happy path for two personas, wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), forged `X-Job-Id` / `X-Organization-Id` (stripped; each negative case has a positive control that goes direct to the upstream).
+- `gateway-chain`: a token carrying `mcp-write` for a persona of each store (Redis, PostgreSQL, webhook); each call is metered for the right managed user and organization, with the sponsor line in the sponsor's feed; every response has an `x-request-id`; the stateless upstream's `GET` and `DELETE` answers (`405`) pass through untouched.
 
 ```bash
 E2E_STATE_DIR=<state dir> E2E_SPONSOR_KEY_FILE=<sponsor key file> E2E_API_BASE=<Alien dev API> \
@@ -154,4 +184,27 @@ E2E_UPSTREAM_URL=<dev MCP URL> E2E_EXISTING_JOB_ID=<an existing dev job id the p
 E2E_RUN_DIR=<evidence dir> uv run pytest tests/e2e -m e2e -v
 ```
 
-A run takes about ten minutes, mostly waiting for tokens to expire and for metering to appear in the feeds. It needs the dev target up, the fixture applied and network access to the Alien dev platform. CI does not run it yet.
+It needs the dev target up (`docker compose up -d --build --wait` with `.env`), the fixture applied and network access to the Alien dev platform. A run takes about fifteen minutes, mostly waiting for tokens to expire and for metering to appear in the feeds.
+
+## CI
+
+| Job | When | What |
+|---|---|---|
+| lint, type check, unit tests, SAST, secret detection | every pipeline | shared templates; `PYTEST_MARKER` keeps the stack-bound suites out |
+| `e2e-stub` | merge requests and branches, when code, tests, scripts, `dev/`, compose files, Dockerfiles, `pyproject.toml`, `uv.lock` or `.gitlab-ci.yml` change | `scripts/ci_e2e_stub.sh` in a `docker:dind` service; fake keys only |
+| `e2e-dev` | merge requests and the default branch (never a push to `dev`), same path filter | `scripts/ci_e2e_dev.sh` in a `docker:dind` service against the real dev MCP server and Alien dev platform; one run at a time (`resource_group`) |
+
+A branch push is skipped while the branch has an open merge request (its merge request pipeline runs instead).
+
+`e2e-dev` reads these CI/CD variables. File-type variables hold the content of the file; all are protected, so the job gets them on protected branches and tags only, and a merge request pipeline from an unprotected branch fails at once with the list of missing names. The key files are masked.
+
+| Variable | Type | Content |
+|---|---|---|
+| `E2E_DEV_SPONSOR_KEY_FILE` | file | API key of the sponsor's service account (reads the feeds, mints the key the revoked-key test revokes) |
+| `E2E_DEV_ALICE_KEY_FILE`, `E2E_DEV_BOB_KEY_FILE`, `E2E_DEV_CAROL_KEY_FILE` | file | API keys of the three client-managed users |
+| `E2E_DEV_FIXTURE_FILE` | file | `fixture.json` written by `scripts/dev_fixture.py` (ids and names, no secret) |
+| `E2E_DEV_UPSTREAM_URL` | value | URL of the dev MCP server |
+| `E2E_DEV_API_BASE` | value | Base URL of the Alien dev API |
+| `E2E_DEV_EXISTING_JOB_ID` | value | A dev job id the personas do not own (the forged-header positive control) |
+
+The identity providers' and stores' secrets are generated per run. To reproduce the job locally, run `scripts/ci_e2e_dev.sh` in a `docker:dind` setup like the one above, with the variables set to file paths and values. The job's artifacts (evidence, JUnit, compose logs) are visible to developers only and expire after a week.
