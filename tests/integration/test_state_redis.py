@@ -377,26 +377,52 @@ async def test_the_generation_expires_but_still_fences_after_an_invalidation(
     assert 0 < await admin.pttl(generation) <= 24 * 60 * 60 * 1000
 
 
-async def test_an_entry_encrypted_with_another_key_is_a_miss_and_is_deleted(
+async def test_an_entry_sealed_by_another_key_is_a_quiet_miss_and_is_kept(
+    make_state: MakeState,
+    admin: aioredis.Redis,
+    prefix: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """During a rolling key change the other generation still reads its own entries."""
+    state = make_state()
+    writer = store_with_key(state, os.urandom(32))
+    await resolver_on(writer, Backend(credential())).resolve(identity())
+    (entry,) = [key async for key in admin.scan_iter(match=f"{prefix}c:*")]
+    sealed = await admin.get(entry)
+
+    backend = Backend(credential())
+    reader = store_with_key(state, os.urandom(32))
+    with caplog.at_level(logging.DEBUG, logger="mcp_gateway.state.redis_cache"):
+        outcome = await reader.get(cache_key(identity()))
+    assert outcome is None
+    assert await admin.get(entry) == sealed, "the other key's entry must not be deleted"
+    assert [r for r in caplog.records if r.levelno >= logging.INFO] == []
+    assert API_KEY not in caplog.text
+    # The writer's own key still reads it.
+    assert await writer.get(cache_key(identity())) is not None
+    assert backend.calls == 0
+
+
+async def test_a_tampered_entry_under_our_key_is_deleted_with_a_warning(
     make_state: MakeState,
     admin: aioredis.Redis,
     prefix: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     state = make_state()
-    writer = store_with_key(state, os.urandom(32))
-    await resolver_on(writer, Backend(credential())).resolve(identity())
-    assert len([key async for key in admin.scan_iter(match=f"{prefix}c:*")]) == 1
+    await cached(state, Backend(credential())).resolve(identity())
+    (entry,) = [key async for key in admin.scan_iter(match=f"{prefix}c:*")]
+    raw = bytearray(base64.b64decode(str(await admin.get(entry))))
+    raw[-1] ^= 0x01
+    await admin.set(entry, base64.b64encode(bytes(raw)).decode("ascii"))
 
-    backend = Backend(credential())
-    reader = store_with_key(state, os.urandom(32))
-    with caplog.at_level(logging.WARNING, logger="mcp_gateway.state.redis_cache"):
-        _, how = await resolver_on(reader, backend).resolve_detailed(identity())
-    assert how == "miss"
-    assert backend.calls == 1
-    assert [r.getMessage() for r in caplog.records][0].startswith(
-        "shared cache entry could not be decrypted"
-    )
+    assert state.cache is not None
+    with caplog.at_level(logging.DEBUG, logger="mcp_gateway.state.redis_cache"):
+        assert await state.cache.get(cache_key(identity())) is None
+    assert await admin.exists(entry) == 0
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].getMessage().startswith("shared cache entry failed authentication")
     assert API_KEY not in caplog.text
 
 

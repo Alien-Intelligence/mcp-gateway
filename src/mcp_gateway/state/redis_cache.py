@@ -2,9 +2,11 @@
 
 Layout (``p`` is the key prefix, ``d`` the keyed digest of the canonical identity key):
 
-* ``{p}c:{d}`` holds the outcome (a credential or a denial) as ``base64(nonce || ciphertext)``,
-  AES-256-GCM with a random 12-byte nonce and ``d`` as associated data, so a value moved to
-  another entry fails to decrypt. It expires after the entry's TTL.
+* ``{p}c:{d}`` holds the outcome (a credential or a denial) as
+  ``base64(key id || nonce || ciphertext)``: AES-256-GCM with a random 12-byte nonce and ``d`` as
+  associated data, so a value moved to another entry fails to decrypt. The key id (4 bytes
+  derived from the encryption key) says which key sealed it, so a replica still holding the
+  previous key leaves the new key's entries alone and the reverse. It expires after the TTL.
 * ``{p}cg:{d}`` is the invalidation generation. ``invalidate`` deletes the entry and increments
   the generation; a lookup reads the generation before asking the backend and its answer is
   written only if the generation is unchanged (one Lua script). A lookup still running on
@@ -22,7 +24,9 @@ import os
 from typing import Annotated, Literal
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
 
 from mcp_gateway.config import ConfigError
@@ -34,6 +38,8 @@ from mcp_gateway.state.redis_client import BoundedRedis, read_text_file
 logger = logging.getLogger(__name__)
 
 _NONCE_BYTES = 12
+_KEY_ID_BYTES = 4
+_KEY_ID_INFO = b"mcp-gateway key id"
 _KEY_BYTES = 32
 # The generation outlives any lookup in flight by a wide margin and is refreshed by each bump.
 _GENERATION_TTL_MS = 24 * 60 * 60 * 1000
@@ -89,6 +95,13 @@ def load_encryption_key(path: str) -> bytes:
     return key
 
 
+def key_id(encryption_key: bytes) -> bytes:
+    """A short public label of the key, derived so that it reveals nothing about the key itself."""
+    return HKDF(
+        algorithm=hashes.SHA256(), length=_KEY_ID_BYTES, salt=None, info=_KEY_ID_INFO
+    ).derive(encryption_key)
+
+
 def _serialize(outcome: Outcome) -> str:
     if isinstance(outcome, Denied):
         return _StoredDenial(kind="denied", reason=outcome.reason).model_dump_json()
@@ -121,6 +134,7 @@ class RedisCacheStore:
         self._digest = digest
         self._prefix = prefix
         self._cipher = AESGCM(encryption_key)
+        self._key_id = key_id(encryption_key)
         self._put = redis.client.register_script(_PUT)
         self._invalidate = redis.client.register_script(_INVALIDATE)
 
@@ -132,15 +146,20 @@ class RedisCacheStore:
     def _seal(self, outcome: Outcome, entry: str) -> str:
         nonce = os.urandom(_NONCE_BYTES)
         sealed = self._cipher.encrypt(nonce, _serialize(outcome).encode(), entry.encode())
-        return base64.b64encode(nonce + sealed).decode("ascii")
+        return base64.b64encode(self._key_id + nonce + sealed).decode("ascii")
 
-    def _open(self, value: str | bytes, entry: str) -> Outcome:
-        raw = base64.b64decode(value, validate=True)
-        if len(raw) <= _NONCE_BYTES:
-            raise ValueError("value too short")
+    def _open(self, raw: bytes, entry: str) -> Outcome:
+        """Authenticate and decode ``raw`` (key id already checked). Raises on any failure."""
+        body = raw[_KEY_ID_BYTES:]
         return _deserialize(
-            self._cipher.decrypt(raw[:_NONCE_BYTES], raw[_NONCE_BYTES:], entry.encode())
+            self._cipher.decrypt(body[:_NONCE_BYTES], body[_NONCE_BYTES:], entry.encode())
         )
+
+    async def _drop(self, entry_key: str, why: str) -> None:
+        # Never trusted, never an error for the caller: the entry goes and the caller sees a
+        # miss. Nothing of the value is logged.
+        logger.warning("shared cache entry %s; dropped", why)
+        await self._redis.run(self._redis.client.delete(entry_key))
 
     async def get(self, key: CacheKey) -> Outcome | None:
         entry_key, _, entry = self._names(key)
@@ -148,14 +167,22 @@ class RedisCacheStore:
         if value is None:
             return None
         try:
-            return self._open(value, entry)
+            raw = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError):
+            raw = b""
+        if len(raw) <= _KEY_ID_BYTES + _NONCE_BYTES:
+            await self._drop(entry_key, "is malformed")
+            return None
+        if raw[:_KEY_ID_BYTES] != self._key_id:
+            # Sealed by another key: a replica of another key generation (a rolling key change)
+            # owns it. Not ours to read and not ours to delete.
+            logger.debug("shared cache entry sealed by another key; treated as a miss")
+            return None
+        try:
+            return self._open(raw, entry)
         except (InvalidTag, ValueError, ValidationError) as exc:
-            # A rotated key, a truncated or tampered value: never trusted, never an error for
-            # the caller. The entry goes and the caller treats it as a miss. No content logged.
-            logger.warning(
-                "shared cache entry could not be decrypted (%s); dropped", type(exc).__name__
-            )
-            await self._redis.run(self._redis.client.delete(entry_key))
+            # Our key id on a value that does not authenticate: it was altered or truncated.
+            await self._drop(entry_key, f"failed authentication ({type(exc).__name__})")
             return None
 
     async def generation(self, key: CacheKey) -> str:
