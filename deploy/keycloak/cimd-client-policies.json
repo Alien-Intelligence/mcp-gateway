@@ -14,6 +14,34 @@
         ]
       },
       {
+        "name": "code-flow-only",
+        "description": "Refuses a client that enables the implicit or hybrid flow or the resource owner password grant",
+        "executors": [
+          {
+            "executor": "reject-implicit-grant",
+            "configuration": {
+              "auto-configure": "false"
+            }
+          },
+          {
+            "executor": "reject-ropc-grant",
+            "configuration": {
+              "auto-configure": "false"
+            }
+          }
+        ]
+      },
+      {
+        "name": "refuse",
+        "description": "Refuses the request",
+        "executors": [
+          {
+            "executor": "reject-request",
+            "configuration": {}
+          }
+        ]
+      },
+      {
         "name": "claude-cimd",
         "description": "EXPERIMENTAL (Keycloak --features=cimd): Claude (claude.ai, Desktop, mobile, Cowork) and Claude Code identified by their Client ID Metadata Documents on claude.ai",
         "executors": [
@@ -45,8 +73,8 @@
   "clientPolicies": {
     "policies": [
       {
-        "name": "anonymous-registration-pkce",
-        "description": "Clients created by anonymous dynamic registration must use PKCE S256",
+        "name": "anonymous-registration",
+        "description": "Clients created by anonymous dynamic registration must use PKCE S256 and may not enable the implicit flow or the password grant",
         "enabled": true,
         "conditions": [
           {
@@ -60,7 +88,28 @@
           }
         ],
         "profiles": [
-          "pkce-s256"
+          "pkce-s256",
+          "code-flow-only"
+        ]
+      },
+      {
+        "name": "authorization-code-and-refresh-only",
+        "description": "The token endpoint of this realm grants authorization_code and refresh_token only, for every client",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "grant-type",
+            "configuration": {
+              "is-negative-logic": "true",
+              "grant_types": [
+                "authorization_code",
+                "refresh_token"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "refuse"
         ]
       },
       {

@@ -312,6 +312,46 @@ async def authorize(
     raise OAuthFlowError("too many steps before reaching the redirect_uri")
 
 
+async def approve_device_authorization(
+    client: httpx.AsyncClient, *, verification_uri_complete: str, username: str, password: str
+) -> str:
+    """Approve a device authorization as the user would in a browser: open the verification
+    page, sign in and consent. Returns the text of the final page (the provider's verdict).
+
+    The client must not follow redirects on its own and should own a fresh cookie jar.
+    """
+    url, method, data = verification_uri_complete, "GET", None
+    login_submitted = False
+    for _ in range(MAX_FORM_STEPS * MAX_REDIRECTS):
+        response = await client.request(method, url, data=data, timeout=HTTP_TIMEOUT)
+        if response.is_redirect:
+            location = urljoin(str(response.url), response.headers["location"])
+            url, method, data = location, "GET", None
+            continue
+        if response.status_code != 200:
+            raise OAuthFlowError(f"unexpected page: {_describe(response)}")
+        forms = _parse_forms(response.text)
+        login_form = next((f for f in forms if any(k == "password" for _, k, _ in f.inputs)), None)
+        if login_form is not None:
+            if login_submitted:
+                raise OAuthFlowError(f"login rejected, form shown again: {_describe(response)}")
+            login_submitted = True
+            data = _fill_login_form(login_form, username, password)
+            method = login_form.method.upper()
+            url = urljoin(str(response.url), login_form.action)
+            continue
+        consent = next((f for f in forms if any(_is_accept(b) for b in f.buttons)), None)
+        if consent is None:
+            return response.text
+        accept = next(b for b in consent.buttons if _is_accept(b))
+        data = {name: value for name, kind, value in consent.inputs if name and kind == "hidden"}
+        if accept[0]:
+            data[accept[0]] = accept[2]
+        method = consent.method.upper()
+        url = urljoin(str(response.url), consent.action)
+    raise OAuthFlowError("too many steps on the device verification pages")
+
+
 async def exchange_code(
     client: httpx.AsyncClient,
     *,

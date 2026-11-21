@@ -123,7 +123,22 @@ MCP clients register themselves (RFC 7591) at `<issuer>/clients-registrations/op
 | Consent Required | (default) | Every registered client shows a consent screen naming it and its scopes before its first token: the user's chance to notice a client they did not start. |
 | Full Scope Disabled, Allowed Protocol Mapper Types, Allowed Client Scopes (`allow-default-scopes: true`), Allowed Registration Web Origins | (defaults) | No full role scope, no custom mappers, only the realm's default and optional client scopes, no browser (CORS) registration. |
 
-On top of the registration policies, a client policy (`anonymous-registration-pkce`) sets PKCE `S256` as required on every client created by an anonymous registration: an authorization request from such a client without `code_challenge` is refused (`invalid_request`).
+### Client policies: the code flow with PKCE, nothing else
+
+The registration policies above check where a client may redirect; they do not look at the grant types it asks for. Two client policies of the template do:
+
+| Client policy | Applies to | Effect |
+|---|---|---|
+| `anonymous-registration` | clients being created or updated by an anonymous registration | PKCE `S256` is set as required on the client (`pkce-enforcer`): an authorization request without `code_challenge` is refused (`invalid_request`). A registration that asks for the implicit or hybrid flow (`grant_types` `implicit`, a `response_types` with `token` or `id_token`) or the password grant is refused (`reject-implicit-grant`, `reject-ropc-grant`, not auto-configured: Keycloak answers `403` `invalid_client_metadata` instead of quietly altering the client). |
+| `authorization-code-and-refresh-only` | every token request of the realm, every client | Any grant other than `authorization_code` and `refresh_token` is refused at the token endpoint (`reject-request`, `400` "Request not allowed"): the password grant, client credentials and the device grant (each checked, below), and any other grant type. |
+
+Why both. Keycloak compares only the host of a redirect URI ([below](#how-keycloak-checks-a-redirect-uri-2682)), so anyone can register a client on a custom scheme whose host is trusted, such as `evilapp://claude.ai/cb`. Without these policies, such a client registered with `grant_types: ["implicit"]` received an access token for the gateway in the URL fragment as soon as a user signed in and consented, with no PKCE and no code exchange; a client registered with `client_credentials` (and a client secret, which anonymous registration hands out) received a token for the gateway with no user at all; and the device grant gave a registrant a token for any user it talked into entering a code. The password grant was open on the realm's built-in `admin-cli` client (Keycloak creates it in every realm with direct access grants on): its token's audience is Keycloak's admin API, not the gateway, but it let anyone test passwords without the login page. All of these are refused now.
+
+The device authorization endpoint still answers a registered device client and the user can still approve the code; the token request that follows is refused. Your administrators are not affected: they sign in to the `master` realm (the admin console, `kcadm.sh --realm master`), not to this one.
+
+What is left, by design: a registrant on a trusted host gets a code at its own redirect URI if a user signs in and consents, and exchanges it with its own PKCE verifier. That is what dynamic registration is. The consent screen is the user's protection, and it shows the `client_name` the registrant chose, which can be "Claude". To narrow it, remove the trusted hosts of clients you do not support, and consider the `secure-redirect-uris-enforcer` executor, which can refuse private-use schemes and plain http on every host (see the end of the next section: Cursor's registration needs both).
+
+These checks run against a real Keycloak 26.8.2 that imports the rendered template, in the gateway's end-to-end suite (`tests/e2e/stub/test_keycloak_template.py`).
 
 ### Trusted hosts and where each comes from
 
@@ -147,7 +162,7 @@ Only add hosts you have checked against the vendor's current documentation. Remo
 From the policy's source ([`TrustedHostClientRegistrationPolicy.java` at 26.8.2](https://github.com/keycloak/keycloak/blob/26.8.2/services/src/main/java/org/keycloak/services/clientregistration/policy/impl/TrustedHostClientRegistrationPolicy.java)) and from registrations against the rendered template on a fresh 26.8.2:
 
 - **Only the host is compared.** Keycloak takes `new URI(uri).getHost()` and compares it with each trusted host, exactly, or with `*.domain` entries as a suffix. Scheme, port, path and query are not looked at.
-- **A custom scheme passes when its host part is trusted.** `cursor://anysphere.cursor-mcp/oauth/callback` has the host `anysphere.cursor-mcp`, so it is accepted, and Keycloak then completes the code flow to it. The flip side: `evil://claude.ai/callback`, `http://claude.ai/...` (plain http) and `https://claude.ai/any/path` are accepted too. An attacker can register such a client, but the code is only delivered to the URI the client registered, and the user sees the client on the consent screen first.
+- **A custom scheme passes when its host part is trusted.** `cursor://anysphere.cursor-mcp/oauth/callback` has the host `anysphere.cursor-mcp`, so it is accepted, and Keycloak then completes the code flow to it. The flip side: `evil://claude.ai/callback`, `http://claude.ai/...` (plain http) and `https://claude.ai/any/path` are accepted too. Such a client is limited to the code flow with PKCE by the [client policies](#client-policies-the-code-flow-with-pkce-nothing-else): it gets a code, at the URI it registered, only after a user signed in and approved it on the consent screen.
 - **Ports are ignored, at registration.** `http://127.0.0.1:1/x` is accepted when `127.0.0.1` is trusted.
 - **At sign-in, loopback ports depend on what was registered.** A loopback redirect registered without a port (`http://127.0.0.1/callback`, `http://localhost/callback`) matches any port at the authorization request; one registered with a port (`http://127.0.0.1:33418/`) matches that port only.
 - **Wildcards are not refused.** A registered `https://claude.ai/*` is accepted (it stays on a trusted host).
@@ -161,7 +176,7 @@ If you want stricter redirect rules for registered clients, Keycloak's `secure-r
 
 Client ID Metadata Documents let a client use an `https` URL as its `client_id`: Keycloak fetches the document there instead of registering a client. Keycloak 26.8 supports it only as an experimental feature that "may introduce breaking changes in future versions" ([Keycloak MCP guide](https://www.keycloak.org/securing-apps/mcp-authz-server)). It is off in this template.
 
-`cimd-client-policies.json` holds a client profile and client policy for Claude, following that guide's single-profile recipe for Claude and Claude Code: client ids on `claude.ai`, allowed domains `claude.ai`, `localhost`, `127.0.0.1`, *Restrict same domain* off (Claude Code uses a loopback redirect), *Only allow confidential client* off, and `accept-public-client-with-confidential-client-only-grant` on (Claude's document lists the `jwt-bearer` grant, which Keycloak refuses for a public client; with the option on, Keycloak drops that grant). It also requires PKCE `S256`. The file repeats the template's PKCE profile and policy, because the admin API replaces the whole list.
+`cimd-client-policies.json` holds a client profile and client policy for Claude, following that guide's single-profile recipe for Claude and Claude Code: client ids on `claude.ai`, allowed domains `claude.ai`, `localhost`, `127.0.0.1`, *Restrict same domain* off (Claude Code uses a loopback redirect), *Only allow confidential client* off, and `accept-public-client-with-confidential-client-only-grant` on (Claude's document lists the `jwt-bearer` grant, which Keycloak refuses for a public client; with the option on, Keycloak drops that grant). It also requires PKCE `S256`. The file repeats every client profile and client policy of the template, because the admin API replaces the whole list: applying a file without them would remove the [client policies](#client-policies-the-code-flow-with-pkce-nothing-else).
 
 Before you enable it, know what changes for every client, not only Claude: with `--features=cimd`, Keycloak advertises `"client_id_metadata_document_supported": true` and adds `none` to `token_endpoint_auth_methods_supported` in its metadata, whether or not a policy exists. Clients that support CIMD then use it:
 
@@ -183,7 +198,7 @@ To enable it:
      https://sso.example.com/admin/realms/example-publisher/client-policies/policies
    ```
 
-What was observed with it on a fresh 26.8.2: Claude's hosted client id reaches the login page with its documented redirect URI and completes the flow (the token's `azp` is the document URL, `aud` the gateway); without PKCE, or with a redirect URI not in the document, the request is refused; Claude Code's client id is accepted with `http://localhost:<any port>/callback`; ChatGPT's client id gets `Client not found`. The *Resource indicator allow list* of the executor only matters with `--features=resource-indicators` and is not set.
+What was observed with it on a fresh 26.8.2, before the template's client policies refused every grant but the code flow (not re-run since; Claude's client uses the code flow): Claude's hosted client id reaches the login page with its documented redirect URI and completes the flow (the token's `azp` is the document URL, `aud` the gateway); without PKCE, or with a redirect URI not in the document, the request is refused; Claude Code's client id is accepted with `http://localhost:<any port>/callback`; ChatGPT's client id gets `Client not found`. The *Resource indicator allow list* of the executor only matters with `--features=resource-indicators` and is not set.
 
 ## Not in the template
 

@@ -218,13 +218,49 @@ def test_anonymous_registration_checks_redirect_hosts_not_the_sender() -> None:
     assert not any(h.startswith("*") for h in hosts), "a wildcard trusts every subdomain"
 
 
-def test_anonymously_registered_clients_must_use_pkce() -> None:
-    realm = _rendered_realm()
-    (policy,) = realm["clientPolicies"]["policies"]
+def _client_policy(realm: dict[str, Any], name: str) -> dict[str, Any]:
+    (policy,) = [p for p in realm["clientPolicies"]["policies"] if p["name"] == name]
     assert policy["enabled"] is True
-    assert policy["conditions"][0]["configuration"]["update-client-source"] == ["ByAnonymous"]
-    (profile,) = [p for p in realm["clientProfiles"]["profiles"] if p["name"] in policy["profiles"]]
-    assert [e["executor"] for e in profile["executors"]] == ["pkce-enforcer"]
+    return policy
+
+
+def _executors(realm: dict[str, Any], policy: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """The executors of a policy's profiles, by name, with their configuration."""
+    profiles = {p["name"]: p for p in realm["clientProfiles"]["profiles"]}
+    return {
+        e["executor"]: e["configuration"]
+        for name in policy["profiles"]
+        for e in profiles[name]["executors"]
+    }
+
+
+# These check the shape only. What the policies do is proven against a real Keycloak by
+# tests/e2e/stub/test_keycloak_template.py (stub target, keycloak-template service).
+def test_anonymously_registered_clients_must_use_pkce_and_no_implicit_or_password_grant() -> None:
+    realm = _rendered_realm()
+    policy = _client_policy(realm, "anonymous-registration")
+    (condition,) = policy["conditions"]
+    assert condition["condition"] == "client-updater-context"
+    assert condition["configuration"]["update-client-source"] == ["ByAnonymous"]
+    executors = _executors(realm, policy)
+    assert executors == {
+        "pkce-enforcer": {"auto-configure": "true"},
+        # Not auto-configured: a registration asking for these grants is refused, not altered.
+        "reject-implicit-grant": {"auto-configure": "false"},
+        "reject-ropc-grant": {"auto-configure": "false"},
+    }
+
+
+def test_the_token_endpoint_grants_only_authorization_code_and_refresh_token() -> None:
+    realm = _rendered_realm()
+    policy = _client_policy(realm, "authorization-code-and-refresh-only")
+    (condition,) = policy["conditions"]
+    assert condition["condition"] == "grant-type"
+    assert condition["configuration"] == {
+        "is-negative-logic": "true",
+        "grant_types": ["authorization_code", "refresh_token"],
+    }
+    assert _executors(realm, policy) == {"reject-request": {}}
 
 
 def test_the_template_keycloak_of_the_stub_target_is_the_pinned_image() -> None:
@@ -323,11 +359,13 @@ def test_render_leaves_keycloak_message_keys_alone() -> None:
     assert "${rolesScopeConsentText}" in text
 
 
-def test_the_cimd_policies_keep_the_template_pkce_policy() -> None:
+def test_the_cimd_policies_keep_every_template_profile_and_policy() -> None:
     """The admin API replaces whole lists, so the CIMD file must carry the template's entries."""
     realm = _rendered_realm()
     cimd = json.loads((KEYCLOAK_DIR / "cimd-client-policies.json").read_text(encoding="utf-8"))
-    assert cimd["clientProfiles"]["profiles"][0] == realm["clientProfiles"]["profiles"][0]
-    assert cimd["clientPolicies"]["policies"][0] == realm["clientPolicies"]["policies"][0]
-    (cimd_policy,) = cimd["clientPolicies"]["policies"][1:]
+    template_profiles = realm["clientProfiles"]["profiles"]
+    template_policies = realm["clientPolicies"]["policies"]
+    assert cimd["clientProfiles"]["profiles"][: len(template_profiles)] == template_profiles
+    assert cimd["clientPolicies"]["policies"][: len(template_policies)] == template_policies
+    (cimd_policy,) = cimd["clientPolicies"]["policies"][len(template_policies) :]
     assert cimd_policy["conditions"][0]["condition"] == "client-id-uri"

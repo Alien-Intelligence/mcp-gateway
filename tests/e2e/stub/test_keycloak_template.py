@@ -31,7 +31,10 @@ REQUIRED_ENV = (
 LOOPBACK_REDIRECT = "http://127.0.0.1/callback"
 # A loopback redirect registered without a port matches any port at the authorization request.
 LOOPBACK_REDIRECT_AT_SIGN_IN = "http://127.0.0.1:53682/callback"
+CLAUDE_REDIRECT = "https://claude.ai/api/mcp/auth_callback"
+DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 SCOPE = "mcp-gateway offline_access"
+DEVICE_APPROVED = "Device Login Successful"
 # Two groups with the same name under different parents: with group names alone in the claim,
 # their members would be indistinguishable to a resolver.
 GROUP_PARENTS = ("team-a", "team-b")
@@ -196,6 +199,11 @@ async def metadata(template: TemplateRealm) -> dict[str, Any]:
         return await oauth_flow.discover_authorization_server(client, template.issuer)
 
 
+async def _register(metadata: dict[str, Any], body: dict[str, Any]) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        return await client.post(metadata["registration_endpoint"], json=body)
+
+
 @dataclass(frozen=True)
 class TokenAnswer:
     """A token endpoint answer. ``body`` holds credentials: it is kept out of the repr, so a
@@ -216,6 +224,12 @@ async def _post_token(metadata: dict[str, Any], data: dict[str, str], **kwargs: 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         response = await client.post(metadata["token_endpoint"], data=data, **kwargs)
     return TokenAnswer(response.status_code, response.json())
+
+
+def _assert_refused(answer: TokenAnswer) -> None:
+    assert not answer.issued, f"a token was issued: {answer}"
+    assert answer.status == 400, str(answer)
+    assert answer.body.get("error"), str(answer)
 
 
 async def test_a_registered_client_with_pkce_gets_a_token_for_the_gateway(
@@ -287,6 +301,120 @@ async def test_an_authorization_request_without_pkce_is_refused(
     callback = httpx.URL(response.headers["location"])
     assert callback.params.get("error") == "invalid_request", str(callback)
     assert "code" not in callback.params
+
+
+@pytest.mark.parametrize(
+    ("grant_types", "response_types"),
+    [
+        (["implicit"], ["token"]),
+        (["implicit"], ["id_token", "id_token token"]),
+        (["authorization_code", "implicit"], ["code", "code token"]),
+        (["password"], None),
+        (["password", "refresh_token"], None),
+    ],
+    ids=["implicit", "implicit-id-token", "hybrid", "password", "password-refresh"],
+)
+async def test_anonymous_registration_refuses_the_implicit_and_password_grants(
+    template: TemplateRealm,
+    metadata: dict[str, Any],
+    grant_types: list[str],
+    response_types: list[str] | None,
+) -> None:
+    """The redirect host is trusted (custom scheme, as Keycloak compares hosts only): the
+    refusal comes from the grant types, not from the trusted-hosts policy."""
+    body: dict[str, Any] = {
+        "client_name": "template-check",
+        "redirect_uris": ["evilapp://claude.ai/cb", CLAUDE_REDIRECT],
+        "token_endpoint_auth_method": "none",
+        "grant_types": grant_types,
+    }
+    if response_types is not None:
+        body["response_types"] = response_types
+    response = await _register(metadata, body)
+    assert response.status_code == 403, _describe(response)
+    assert "client_id" not in response.json()
+
+
+async def test_a_device_grant_gets_no_token_even_once_the_user_approved(
+    template: TemplateRealm, user: RealmUser, metadata: dict[str, Any]
+) -> None:
+    response = await _register(
+        metadata,
+        {
+            "client_name": "template-check",
+            "redirect_uris": [CLAUDE_REDIRECT],
+            "token_endpoint_auth_method": "none",
+            "grant_types": [DEVICE_GRANT],
+        },
+    )
+    client_id = _json(response, 201)["client_id"]
+    pkce = oauth_flow.Pkce.generate()
+    async with oauth_flow.new_client() as client:
+        response = await client.post(
+            metadata["device_authorization_endpoint"],
+            data={
+                "client_id": client_id,
+                "code_challenge": pkce.challenge,
+                "code_challenge_method": "S256",
+            },
+        )
+        device = _json(response, 200)
+        page = await oauth_flow.approve_device_authorization(
+            client,
+            verification_uri_complete=device["verification_uri_complete"],
+            username=user.username,
+            password=user.password,
+        )
+    # The user did approve: the refusal below is the realm's, not a pending authorization.
+    assert DEVICE_APPROVED in page, page[:500]
+    answer = await _post_token(
+        metadata,
+        {
+            "grant_type": DEVICE_GRANT,
+            "device_code": device["device_code"],
+            "client_id": client_id,
+            "code_verifier": pkce.verifier,
+        },
+    )
+    _assert_refused(answer)
+
+
+async def test_a_registered_confidential_client_gets_no_client_credentials_token(
+    metadata: dict[str, Any],
+) -> None:
+    response = await _register(
+        metadata,
+        {
+            "client_name": "template-check",
+            "redirect_uris": [CLAUDE_REDIRECT],
+            "token_endpoint_auth_method": "client_secret_basic",
+            "grant_types": ["client_credentials"],
+        },
+    )
+    registration = _json(response, 201)
+    answer = await _post_token(
+        metadata,
+        {"grant_type": "client_credentials"},
+        auth=(registration["client_id"], registration["client_secret"]),
+    )
+    _assert_refused(answer)
+
+
+async def test_the_realm_admin_cli_refuses_the_password_grant(
+    user: RealmUser, metadata: dict[str, Any]
+) -> None:
+    """Keycloak creates admin-cli in every realm with direct access grants on. The user's
+    credentials are valid (the positive control signs in with them)."""
+    answer = await _post_token(
+        metadata,
+        {
+            "grant_type": "password",
+            "client_id": "admin-cli",
+            "username": user.username,
+            "password": user.password,
+        },
+    )
+    _assert_refused(answer)
 
 
 async def test_the_positive_control_flow_detects_a_wrong_password(
