@@ -206,3 +206,34 @@ gitleaks:
     GIT_DEPTH: 0
   script:
     - gitleaks git . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
+# The full history against a deny-list of customer names, internal hosts and personal names: `main` is
+# mirrored to a public repository, so a string anywhere in its history is published. The deny-list is
+# itself sensitive and is not in the repository: it is the File-type, protected CI variable
+# HISTORY_DENYLIST_FILE (one Perl regex per line). The job fails when the variable is missing (a
+# check that is skipped is not a pass: on a merge request from an unprotected branch it is not
+# provided, so the job fails there too) and on any hit, printing the commit and the pattern, never the
+# matched line (scripts/ci_history_denylist.sh).
+# It is a blocking gate (allow_failure: false) that runs only on `main` and on merge requests that
+# target `main`, because that is where the rewritten history will be: the history of `dev` still holds
+# strings the rewrite will remove, so the job WOULD fail there today. Its own tests (a planted string
+# must be found) run first, in this image, which has git.
+history-denylist:
+  stage: test
+  image:
+    # uv with Python 3.12, pinned by the digest of the multi-arch index (as the chart job).
+    name: ghcr.io/astral-sh/uv:0.8.13-python3.12-trixie-slim@sha256:f0c3f034ab7f061c47cd402b5575ce222fcd3a6cbc49ae2b3f02201b5a56f2d5
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: 0
+    UV_FROZEN: "1"
+    UV_LINK_MODE: copy
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl
+  script:
+    - uv run --frozen --extra dev pytest tests/unit/test_history_denylist.py -q
+    - sh scripts/ci_history_denylist.sh
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
