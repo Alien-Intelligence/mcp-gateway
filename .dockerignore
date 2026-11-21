@@ -23,3 +23,10 @@ compose.yaml
 .env.*
 Dockerfile
 .dockerignore
+.venv
+docs
+compose*.yaml
+Dockerfile.e2e
+Dockerfile.e2e.dockerignore
+.python-version
+.env.example
