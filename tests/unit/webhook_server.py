@@ -153,6 +153,23 @@ class _Ca:
             .not_valid_before(now - datetime.timedelta(minutes=5))
             .not_valid_after(now + datetime.timedelta(days=1))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(self.key.public_key()), critical=False
+            )
             .sign(self.key, hashes.SHA256())
         )
 
@@ -167,6 +184,10 @@ class _Ca:
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(minutes=5))
             .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(self.key.public_key()),
+                critical=False,
+            )
             .add_extension(
                 x509.ExtendedKeyUsage(
                     [ExtendedKeyUsageOID.SERVER_AUTH if server else ExtendedKeyUsageOID.CLIENT_AUTH]
