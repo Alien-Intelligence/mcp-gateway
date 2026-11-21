@@ -45,6 +45,8 @@ Create the files with a restrictive umask (`umask 077`), keep them out of versio
 
 ## 5.3 Kubernetes with Helm
 
+From the root of the repository (the chart is `charts/mcp-gateway`, the examples are in `docs/tutorial/examples/`; copy the two example files and edit them first), in the directory that holds the secret files of 5.2:
+
 ```bash
 kubectl create namespace gateway
 kubectl -n gateway create secret generic mcp-gateway-secrets \
@@ -52,8 +54,13 @@ kubectl -n gateway create secret generic mcp-gateway-secrets \
   --from-file=webhook-hmac --from-file=otlp-headers
 
 helm install gateway charts/mcp-gateway -n gateway \
-  -f examples/helm-values.yaml --set-json "config=$(cat examples/config-ha.json)"
+  -f docs/tutorial/examples/helm-values.yaml \
+  --set-json "config=$(cat docs/tutorial/examples/config-ha.json)"
 ```
+
+The Secret holds one `--from-file` per `*_file` key of your configuration, named as the key's path ends: drop `otlp-headers` with `"otlp": null`, add for example the `ca_file` of a webhook whose certificate comes from a private authority.
+
+**Redis is yours.** The chart installs the gateway only, not the Redis that `config-ha.json` names in `state-redis-url`. Use a managed Redis, an operator or a chart you already run, with the same choices as the compose example ([its README](../../../deploy/compose/README.md#redis): one Redis, a password, no persistence needed, `maxmemory-policy noeviction`). A Redis Service `redis` in the namespace `gateway` gives `redis://:<password>@redis.gateway.svc.cluster.local:6379/0`; use `rediss://` when it serves TLS.
 
 [`examples/helm-values.yaml`](../examples/helm-values.yaml) sets the image, two replicas, the Secret mount and an ingress. Its `image.repository` and `image.tag` are placeholders: set your mirror and a released version. The configuration goes in as `config` (the chart writes it into a Secret named by the release, key `MCP_GATEWAY_CONFIG`), here from the JSON file with `--set-json`. Alternatively point `existingSecret.name` at a Secret you manage (sealed secrets, external-secrets): the chart then cannot check the document, so you must set `existingSecret.sharedState=true` when more than one replica runs and set `terminationGracePeriodSeconds`.
 
@@ -122,6 +129,7 @@ Neither `.env`, `config.json` nor `secrets/` belongs in version control.
 - **Configuration:** compose mounts `MCP_GATEWAY_CONFIG_FILE` at `/etc/mcp-gateway/config.json`, and a one-line entrypoint loads it into `MCP_GATEWAY_CONFIG`: a missing file stops the start, and an invalid document is refused by the gateway with `startup refused: invalid MCP_GATEWAY_CONFIG: <key>: <rule>` in `docker compose logs gateway`. Every `*_file` key names a file under `/run/mcp-gateway/secrets/`, the `gateway/` directory of `MCP_GATEWAY_SECRETS_DIR`, mounted read-only.
 - **Hardening:** read-only root filesystem, all capabilities dropped, `no-new-privileges`, resource limits (1 CPU and 512 MB for the gateway), `restart: unless-stopped`, log rotation. Redis sits on an `internal` network with no route out and no published port. The gateway's healthcheck calls `/readyz`, which answers `503` while Redis is unreachable, so `--wait` fails for a gateway that cannot serve.
 - **Redis:** it keeps nothing across a restart on purpose (sessions, cached credentials and rate-limit buckets all expire and are rebuilt), and with `noeviction` a full Redis makes the gateway answer `503` rather than drop a session binding. For the `store_redis` resolver, use your own persistent Redis for the keys, not this one.
+- **Changing the configuration:** compose mounts `config.json` and the gateway reads it once, at start; `docker compose up -d` does not restart a running gateway for a changed file. Apply a change with `docker compose restart gateway` (the same for a new `state-encryption-key` or webhook secret). The `static` resolver's mapping and key files are the exception: they are re-read without a restart.
 - **TLS:** the gateway is published on `127.0.0.1:8000` over plain HTTP. Put a reverse proxy on the host name of `public_url`; it must not buffer, compress or time out the event streams, which `nginx.example.conf` does (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
 - **Identity provider:** with the Keycloak template of chapter 6, `auth.issuer` is `https://<keycloak>/realms/<realm>`; keep the example's `scopes_advertised` and `identity` as they are.
 - **Image:** the examples name the release image; its public pull location is not announced yet, so until then mirror the image into your own registry and set `MCP_GATEWAY_IMAGE` to the mirror.

@@ -28,7 +28,7 @@ Only relevant with `state.type` `redis`. One file holds the base64 of 32 random 
 
 During a rolling update the two generations simply do not see each other's entries. Rotate in a quiet window, or accept those effects. With `state.type` `memory` the file is not used. Every replica sharing a Redis must end up on the same file.
 
-To rotate: write the new file into the Secret that is mounted, then `kubectl rollout restart` (mounted Secrets are not watched).
+To rotate: write the new file into the Secret that is mounted, then `kubectl rollout restart` (mounted Secrets are not watched). With the compose example, replace `secrets/gateway/state-encryption-key` and run `docker compose restart gateway`.
 
 ### The webhook's HMAC secret and client certificate
 
