@@ -161,7 +161,15 @@ curl -sS --max-time 30 -H @sponsor.hdr -H 'Content-Type: application/json' \
   "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens" > minted.json
 ```
 
-Expected: `data.token` is the key (it starts with `oat_`) and `data.identifier` is the token's id, which you need to revoke it. The fixture reads `token` from this answer and writes it to a file of mode 600. Do the same: store the key in your secret store at once and do not leave `minted.json` around.
+Expected: `data.token` is the key (it starts with `oat_`) and `data.identifier` is the token's id, which you need to revoke it. The fixture reads `token` from this answer and writes it to a file of mode 600. Do the same: keep the identifier, write the key to its own file (the `static` resolver and the example webhook of chapter 4 read one key per file), move it to your secret store, and delete `minted.json`:
+
+<!-- not-config -->
+```bash
+umask 077
+sed -n 's/.*"identifier": *\([0-9]*\).*/\1/p' minted.json                 # the token identifier, for 3.9
+sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' minted.json > alice.key       # the key, one per file
+rm minted.json
+```
 
 `api-key` is the scope the fixture uses for the keys the gateway holds. The sponsor service account's own key has scope `api-secret`. Give the gateway only `api-key` keys: the service account's key can create organizations, users and keys, and must stay out of the gateway.
 
@@ -172,7 +180,7 @@ Call `GET /users/me` **with the new key** (not the service account's):
 <!-- not-config -->
 ```bash
 umask 077
-printf 'Authorization: Bearer %s\n' "$(sed -n 's/.*"token": *"\([^"]*\)".*/\1/p' minted.json)" > alice.hdr
+printf 'Authorization: Bearer %s\n' "$(cat alice.key)" > alice.hdr
 curl -sS --max-time 30 -H @alice.hdr -H 'Accept: application/json' "$ALIEN_API/users/me"
 ```
 
@@ -210,7 +218,7 @@ curl -sS --max-time 30 -X DELETE -H @sponsor.hdr \
   "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens/$TOKEN_IDENTIFIER"
 ```
 
-The list returns each key's `name` and `identifier`. A revoked key is refused by Alien (`401` on `/users/me`); a gateway that still holds it answers its clients with `-31001` until the resolver cache entry is dropped (chapter 8 explains how to rotate without that gap).
+The list returns each key's `identifier` and its `name`, which the platform prefixes with the key's type: a key minted with the name `mcp-gateway` is listed as `API_KEY: mcp-gateway`. Match on the identifier you kept at minting. A revoked key is refused by Alien (`401` on `/users/me`); a gateway that still holds it answers its clients with `-31001` until the resolver cache entry is dropped (chapter 8 explains how to rotate without that gap).
 
 ## What you now have
 
