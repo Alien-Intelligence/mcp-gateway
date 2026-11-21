@@ -119,7 +119,7 @@ MCP clients register themselves (RFC 7591) at `<issuer>/clients-registrations/op
 | Trusted Hosts | `trusted-hosts`: the list below | Every redirect URI, and `client_uri`/`rootUrl`/`baseUrl` if sent, must be on one of these hosts. |
 | Trusted Hosts | `host-sending-registration-request-must-match: false` | The registration request comes from the vendor's servers (claude.ai, chatgpt.com, Azure) or from the user's own computer (VS Code, Cursor), whose addresses you cannot list. When `true`, Keycloak resolves each trusted host name and compares the addresses with the sender's: every real client would be refused. |
 | Trusted Hosts | `client-uris-must-match: true` | The check that matters: a client can only register redirect URIs on the hosts below. |
-| Max Clients Limit | `1000` | Registration is open to anyone, so this bounds how many clients can be created (Keycloak counts every client of the realm, its built-in ones included). When it is reached, every new registration fails: monitor the client count, and delete registered clients that no longer sign in. |
+| Max Clients Limit | `1000` | Registration is open to anyone, so this bounds how many clients can be created (Keycloak counts every client of the realm, its built-in ones included). **Anyone can reach the limit on purpose**: 1000 anonymous requests, and from then on every new registration fails, so no new user of a client that registers per connection (Claude does) can sign in until you delete clients. Rate-limit the registration endpoint at your reverse proxy ([below](#rate-limit-the-registration-endpoint)), monitor the client count, and delete registered clients that no longer sign in. |
 | Consent Required | (default) | Every registered client shows a consent screen naming it and its scopes before its first token: the user's chance to notice a client they did not start. |
 | Full Scope Disabled, Allowed Protocol Mapper Types, Allowed Client Scopes (`allow-default-scopes: true`), Allowed Registration Web Origins | (defaults) | No full role scope, no custom mappers, only the realm's default and optional client scopes, no browser (CORS) registration. |
 
@@ -171,6 +171,28 @@ From the policy's source ([`TrustedHostClientRegistrationPolicy.java` at 26.8.2]
 - **One untrusted URI refuses the whole registration**, and so does an untrusted `client_uri`.
 
 If you want stricter redirect rules for registered clients, Keycloak's `secure-redirect-uris-enforcer` client policy executor can refuse wildcards, plain http or private-use schemes; check it against every client you support first (Cursor's registration includes a private-use scheme and a plain-http loopback URI).
+
+### Rate-limit the registration endpoint
+
+Keycloak has no rate limit of its own on anonymous registration. Put one in your reverse proxy, on the registration path of the realm only, so that sign-ins and token refreshes are never throttled. With nginx (adapt the realm name and the `proxy_pass` to your existing Keycloak location):
+
+```nginx
+# http {} context
+limit_req_zone $binary_remote_addr zone=keycloak_registration:10m rate=30r/m;
+
+# server {} context of the Keycloak host
+location /realms/example-publisher/clients-registrations/ {
+    limit_req zone=keycloak_registration burst=60 nodelay;
+    limit_req_status 429;
+    proxy_pass http://keycloak:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $host;
+}
+```
+
+The limit is per source address, and the hosted clients register from their vendor's servers: every Claude, ChatGPT or Copilot Studio user of your gateway shares the few addresses of that vendor. Size the rate to your peak of new connections, not to one user, and watch for `429` on this path. A rate limit slows an exhaustion of the Max Clients limit down; it does not prevent it. Monitoring the client count does.
 
 ## CIMD (experimental)
 
