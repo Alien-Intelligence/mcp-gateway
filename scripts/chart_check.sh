@@ -3,10 +3,13 @@
 #   1. helm lint of every values file that must render
 #   2. helm template of each of them, piped to kubeconform -strict against the Kubernetes JSON
 #      schemas (and the datree CRDs catalog for the Gateway API HTTPRoute)
-#   3. every values file that must NOT render has to make helm template fail with the documented
+#   3. the gateway configuration each render carries, taken from its Secret and run through the
+#      gateway's own loader (scripts/chart_config_check.py): what the loader refuses there, the pod
+#      would refuse at start. A render that carries no configuration (existingSecret) must say so.
+#   4. every values file that must NOT render has to make helm template fail with the documented
 #      message (a render that succeeds, or fails for another reason, is a failure)
 #
-# Needs helm and kubeconform on PATH. KUBERNETES_VERSION is the schema version checked against.
+# Needs helm, kubeconform and uv on PATH (the project's dependencies are installed by uv run). KUBERNETES_VERSION is the schema version checked against.
 set -eu
 
 CHART_DIR="${CHART_DIR:-charts/mcp-gateway}"
@@ -19,6 +22,17 @@ ha-no-redis-values.yaml|needs the shared state
 hpa-no-redis-values.yaml|needs the shared state
 grace-too-short-values.yaml|must be greater than the largest upstream read_timeout_seconds
 existing-secret-no-shared-state-values.yaml|existingSecret.sharedState=true
+no-version-values.yaml|'version'
+'
+
+# values file | text of the refusal: these render, and the gateway's loader must refuse them
+REFUSED_CONFIGS='
+refused-audience-values.yaml|public_url must be listed in auth.audiences
+'
+
+# values files whose render carries no inline configuration
+NO_INLINE_CONFIG='
+existing-secret-values.yaml
 '
 
 status=0
@@ -43,6 +57,26 @@ render_ok() {
     done
 }
 
+config_check() {
+    for values in "$CHART_DIR"/ci/*-values.yaml; do
+        name=$(basename "$values")
+        case "$EXPECTED_FAILURES" in
+            *"$name|"*) continue ;;
+        esac
+        echo "== $name: gateway configuration"
+        if refusal=$(echo "$REFUSED_CONFIGS" | grep -F "$name|" | cut -d'|' -f2-); [ -n "$refusal" ]; then
+            set -- --expect-refused "$refusal"
+        elif echo "$NO_INLINE_CONFIG" | grep -qxF "$name"; then
+            set -- --expect-none
+        else
+            set --
+        fi
+        helm template check "$CHART_DIR" -f "$values" --namespace check |
+            uv run --frozen --no-dev python -I scripts/chart_config_check.py "$@" ||
+            failed "gateway configuration $name"
+    done
+}
+
 render_fails() {
     echo "$EXPECTED_FAILURES" | while IFS='|' read -r name message; do
         [ -n "$name" ] || continue
@@ -63,5 +97,6 @@ render_fails() {
 }
 
 render_ok
+config_check
 render_fails
 exit "$status"
