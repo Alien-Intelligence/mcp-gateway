@@ -37,7 +37,7 @@ def slug(heading: str) -> str:
     """GitHub's anchor for a heading: lower case, markup dropped, spaces to hyphens."""
     text = re.sub(r"`([^`]*)`", r"\1", heading)
     text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"[*_~]", "", text.lower().strip())
+    text = re.sub(r"[*~]", "", text.lower().strip())
     text = re.sub(r"[^\w\- ]", "", text)
     return text.replace(" ", "-")
 
@@ -84,9 +84,12 @@ def check_file(path: Path, root: Path) -> list[Broken]:
             broken.append(Broken(path, number, target, "points outside the repository"))
         elif not destination.exists():
             broken.append(Broken(path, number, target, "no such file or directory"))
-        elif fragment and destination.suffix == ".md":
-            if unquote(fragment) not in anchors(destination):
-                broken.append(Broken(path, number, target, "no such heading"))
+        elif (
+            fragment
+            and destination.suffix == ".md"
+            and unquote(fragment) not in anchors(destination)
+        ):
+            broken.append(Broken(path, number, target, "no such heading"))
     return broken
 
 
