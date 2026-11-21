@@ -1,0 +1,33 @@
+# Values for charts/mcp-gateway, next to the configuration document config-ha.json.
+# Install:
+#   helm install gateway charts/mcp-gateway -f helm-values.yaml --set-json "config=$(cat config-ha.json)"
+image:
+  repository: registry.example.com/mcp-gateway   # <registry>/mcp-gateway
+  tag: "X.Y.Z"                                    # a released version, never "latest"
+replicaCount: 2
+# The Secret holds one file per *_file key of the configuration, named as the key's path ends:
+# state-redis-url, state-encryption-key, webhook-hmac, otlp-headers.
+secretMounts:
+  - name: secrets
+    secretName: mcp-gateway-secrets
+    mountPath: /run/gateway/secrets
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: mcp-gateway
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts:
+    - host: mcp.example.com
+  tls:
+    - secretName: mcp-example-com-tls
+      hosts: [mcp.example.com]
