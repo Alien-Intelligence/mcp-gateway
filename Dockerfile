@@ -33,6 +33,7 @@ LABEL org.opencontainers.image.title="mcp-gateway" \
       org.opencontainers.image.description="OAuth resource server and streaming reverse proxy for MCP servers that swaps the caller's identity for a per-user API key" \
       org.opencontainers.image.source="https://github.com/alien-intelligence/mcp-gateway" \
       org.opencontainers.image.vendor="Alien Intelligence" \
+      org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.created="${BUILD_DATE}"

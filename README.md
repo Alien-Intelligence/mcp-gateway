@@ -1,5 +1,7 @@
 # Alien MCP Gateway
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 An OAuth-protected front door for Alien MCP servers that you host on your own domain. MCP clients (Claude, ChatGPT, Microsoft Copilot Studio, VS Code, Cursor) sign in with **your own OAuth server**, for example Keycloak. The gateway checks the token, maps the verified identity to an Alien API key through a pluggable credential resolver, and streams the MCP traffic to Alien unchanged. Your users sign in with their usual accounts, and Alien sees one billed user per API key.
 
 ```
@@ -120,4 +122,4 @@ This repository is a read-only mirror of the canonical one; see [CONTRIBUTING.md
 
 ## License
 
-See LICENSE
+MIT, see [LICENSE](LICENSE).

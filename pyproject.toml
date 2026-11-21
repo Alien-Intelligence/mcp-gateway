@@ -3,6 +3,8 @@ name = "mcp-gateway"
 version = "0.6.2"
 description = "Alien MCP Gateway: an OAuth resource server in front of Alien MCP servers that swaps the caller's identity for an Alien API key"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "anyio>=4.16.0",
