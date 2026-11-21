@@ -41,9 +41,9 @@ existingSecret:
 #       - {key: state-redis-url, path: state-redis-url}
 secretMounts: []
 
-# Secrets read as environment variables, by reference only (valueFrom.secretKeyRef). The gateway
-# itself reads no other variable than MCP_GATEWAY_CONFIG; this is for sidecar-free agents the image
-# may carry, such as OTEL_* settings.
+# Secrets read as environment variables, by reference only (valueFrom.secretKeyRef). The gateway's
+# own settings all come from MCP_GATEWAY_CONFIG; its OpenTelemetry exporters also read the standard
+# OTEL_EXPORTER_OTLP_* variables for what the config's otlp block does not carry (headers, CA).
 secretEnv: []
 #   - {name: OTEL_EXPORTER_OTLP_HEADERS, secretName: otlp-auth, key: headers}
 

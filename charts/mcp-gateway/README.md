@@ -15,7 +15,7 @@ A minimal two-replica `my-values.yaml` (the configuration keys are all required,
 ```yaml
 image:
   repository: registry.example.com/mcp-gateway   # your mirror; the default is the release pipeline's registry
-  tag: "0.5.0"
+  tag: "<version>"   # a released version; the default is the chart appVersion
 replicaCount: 2
 config:            # the MCP_GATEWAY_CONFIG document, as YAML
   version: 1       # required: the configuration schema version (the only one supported)
@@ -40,7 +40,7 @@ secretMounts:
 
 - The configuration document goes into a Secret holding the key `MCP_GATEWAY_CONFIG`. Either the chart renders it from `config` (an object, written to JSON), or you point `existingSecret.name` at a Secret you manage.
 - The files a configuration names (the Redis URL and encryption key of `state`, the `static` resolver's mapping and key files, a webhook HMAC secret, database DSNs, an OTLP headers file) live in Secrets you create, mounted read-only by `secretMounts` (mode 0440, group 1000). The paths in `config` are the mount paths.
-- The gateway reads no environment variable besides `MCP_GATEWAY_CONFIG`. `secretEnv` exists for variables that must carry a secret and takes references only (`valueFrom.secretKeyRef`); the Deployment never holds a secret value.
+- The gateway's settings all come from `MCP_GATEWAY_CONFIG`; its OpenTelemetry exporters also read the standard `OTEL_EXPORTER_OTLP_*` variables for what the configuration's `otlp` block does not carry (configuration reference, observability). `secretEnv` exists for variables that must carry a secret and takes references only (`valueFrom.secretKeyRef`); the Deployment never holds a secret value.
 - The configuration Secret carries a checksum in the pod template when the chart renders it, so a `helm upgrade` that changes `config` rolls the pods. The mounted Secrets and an `existingSecret` are not watched: roll with `kubectl rollout restart` (the `static` resolver re-reads its mapping file by itself).
 
 ## Render-time checks
