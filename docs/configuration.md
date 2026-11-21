@@ -400,7 +400,7 @@ The refusal has three shapes, chosen so that the sender can read it:
 
 | Request | Answer |
 |---|---|
-| A single `tools/call` with an id | HTTP `200` and a JSON-RPC result with `isError: true`, a text "Rate limit reached for this account. Retry in N s." and `_meta["club.alien/retryAfterSeconds"]: N`. Header `Retry-After: N`. |
+| A single `tools/call` with an id | HTTP `200` and a JSON-RPC result with `isError: true`, a text "Rate limit reached for this account. Retry in N s." and `_meta["alien.club/retryAfterSeconds"]: N`. Header `Retry-After: N`. |
 | Any other single request with an id | HTTP `200` and a JSON-RPC error `-31014` with `data.retry_after_seconds: N`. Header `Retry-After: N`. |
 | No reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request) | HTTP `429`, header `Retry-After: N` and a JSON-RPC error `-31014` with id `null`. |
 

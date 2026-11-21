@@ -283,7 +283,7 @@ UPSTREAM_UNAUTHORIZED = -31001
 SESSION_NOT_FOUND = -31007
 STATE_UNAVAILABLE = -31013
 RATE_LIMITED = -31014
-RETRY_AFTER_META_KEY = "club.alien/retryAfterSeconds"
+RETRY_AFTER_META_KEY = "alien.club/retryAfterSeconds"
 
 # compose.yaml: `state.key_prefix` of the pair, and the key pattern of its resolver store.
 STATE_PREFIX = "mcp-gateway:state:"

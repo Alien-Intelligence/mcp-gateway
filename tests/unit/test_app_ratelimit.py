@@ -106,7 +106,7 @@ async def test_tools_call_over_the_limit_is_a_tool_error_result_with_200(
         "result": {
             "content": [{"type": "text", "text": MESSAGE.format(n=retry)}],
             "isError": True,
-            "_meta": {"club.alien/retryAfterSeconds": retry},
+            "_meta": {"alien.club/retryAfterSeconds": retry},
         },
     }
     assert upstream.requests == []
