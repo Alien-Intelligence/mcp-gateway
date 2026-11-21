@@ -518,7 +518,7 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
     "audiences": ["https://mcp.example.com/mcp"],
     "algorithms": ["RS256"],
     "required_scopes": [],
-    "scopes_advertised": ["openid", "mcp-gateway"],
+    "scopes_advertised": ["mcp-gateway", "offline_access"],
     "clock_skew_seconds": 5,
     "jwks_cache_ttl_seconds": 300,
     "jwks_max_stale_seconds": 3600,

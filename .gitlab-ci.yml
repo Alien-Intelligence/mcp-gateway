@@ -34,7 +34,7 @@ variables:
   PYTHON_EXTRAS: "--extra dev"
   WITH_TYPE_CHECK: "true"
   LINT_DIRS: "src/ tests/ scripts/ dev/"
-  # Unit tests only: the integration, e2e_stub (job e2e-stub) and e2e (local, README) suites need
+  # Unit tests only: the integration, e2e_stub (job e2e-stub) and e2e (local, docs/development.md) suites need
   # the compose stack.
   PYTEST_MARKER: "not e2e and not e2e_stub and not integration"
 
@@ -43,7 +43,7 @@ variables:
 # collector and the fault-injection upstream stub (compose stub target). The harness
 # runs in a container on the host network of the Docker daemon (the dind service), so the
 # localhost issuers resolve as on a laptop. The steps live in scripts/ci_e2e_stub.sh, which also
-# runs inside a local docker:dind container (README): run it there before pushing, CI minutes
+# runs inside a local docker:dind container (docs/development.md): run it there before pushing, CI minutes
 # are paid. The stub target holds fake keys only, so the artifacts hold no secret.
 .e2e-changes: &e2e-changes
   - src/**/*
@@ -98,7 +98,7 @@ e2e-stub:
 # The real-dev suite (pytest -m e2e): the same stack against the real dev MCP server and the Alien
 # dev platform, which meters the calls. Merge requests and the default branch only, never a push
 # to dev: it takes about a quarter of an hour and bills a few dev calls. The inputs are CI
-# variables (names in README.md, "CI"); the personas' keys, the sponsor service account's key and
+# variables (names in docs/development.md, "CI"); the personas' keys, the sponsor service account's key and
 # the fixture are File-type variables, protected, so the job gets them on protected refs only.
 # One run at a time: the suite reads each call back as the single new event in the shared
 # dev feeds. The artifacts hold evidence (ids, claims) and the compose logs: developers only.

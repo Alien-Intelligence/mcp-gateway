@@ -16,8 +16,8 @@
     ],
     "required_scopes": [],
     "scopes_advertised": [
-      "openid",
-      "mcp-gateway"
+      "mcp-gateway",
+      "offline_access"
     ],
     "clock_skew_seconds": 5,
     "jwks_cache_ttl_seconds": 300,

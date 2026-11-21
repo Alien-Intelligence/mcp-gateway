@@ -1,7 +1,7 @@
 # CI real-dev target: the gateways forward to the real dev MCP server and the Alien dev platform
 # is the metering backend, but the state comes from CI-provided files instead of a directory on
 # the developer's machine (compose.dev.yaml), so it works against a remote daemon (the dind
-# service). Used by scripts/ci_e2e_dev.sh; the variables are listed in README.md.
+# service). Used by scripts/ci_e2e_dev.sh; the variables are listed in docs/development.md.
 #
 # Key files and the fixture reach the containers as Compose secrets taken from environment
 # variables (E2E_DEV_*_CONTENT, set by the script from the CI-provided files): Compose copies such
