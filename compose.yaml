@@ -39,6 +39,12 @@ x-e2e-tools: &e2e-tools
 x-gateway: &gateway
   build:
     context: .
+    # The Dockerfile requires its OCI label values. Stack images are built from the working tree,
+    # never published, so they say so instead of naming a release.
+    args:
+      VERSION: "0.0.0-dev"
+      VCS_REF: "working-tree"
+      BUILD_DATE: "1970-01-01T00:00:00Z"
   volumes:
     - state:/run/gateway/state:ro
     - conn:/run/gateway/conn:ro
