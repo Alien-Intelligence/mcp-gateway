@@ -2,9 +2,9 @@
 # The real-dev end-to-end run, as the CI job `e2e-dev` runs it: the stack (IdPs, credential
 # stores, webhook, collector, gateways) against the real dev MCP server and the Alien dev
 # platform. Needs a Docker daemon and the compose plugin, nothing else, so it runs inside a
-# docker:dind container as in CI (README, "CI").
+# docker:dind container as in CI (docs/development.md, "CI").
 #
-# Inputs, from CI variables (names only in the README): the personas' key files, the sponsor
+# Inputs, from CI variables (names only in docs/development.md): the personas' key files, the sponsor
 # service account's key file and the fixture file as file paths, the upstream URL, the API base
 # and an existing job id as plain values. The identity providers' and stores' secrets are
 # throwaway, generated per run.
