@@ -1,4 +1,6 @@
 # EXPECTED TO FAIL: above the largest read_timeout_seconds (130) but below the stop budget (130 + 20 + OTLP flush 14 + preStop 5 = 169).
+image:
+  repository: registry.example.com/team/mcp-gateway
 terminationGracePeriodSeconds: 160
 config:
   version: 1
