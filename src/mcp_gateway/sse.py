@@ -10,6 +10,7 @@ import re
 from collections.abc import Iterator
 from typing import Any
 
+from mcp_gateway import boundedjson
 from mcp_gateway.jsonrpc import UPSTREAM_STREAM_FAILED, error_body
 
 
@@ -69,9 +70,9 @@ def parse_reply(data: bytes, request_id: str | int) -> dict[str, Any] | None:
     if b'"result"' not in data and b'"error"' not in data:
         return None
     try:
-        document: Any = json.loads(data)
-    except (ValueError, RecursionError):
-        # Not JSON, or nested past the interpreter's limit: not a reply the relay can track.
+        document: Any = boundedjson.loads(data)
+    except ValueError:
+        # Not JSON, or nested past ``boundedjson.MAX_DEPTH``: not a reply the relay can track.
         return None
     if not isinstance(document, dict) or ("result" not in document and "error" not in document):
         return None

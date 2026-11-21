@@ -11,6 +11,7 @@ JSON-RPC error is not a tool list, so it is relayed unchanged.
 import json
 from typing import Any
 
+from mcp_gateway import boundedjson
 from mcp_gateway.jsonrpc import GATEWAY_ERROR, error_body
 from mcp_gateway.sse import data_of, without_bom
 from mcp_gateway.tool_policy import EffectivePolicy
@@ -39,7 +40,7 @@ def policy_failed_event(request_id: str | int | None) -> bytes:
 def _serialize(document: dict[str, Any]) -> bytes:
     try:
         return json.dumps(document, separators=(",", ":"), allow_nan=False).encode()
-    except (ValueError, RecursionError) as exc:
+    except ValueError as exc:
         raise ToolPolicyError("unserializable") from exc
 
 
@@ -78,8 +79,8 @@ def _filtered(
 def filter_json_reply(body: bytes, request_id: str | int, policy: EffectivePolicy) -> bytes:
     """The body to send for the ``application/json`` reply to a ``tools/list``."""
     try:
-        document: Any = json.loads(body)
-    except (ValueError, RecursionError) as exc:
+        document: Any = boundedjson.loads(body)
+    except ValueError as exc:
         raise ToolPolicyError("unparsable") from exc
     if not isinstance(document, dict):
         raise ToolPolicyError("unexpected_shape")
@@ -168,7 +169,7 @@ class SseListFilter:
     @staticmethod
     def _parse(data: bytes) -> Any:
         try:
-            return json.loads(data.decode("utf-8"))
-        except (ValueError, RecursionError) as exc:
-            # Not UTF-8, not JSON, or nested past the interpreter's limit.
+            return boundedjson.loads(data.decode("utf-8"))
+        except ValueError as exc:
+            # Not UTF-8, not JSON, or nested past ``boundedjson.MAX_DEPTH``.
             raise ToolPolicyError("unparsable") from exc
