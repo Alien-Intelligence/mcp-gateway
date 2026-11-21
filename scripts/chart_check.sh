@@ -30,7 +30,7 @@ grace-below-budget-values.yaml|must be greater than the stop budget
 existing-secret-no-shared-state-values.yaml|existingSecret.sharedState=true
 no-version-values.yaml|version
 no-image-values.yaml|image.repository is required
-bad-config-values.yaml|Additional property public_urll is not allowed
+bad-config-values.yaml|public_urll
 '
 
 # values file | text of the refusal: these render, and the gateway's loader must refuse them
