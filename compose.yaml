@@ -339,11 +339,16 @@ services:
     ports:
       - "127.0.0.1:18004:8080"
     networks: [gatewaydev]
+    # nginx resolves the replica names once, at start. `restart: true` restarts it whenever compose
+    # recreates a replica, so it never keeps an address Docker has since given to another container
+    # (seen: half the requests answered by gateway-hydra after the replicas alone were rebuilt).
     depends_on:
       gateway-ha-a:
         condition: service_healthy
+        restart: true
       gateway-ha-b:
         condition: service_healthy
+        restart: true
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/_lb/health"]
       interval: 5s
