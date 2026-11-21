@@ -72,9 +72,10 @@ serviceAccount:
   # The gateway never calls the Kubernetes API.
   automountServiceAccountToken: false
 
-# Seconds the pod gets to stop. null: the largest upstream read_timeout_seconds of an inline
-# config plus the shutdown budget (20 s of detached-read deadlines, preStopSleepSeconds, 5 s).
-# A value that is not greater than that read timeout fails the render.
+# Seconds the pod gets to stop. The stop budget of an inline config is the largest upstream
+# read_timeout_seconds (in-flight requests) + 20 s (detached reads) + the OTLP flush when enabled
+# + preStopSleepSeconds. null: that budget plus 5 s. A value not greater than the budget fails the
+# render (chart README, "Shutdown").
 terminationGracePeriodSeconds: null
 # The pod keeps serving this long after it is marked terminating, so Services and load balancers
 # stop sending it requests before it stops accepting them.
