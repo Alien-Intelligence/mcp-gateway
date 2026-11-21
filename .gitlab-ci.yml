@@ -218,8 +218,9 @@ gitleaks:
 # It is a blocking gate (allow_failure: false) that runs only on `main` and on merge requests that
 # target `main`, because that is where the rewritten history will be: the history of `dev` still holds
 # strings the rewrite will remove, so the job WOULD fail there today. Its own tests (a planted string
-# must be found) run first, in this image, which has git.
-history-denylist:
+# must be found) run in `history-denylist-tests` on every pipeline, so a change to the script is
+# tested where it is made; the generic unit-test image has no git, so they are skipped there.
+.history-denylist-base:
   stage: test
   image:
     # uv with Python 3.12, pinned by the digest of the multi-arch index (as the chart job).
@@ -231,8 +232,16 @@ history-denylist:
     UV_LINK_MODE: copy
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl
+
+history-denylist-tests:
+  extends: .history-denylist-base
   script:
     - uv run --frozen --extra dev pytest tests/unit/test_history_denylist.py -q
+
+history-denylist:
+  extends: .history-denylist-base
+  needs: [history-denylist-tests]
+  script:
     - sh scripts/ci_history_denylist.sh
   allow_failure: false
   rules:
