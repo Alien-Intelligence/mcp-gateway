@@ -70,9 +70,11 @@ def parse_reply(data: bytes, request_id: str | int) -> dict[str, Any] | None:
     if b'"result"' not in data and b'"error"' not in data:
         return None
     try:
-        document: Any = boundedjson.loads(data)
+        # Strict UTF-8 like the request side: bytes ``json.loads`` would also read as UTF-16.
+        document: Any = boundedjson.loads(data.decode("utf-8"))
     except ValueError:
-        # Not JSON, or nested past ``boundedjson.MAX_DEPTH``: not a reply the relay can track.
+        # Not UTF-8, not JSON, or nested past ``boundedjson.MAX_DEPTH``: not a reply the relay can
+        # track.
         return None
     if not isinstance(document, dict) or ("result" not in document and "error" not in document):
         return None

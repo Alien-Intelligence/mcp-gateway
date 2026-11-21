@@ -79,7 +79,10 @@ def _filtered(
 def filter_json_reply(body: bytes, request_id: str | int, policy: EffectivePolicy) -> bytes:
     """The body to send for the ``application/json`` reply to a ``tools/list``."""
     try:
-        document: Any = boundedjson.loads(body)
+        # Strict UTF-8, as the request side reads it: ``json.loads`` on bytes would accept UTF-16.
+        document: Any = boundedjson.loads(body.decode("utf-8"))
+    except boundedjson.JsonTooDeepError as exc:
+        raise ToolPolicyError("too_deep") from exc
     except ValueError as exc:
         raise ToolPolicyError("unparsable") from exc
     if not isinstance(document, dict):
@@ -170,6 +173,8 @@ class SseListFilter:
     def _parse(data: bytes) -> Any:
         try:
             return boundedjson.loads(data.decode("utf-8"))
+        except boundedjson.JsonTooDeepError as exc:
+            raise ToolPolicyError("too_deep") from exc
         except ValueError as exc:
-            # Not UTF-8, not JSON, or nested past ``boundedjson.MAX_DEPTH``.
+            # Not UTF-8, or not JSON.
             raise ToolPolicyError("unparsable") from exc

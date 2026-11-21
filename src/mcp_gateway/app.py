@@ -499,6 +499,8 @@ class Gateway:
         if rpc.kind is BodyKind.UNPARSABLE or (
             rpc.kind is not BodyKind.EMPTY and declares_non_utf8_charset(headers)
         ):
+            if rpc.too_deep:
+                audit.reason = "too_deep"
             audit.emit(status=400, outcome="unparsable_request")
             return json_rpc_response(400, PARSE_ERROR, PARSE_ERROR_MESSAGE, None)
         if rpc.invalid_id:

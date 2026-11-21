@@ -4,6 +4,7 @@ import pytest
 
 from mcp_gateway.jsonrpc import (
     NO_RPC,
+    TOO_DEEP,
     UNPARSABLE,
     BodyKind,
     check_mcp_headers,
@@ -213,11 +214,16 @@ MID_DEEP = b"[" * 500 + b"]" * 500
 
 
 def test_a_deeply_nested_body_is_unreadable_not_a_crash() -> None:
-    assert parse_request(DEEP) == UNPARSABLE
+    assert parse_request(DEEP) == TOO_DEEP
 
 
 def test_a_body_nested_past_the_gateway_limit_is_unreadable_on_every_python() -> None:
-    assert parse_request(MID_DEEP) == UNPARSABLE
+    assert parse_request(MID_DEEP) == TOO_DEEP
+
+
+def test_a_too_deep_body_is_unparsable_with_its_own_flag() -> None:
+    assert TOO_DEEP.kind is BodyKind.UNPARSABLE and TOO_DEEP.too_deep
+    assert not UNPARSABLE.too_deep
 
 
 @pytest.mark.parametrize(
