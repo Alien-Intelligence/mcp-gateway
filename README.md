@@ -86,6 +86,33 @@ Every response carries an `x-request-id` the gateway generated (a client-sent on
 
 The line holds identifiers, the method and tool name, the outcome and the latency; never content, arguments, tokens, keys or session ids. `request_id` joins the line to the trace (`trace_id`) and to the client's response header. Field list and outcomes: [`docs/configuration.md`](docs/configuration.md#audit-line).
 
+## Container image
+
+The release flow builds one image for `linux/amd64` and `linux/arm64` and pushes it to the registry configured in `.gitlab-ci.yml` (`REGISTRY`, `IMAGE_NAME`). Tags: `<version>` from `main`, `<version>-rc` from `staging`, `<version>-dev` from `dev`, plus the moving tags `latest`, `latest-staging` and `latest-dev`. Pin deployments to a version, or better to the digest. Each image carries an SBOM and a provenance attestation, and the OCI labels `source`, `version`, `revision` and `created`.
+
+The image runs as uid 1000 with no writable path: the gateway keeps its state in memory or in Redis and logs to stdout. Run it the way it is tested, read-only and without capabilities:
+
+```bash
+docker run --read-only --cap-drop ALL --security-opt no-new-privileges \
+  -e MCP_GATEWAY_CONFIG="$(cat config.json)" \
+  -v "$PWD/secrets:/run/secrets:ro" \
+  -p 8000:8000 <registry>/mcp-gateway:<version>
+
+curl http://localhost:8000/healthz   # {"status":"ok"}: the process is up
+curl http://localhost:8000/readyz    # {"status":"ready"}: the shared state answers; 503 drains the replica
+```
+
+The image's `HEALTHCHECK` is a real GET of `/healthz` on the port in `MCP_GATEWAY_CONFIG`, so `docker ps` shows `healthy` once the gateway serves. In Kubernetes use `/healthz` for the liveness probe and `/readyz` for the readiness probe, and set `readOnlyRootFilesystem: true`.
+
+Build it yourself (the version, revision and date are required build arguments, a build without them fails):
+
+```bash
+docker build --build-arg VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml) \
+  --build-arg VCS_REF=$(git rev-parse HEAD) --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) -t mcp-gateway .
+```
+
+Both base images are pinned by digest in the `Dockerfile`; bump them on purpose. CI scans the pushed digest with trivy and fails on any HIGH or CRITICAL vulnerability that has a fix, so a failing scan means a new base digest, not a retry.
+
 ## Development stack
 
 One compose file set (`compose.yaml` plus a target file) runs the whole thing on loopback. Three targets share it:
@@ -229,6 +256,7 @@ It needs the dev target up (`docker compose up -d --build --wait` with `.env`), 
 | Job | When | What |
 |---|---|---|
 | lint, type check, unit tests, SAST, secret detection | every pipeline | shared templates; `PYTEST_MARKER` keeps the stack-bound suites out |
+| `docker-build`, `image-scan` | the release branch's release commit, and `staging` and `main` | `scripts/ci_image_build.sh` (buildx, both architectures, SBOM and provenance attestations, in a `docker:dind` service), then `scripts/ci_image_scan.sh` (trivy on the pushed digest, CycloneDX SBOM per architecture as an artifact; fails on fixable HIGH or CRITICAL) |
 | `e2e-stub` | merge requests and branches, when code, tests, scripts, `dev/`, compose files, Dockerfiles, `pyproject.toml`, `uv.lock` or `.gitlab-ci.yml` change | `scripts/ci_e2e_stub.sh` in a `docker:dind` service; fake keys only |
 | `e2e-dev` | merge requests and the default branch (never a push to `dev`), same path filter | `scripts/ci_e2e_dev.sh` in a `docker:dind` service against the real dev MCP server and Alien dev platform; one run at a time (`resource_group`) |
 
