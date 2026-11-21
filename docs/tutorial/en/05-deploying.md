@@ -4,7 +4,15 @@ The gateway is one container image. This chapter covers the two supported ways t
 
 ## 5.1 The image
 
-Write `<registry>/mcp-gateway:<version>` below as the image reference. The release pipeline publishes the image to a registry that is internal to the project, so the **public pull location is announced in the repository README** and not repeated here. Until it is, mirror the image into your own registry and use your reference.
+Write `<registry>/mcp-gateway:<version>` below as the image reference. The **public pull location is announced in the repository README** and not repeated here. Until then, build the image yourself from the repository root, and push it to your own registry (or use the local tag `mcp-gateway:local` on a single host). The three build arguments are required: the build refuses to run without them.
+
+```bash
+docker buildx build \
+  --build-arg VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --tag mcp-gateway:local --load .
+```
 
 - One image for `linux/amd64` and `linux/arm64`. Tags: `<version>` (a release from `main`), `<version>-rc` (`staging`), `<version>-dev` (`dev`) and the moving tags `latest`, `latest-staging`, `latest-dev`.
 - Pin a version, or better the digest. Never run `latest` in production.
@@ -132,7 +140,7 @@ Neither `.env`, `config.json` nor `secrets/` belongs in version control.
 - **Changing the configuration:** compose mounts `config.json` and the gateway reads it once, at start; `docker compose up -d` does not restart a running gateway for a changed file. Apply a change with `docker compose restart gateway` (the same for a new `state-encryption-key` or webhook secret). The `static` resolver's mapping and key files are the exception: they are re-read without a restart.
 - **TLS:** the gateway is published on `127.0.0.1:8000` over plain HTTP. Put a reverse proxy on the host name of `public_url`; it must not buffer, compress or time out the event streams, which `nginx.example.conf` does (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
 - **Identity provider:** with the Keycloak template of chapter 6, `auth.issuer` is `https://<keycloak>/realms/<realm>`; keep the example's `scopes_advertised` and `identity` as they are.
-- **Image:** the examples name the release image; its public pull location is not announced yet, so until then mirror the image into your own registry and set `MCP_GATEWAY_IMAGE` to the mirror.
+- **Image:** `MCP_GATEWAY_IMAGE` has no default and compose refuses to start without it. The public pull location is announced in the repository README; until then, build the image as in 5.1 and set `MCP_GATEWAY_IMAGE=mcp-gateway:local` (or your registry's reference).
 
 Other facts:
 
@@ -156,7 +164,6 @@ curl -si --max-time 10 https://mcp.example.com/mcp -X POST -H 'Content-Type: app
 # 2. The metadata the challenge points to (200)
 curl -s --max-time 10 https://mcp.example.com/.well-known/oauth-protected-resource/mcp
 # {"resource":"https://mcp.example.com/mcp","authorization_servers":["https://idp.example.com/realms/example-publisher"],"scopes_supported":["mcp-gateway","offline_access"],"bearer_methods_supported":["header"]}
-
 ```
 
 The probes `/healthz` and `/readyz` are for the platform, not the internet: the chart's ingress routes only the MCP path and the metadata path.

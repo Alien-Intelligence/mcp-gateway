@@ -1,4 +1,6 @@
 # EXPECTED TO FAIL: grace period below the largest upstream read_timeout_seconds (130).
+image:
+  repository: registry.example.com/team/mcp-gateway
 terminationGracePeriodSeconds: 120
 config:
   version: 1

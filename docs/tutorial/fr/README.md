@@ -10,7 +10,7 @@ Tous les exemples utilisent des noms génériques : `example-publisher`, `mcp.ex
 |---|---|
 | [1. Ce qu'est la passerelle, et ce qu'elle n'est pas](01-what-it-is.md) | Le rôle de la passerelle, ce qu'elle ne fait jamais, l'architecture |
 | [2. Prérequis](02-prerequisites.md) | Ce que votre serveur OAuth doit fournir, réseau et TLS |
-| [3. Le côté Alien](03-alien-side.md) | Les appels d'API exacts qui créent organisations, utilisateurs et clés |
+| [3. Créer le côté Alien](03-alien-side.md) | Les appels d'API exacts qui créent organisations, utilisateurs et clés |
 | [4. Choisir un resolver](04-resolvers.md) | Comment un utilisateur connecté devient une clé Alien ; écrire un webhook |
 | [5. Déploiement](05-deploying.md) | Helm, docker compose, secrets, haute disponibilité |
 | [6. Votre serveur OAuth](06-oauth-server.md) | Configuration de Keycloak, et liste de contrôle pour les autres serveurs |

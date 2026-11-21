@@ -18,7 +18,7 @@ Both configurations are checked by the gateway's own loader in the unit tests, s
 
 ```sh
 cd deploy/compose
-cp .env.example .env                                  # set the image tag
+cp .env.example .env                                  # set MCP_GATEWAY_IMAGE
 cp config.static.example.json config.json             # or config.store-redis.example.json
 ./init-secrets.sh                                     # creates ./secrets
 # edit config.json: public_url, auth (issuer, jwks_uri, audiences), upstreams
@@ -29,7 +29,15 @@ curl -fsS http://127.0.0.1:8000/readyz                # {"status":"ready"}
 
 Neither `.env`, `config.json` nor `secrets/` belongs in version control.
 
-The image is the release image, `rg.fr-par.scw.cloud/ns-data-streaming/mcp-gateway:<version>`. Its public pull location is not announced yet; until it is, mirror the image into your own registry and set `MCP_GATEWAY_IMAGE` to the mirror.
+`MCP_GATEWAY_IMAGE` has no default: compose refuses to start without it. The pull location of the release image is announced in the project README. Until then, build the image from the repository's `Dockerfile` (from the repository root) and set `MCP_GATEWAY_IMAGE=mcp-gateway:local`:
+
+```sh
+docker buildx build \
+  --build-arg VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --tag mcp-gateway:local --load .
+```
 
 ## The configuration
 

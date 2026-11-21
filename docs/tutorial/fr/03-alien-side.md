@@ -53,7 +53,7 @@ Résultat attendu : `success` à true et `data` avec l'`id` de l'utilisateur et 
 
 Ignorez cette étape si vos jeux de données sont déjà partagés avec un groupe parrainé.
 
-Créez le grant, une permission de lecture sur un jeu de données (`CLUSTER_ID` et `DATASET_ID` sont des nombres) :
+Créez le grant, une permission de lecture sur un jeu de données (`12` et `345` sont des identifiants d'exemple : utilisez les identifiants numériques de votre cluster et de votre jeu de données) :
 
 <!-- not-config -->
 ```json
@@ -139,7 +139,7 @@ Appelez sous le compte de service, sans `x-organization-id` :
 <!-- not-config -->
 ```bash
 curl -sS --max-time 30 -H @sponsor.hdr -H 'Content-Type: application/json' \
-  -d '{"userType": "client-managed", "email": "alice@managed-client-x.example", "description": "Alice, example-publisher"}' \
+  -d '{"userType": "client-managed", "email": "alice@managed-client-x.test", "description": "Alice, example-publisher"}' \
   "$ALIEN_API/organizations/$ORG_ID/users"
 ```
 
@@ -226,7 +226,7 @@ Pour chaque personne : un identifiant d'utilisateur Alien, un identifiant d'orga
 
 ## Ce que montre le code du backend
 
-Lu dans les sources du backend, branche `dev` du dépôt de la plateforme au commit `c5d5c746c` (2026-11-20). Rien de ce qui suit n'a été exécuté contre une API réelle pour ce chapitre.
+Lu dans les sources du backend à la date du 2026-11-20. Rien de ce qui suit n'a été exécuté contre une API réelle pour ce chapitre.
 
 **Quel compte et quelle clé.**
 
@@ -241,7 +241,7 @@ Lu dans les sources du backend, branche `dev` du dépôt de la plateforme au com
 
 **Une clé peut-elle être affichée de nouveau ?** Non. La clé brute ne figure que dans la réponse de l'appel d'émission (`data.token`) ; la liste des clés d'un utilisateur renvoie `identifier`, `name`, `abilities`, `lastUsedAt`, `expiresAt` et aucune clé. Une clé perdue se remplace en en émettant une autre et en révoquant la première.
 
-**Disponibilité.** La route d'organisation gérée et le type de compte `managed` sont sur les branches `dev` et `staging` de la plateforme et **ne sont pas sur sa branche `main`** au moment de la rédaction. Savoir si l'API située à `https://api.alien.club` les a déjà : demandez à Alien avant de bâtir un plan sur ce chapitre.
+**Disponibilité.** La route d'organisation gérée et le type de compte `managed` **ne sont pas encore disponibles de façon générale sur `https://api.alien.club`** : demandez à Alien si votre organisation y a accès avant de bâtir un plan sur ce chapitre.
 
 ## Ce que ce chapitre n'a pas pu confirmer
 

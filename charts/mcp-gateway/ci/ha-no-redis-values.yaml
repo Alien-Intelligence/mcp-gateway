@@ -1,4 +1,6 @@
 # EXPECTED TO FAIL: two replicas with in-process state.
+image:
+  repository: registry.example.com/team/mcp-gateway
 replicaCount: 2
 config:
   version: 1
