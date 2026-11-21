@@ -5,6 +5,8 @@
 include:
   - template: Security/SAST.gitlab-ci.yml
   - template: Security/Secret-Detection.gitlab-ci.yml
+  # `ref: main` is the house convention: every repository of the platform includes ci-scripts at main
+  # (47 includes checked), which is how a fix to a shared template reaches all of them.
   - project: 'alias3/datastreaming/ci-scripts'
     ref: main
     file:
@@ -60,9 +62,9 @@ variables:
   stage: test
   tags:
     - saas-linux-small-amd64
-  image: docker:28.3.3-cli
+  image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
   services:
-    - name: docker:28.3.3-dind
+    - name: docker:28.3.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
       alias: docker
   variables:
     DOCKER_HOST: tcp://docker:2375
@@ -128,9 +130,16 @@ e2e-dev:
 # builds one architecture per job and publishes no SBOM or provenance, so it is redeclared here: GitLab
 # merges this over the shared job, which keeps its `rules:` (the post-merge release hold: on the
 # release branch only the release bot's commit publishes, with the branch -> tag scheme the other
-# images use) and replaces what runs. The build is `docker buildx` in the dind service, emulating arm64
-# with QEMU, pushing both architectures under one tag with the SBOM and provenance attestations.
-# The steps live in scripts/ci_image_build.sh, which also runs on a laptop (README, "Container image").
+# images use) and replaces what runs. Three jobs, in this order, all under those rules:
+#   docker-build   buildx in the dind service, emulating arm64 with QEMU, pushes both architectures BY
+#                  DIGEST ONLY (no tag) with the SBOM and provenance attestations;
+#   image-scan     trivy on that digest;
+#   image-publish  only when the scan passed: the version tag and the moving tag are applied to the
+#                  digest, and an existing version tag that points elsewhere is never overwritten.
+# A failed scan therefore leaves no tagged image, and a rerun cannot move a released tag.
+# The steps live in scripts/ci_image_build.sh, ci_image_scan.sh and ci_image_publish.sh, which also run
+# on a laptop (README, "Container image"). The toolchain (job images, BuildKit, binfmt) is pinned by
+# digest in this file and in ci_image_build.sh.
 docker-build:
   extends: .dind
   stage: build
@@ -140,7 +149,7 @@ docker-build:
   artifacts:
     expire_in: 1 week
     paths:
-      # IMAGE_REF (name@digest) and IMAGE_TAG for the scan job.
+      # IMAGE_REF (name@digest), IMAGE_TAG and MOVING_TAG for the scan and publish jobs.
       - build.env
 
 # The scan of exactly the digest that was pushed, both architectures. It fails on a HIGH or CRITICAL
@@ -153,7 +162,7 @@ image-scan:
   needs: [docker-build]
   timeout: 20m
   image:
-    name: aquasec/trivy:0.76.2
+    name: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
     entrypoint: [""]
   services: []
   before_script: []
@@ -172,6 +181,18 @@ image-scan:
         - artifacts/sbom-amd64.cdx.json
         - artifacts/sbom-arm64.cdx.json
 
+# The tags, applied to the scanned digest. `needs` both jobs: it runs only when the scan succeeded.
+# One at a time, so two pipelines never race for the moving tag.
+image-publish:
+  extends: docker-build
+  stage: build
+  needs: [docker-build, image-scan]
+  timeout: 10m
+  resource_group: image-publish
+  script:
+    - set -a && . ./build.env && set +a
+    - sh scripts/ci_image_publish.sh
+
 # The full history, not only the pushed commits, with the repository's gitleaks config: `main` is
 # mirrored to a public repository, so a secret anywhere in its history is published. GitLab's
 # Secret-Detection job above scans the pushed range with GitLab's ruleset; this one is the gate the
@@ -179,7 +200,7 @@ image-scan:
 gitleaks:
   stage: test
   image:
-    name: zricethezav/gitleaks:v8.30.1
+    name: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
     entrypoint: [""]
   variables:
     GIT_DEPTH: 0

@@ -149,7 +149,7 @@ It needs the dev target up (`docker compose up -d --build --wait` with `.env`), 
 | Job | When | What |
 |---|---|---|
 | lint, type check, unit tests, SAST, secret detection | every pipeline | shared templates; `PYTEST_MARKER` keeps the stack-bound suites out |
-| `docker-build`, `image-scan` | the release branch's release commit, and `staging` and `main` | `scripts/ci_image_build.sh` (buildx, both architectures, SBOM and provenance attestations, in a `docker:dind` service), then `scripts/ci_image_scan.sh` (trivy on the pushed digest, CycloneDX SBOM per architecture as an artifact; fails on fixable HIGH or CRITICAL) |
+| `docker-build`, `image-scan`, `image-publish` | the release branch's release commit, and `staging` and `main` | `scripts/ci_image_build.sh` (buildx, both architectures, SBOM and provenance attestations, in a `docker:dind` service; pushed by digest, no tag), `scripts/ci_image_scan.sh` (trivy on that digest, CycloneDX SBOM per architecture as an artifact; fails on fixable HIGH or CRITICAL), then `scripts/ci_image_publish.sh` (only after a passing scan: the version tag and the moving tag are applied to the digest; an existing version tag that points elsewhere is never overwritten) |
 | `e2e-stub` | merge requests and branches, when code, tests, scripts, `dev/`, compose files, Dockerfiles, `pyproject.toml`, `uv.lock` or `.gitlab-ci.yml` change | `scripts/ci_e2e_stub.sh` in a `docker:dind` service; fake keys only |
 | `e2e-dev` | merge requests and the default branch (never a push to `dev`), same path filter | `scripts/ci_e2e_dev.sh` in a `docker:dind` service against the real dev MCP server and Alien dev platform; one run at a time (`resource_group`) |
 
