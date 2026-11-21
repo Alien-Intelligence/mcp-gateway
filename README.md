@@ -40,7 +40,7 @@ The gateway works with any OAuth server that provides all of the following:
 
 1. **Discovery:** RFC 8414 authorization-server metadata or OpenID Connect discovery, advertising `S256` in `code_challenge_methods_supported`.
 2. **JWT access tokens** signed with an asymmetric key (RS256, ES256, PS256 or EdDSA) and a published JWKS. The gateway validates tokens locally; it does not use token introspection.
-3. **The gateway URL as audience:** the access token's `aud` must contain the gateway's public URL. Keycloak does this with an optional client scope carrying an Audience mapper; Ory Hydra does it in the consent step (`grant_access_token_audience`).
+3. **The gateway URL as audience:** the access token's `aud` must contain the gateway's public URL. Keycloak does this with a client scope carrying an Audience mapper (the [realm template](deploy/keycloak/) sets it up); Ory Hydra does it in the consent step (`grant_access_token_audience`).
 4. **Client registration that MCP clients can use:** anonymous Dynamic Client Registration (RFC 7591), Client ID Metadata Documents, or clients you pre-register for each MCP client.
 5. **Identity claims** in the access token: a stable subject, and the claims you map on (`email` with `email_verified`, an organization claim, groups). Claim paths are configurable, including nested ones such as `ext.org`.
 
@@ -118,6 +118,12 @@ docker build --build-arg VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject
 ```
 
 Both base images are pinned by digest in the `Dockerfile`; bump them on purpose. CI scans the pushed digest with trivy and fails on any HIGH or CRITICAL vulnerability that has a fix, so a failing scan means a new base digest, not a retry.
+
+## Deploying
+
+- [`deploy/keycloak/`](deploy/keycloak/): a Keycloak 26.8 realm template for the gateway (audience, production token lifetimes, anonymous registration limited to the redirect hosts of Claude, ChatGPT, Copilot Studio, VS Code and Cursor), with the matching `auth` configuration.
+- [`deploy/compose/`](deploy/compose/): one hardened gateway and its state Redis with Docker Compose, configuration examples for the `static` and `store_redis` resolvers, and a TLS reverse proxy that keeps streams intact.
+- [`charts/mcp-gateway/`](charts/mcp-gateway/): the Helm chart for Kubernetes.
 
 ## Development stack
 

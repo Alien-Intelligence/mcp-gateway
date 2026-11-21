@@ -1,0 +1,24 @@
+{
+  "entries": [
+    {
+      "match": {
+        "email": "alice@example.com"
+      },
+      "api_key_file": "alice.key",
+      "upstream": "main",
+      "labels": {
+        "client": "client-x"
+      }
+    },
+    {
+      "match": {
+        "organization": "client-y"
+      },
+      "api_key_file": "client-y.key",
+      "upstream": "main",
+      "labels": {
+        "client": "client-y"
+      }
+    }
+  ]
+}

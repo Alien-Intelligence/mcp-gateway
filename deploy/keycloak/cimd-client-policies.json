@@ -1,0 +1,90 @@
+{
+  "clientProfiles": {
+    "profiles": [
+      {
+        "name": "pkce-s256",
+        "description": "Requires PKCE with S256 on every authorization request of the client",
+        "executors": [
+          {
+            "executor": "pkce-enforcer",
+            "configuration": {
+              "auto-configure": "true"
+            }
+          }
+        ]
+      },
+      {
+        "name": "claude-cimd",
+        "description": "EXPERIMENTAL (Keycloak --features=cimd): Claude (claude.ai, Desktop, mobile, Cowork) and Claude Code identified by their Client ID Metadata Documents on claude.ai",
+        "executors": [
+          {
+            "executor": "client-id-metadata-document",
+            "configuration": {
+              "cimd-allow-http-scheme": "false",
+              "cimd-allow-permitted-domains": [
+                "claude.ai",
+                "localhost",
+                "127.0.0.1"
+              ],
+              "cimd-restrict-same-domain": "false",
+              "cimd-required-properties": [],
+              "only-allow-confidential-client": "false",
+              "accept-public-client-with-confidential-client-only-grant": "true"
+            }
+          },
+          {
+            "executor": "pkce-enforcer",
+            "configuration": {
+              "auto-configure": "true"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "clientPolicies": {
+    "policies": [
+      {
+        "name": "anonymous-registration-pkce",
+        "description": "Clients created by anonymous dynamic registration must use PKCE S256",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-updater-context",
+            "configuration": {
+              "is-negative-logic": "false",
+              "update-client-source": [
+                "ByAnonymous"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "pkce-s256"
+        ]
+      },
+      {
+        "name": "claude-cimd",
+        "description": "EXPERIMENTAL: a client_id that is an https URL on claude.ai is a Client ID Metadata Document",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-id-uri",
+            "configuration": {
+              "is-negative-logic": "false",
+              "client-id-uri-scheme": [
+                "https"
+              ],
+              "client-id-uri-allow-permitted-domains": [
+                "claude.ai"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "claude-cimd"
+        ]
+      }
+    ]
+  }
+}
