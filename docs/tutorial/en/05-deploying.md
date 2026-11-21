@@ -95,14 +95,43 @@ A `helm upgrade` that changes `config` rolls the pods (the chart puts a checksum
 
 ## 5.4 docker compose
 
-TODO(compose): a compose example is being written in `deploy/compose/`. This section will describe its files, expected to be: a `compose.yaml` with the gateway service (the image of 5.1, the `MCP_GATEWAY_CONFIG` document, a read-only root filesystem, dropped capabilities, a `healthcheck` on `/healthz`), a Redis service when more than one replica runs, a reverse proxy in front for TLS and no response buffering, a `secrets/` directory mounted read-only, and an `.env.example`. TODO(compose): exact file names, variable names and the start command.
+[`deploy/compose/`](../../../deploy/compose/) is a production example for one host: the gateway and the Redis that holds its shared state, hardened. Its [README](../../../deploy/compose/README.md) is the reference (hardening table, Redis choices, proxy settings); this section gives the steps.
 
-What does not depend on that example:
+| File | What it is |
+|---|---|
+| `compose.yaml` | The two services (`gateway`, `redis`). Reads `.env`. |
+| `.env.example` | `MCP_GATEWAY_IMAGE`, `MCP_GATEWAY_CONFIG_FILE`, `MCP_GATEWAY_SECRETS_DIR`, `MCP_GATEWAY_BIND`. Copy to `.env`. |
+| `config.static.example.json`, `config.store-redis.example.json` | A gateway configuration with the `static` resolver, or with the `store_redis` resolver (chapter 4). |
+| `mapping.example.json` | The static mapping that `init-secrets.sh` copies into the secrets directory. |
+| `init-secrets.sh` | Creates the secrets directory: the Redis password, the state encryption key, an empty key directory. |
+| `nginx.example.conf` | A TLS reverse proxy that does not break streaming. |
+
+```bash
+cd deploy/compose
+cp .env.example .env                       # set MCP_GATEWAY_IMAGE to the image of 5.1
+cp config.static.example.json config.json  # or config.store-redis.example.json
+./init-secrets.sh                          # creates ./secrets (refuses to touch an existing one)
+# edit config.json: public_url, auth (issuer, jwks_uri, audiences), upstreams
+# edit secrets/gateway/keys/mapping.json and write each API key it names into secrets/gateway/keys/
+docker compose up -d --wait
+curl -fsS http://127.0.0.1:8000/readyz     # {"status":"ready"}
+```
+
+Neither `.env`, `config.json` nor `secrets/` belongs in version control.
+
+- **Configuration:** compose mounts `MCP_GATEWAY_CONFIG_FILE` at `/etc/mcp-gateway/config.json`, and a one-line entrypoint loads it into `MCP_GATEWAY_CONFIG`: a missing file stops the start, and an invalid document is refused by the gateway with `startup refused: invalid MCP_GATEWAY_CONFIG: <key>: <rule>` in `docker compose logs gateway`. Every `*_file` key names a file under `/run/mcp-gateway/secrets/`, the `gateway/` directory of `MCP_GATEWAY_SECRETS_DIR`, mounted read-only.
+- **Hardening:** read-only root filesystem, all capabilities dropped, `no-new-privileges`, resource limits (1 CPU and 512 MB for the gateway), `restart: unless-stopped`, log rotation. Redis sits on an `internal` network with no route out and no published port. The gateway's healthcheck calls `/readyz`, which answers `503` while Redis is unreachable, so `--wait` fails for a gateway that cannot serve.
+- **Redis:** it keeps nothing across a restart on purpose (sessions, cached credentials and rate-limit buckets all expire and are rebuilt), and with `noeviction` a full Redis makes the gateway answer `503` rather than drop a session binding. For the `store_redis` resolver, use your own persistent Redis for the keys, not this one.
+- **TLS:** the gateway is published on `127.0.0.1:8000` over plain HTTP. Put a reverse proxy on the host name of `public_url`; it must not buffer, compress or time out the event streams, which `nginx.example.conf` does (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
+- **Identity provider:** with the Keycloak template of chapter 6, `auth.issuer` is `https://<keycloak>/realms/<realm>`; keep the example's `scopes_advertised` and `identity` as they are.
+- **Image:** the examples name the release image; its public pull location is not announced yet, so until then mirror the image into your own registry and set `MCP_GATEWAY_IMAGE` to the mirror.
+
+Other facts:
 
 - The gateway container needs `MCP_GATEWAY_CONFIG` and the secret files of 5.2, nothing else.
 - The image's own `HEALTHCHECK` is a real `GET /healthz` on the port in `MCP_GATEWAY_CONFIG`, so `docker ps` shows `healthy` once the gateway serves.
 - Two or more gateway containers behind one address need `state.type` `redis` for the same reasons as on Kubernetes.
-- The repository's own `compose.yaml` is the **development** stack (Keycloak, Hydra, test stores, gateways with test configurations). It is a source of working configuration examples, not a deployment recipe.
+- The repository's own `compose.yaml` is the **development** stack (Keycloak, Hydra, test stores, gateways with test configurations): a test fixture, not a deployment recipe.
 
 ## 5.5 Check the deployment
 
@@ -114,11 +143,11 @@ curl -si --max-time 10 https://mcp.example.com/mcp -X POST -H 'Content-Type: app
   -H 'Accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
 # 401 Unauthorized, body {"error":"invalid_token","error_description":"missing bearer token"}
-# www-authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="openid mcp-gateway"
+# www-authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="mcp-gateway offline_access"
 
 # 2. The metadata the challenge points to (200)
 curl -s --max-time 10 https://mcp.example.com/.well-known/oauth-protected-resource/mcp
-# {"resource":"https://mcp.example.com/mcp","authorization_servers":["https://idp.example.com/realms/example-publisher"],"scopes_supported":["openid","mcp-gateway"],"bearer_methods_supported":["header"]}
+# {"resource":"https://mcp.example.com/mcp","authorization_servers":["https://idp.example.com/realms/example-publisher"],"scopes_supported":["mcp-gateway","offline_access"],"bearer_methods_supported":["header"]}
 
 ```
 
