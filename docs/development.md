@@ -25,6 +25,7 @@ One compose file set (`compose.yaml` plus a target file) runs the whole thing on
 | PostgreSQL, Redis | `127.0.0.1:15432`, `127.0.0.1:16379` | credential stores, refilled at every start by the `seed` service |
 | dev webhook | `127.0.0.1:18090` | `dev/webhook-resolver/`, `GET /_stats` counts the calls it served |
 | upstream stub (stub target) | `127.0.0.1:14000` | `dev/upstream-stub/`, control endpoints under `/_stub/` |
+| `keycloak-template` (stub target) | `http://localhost:18081` | The deployable realm template (`deploy/keycloak/`) rendered by its `render.sh` (realm `template-check`, audience `http://localhost:18009/mcp`, no gateway behind it) and imported into the same Keycloak image (`dev/keycloak-template/`); `tests/e2e/stub/test_keycloak_template.py` checks what an anonymous client can get from it |
 
 Every gateway has two upstreams, `stateful` and `stateless`, chosen per mapping entry. In the stub target they are the stub's `/stateful/mcp` and `/stateless/mcp`; in the dev target both are the real dev MCP (all of them are stateless). Gateway configuration is one JSON block per gateway in `compose.yaml`.
 

@@ -227,6 +227,36 @@ def test_anonymously_registered_clients_must_use_pkce() -> None:
     assert [e["executor"] for e in profile["executors"]] == ["pkce-enforcer"]
 
 
+def test_the_template_keycloak_of_the_stub_target_is_the_pinned_image() -> None:
+    """The realm checks run on the Keycloak the README says the template is tested on."""
+    root = DEPLOY.parent
+
+    def base_image(dockerfile: Path) -> str:
+        (line,) = [
+            line
+            for line in dockerfile.read_text(encoding="utf-8").splitlines()
+            if line.startswith("FROM ")
+        ]
+        return line.removeprefix("FROM ").strip()
+
+    image = base_image(root / "dev" / "keycloak" / "Dockerfile")
+    assert base_image(root / "dev" / "keycloak-template" / "Dockerfile") == image
+    assert f"`{image}`" in (KEYCLOAK_DIR / "README.md").read_text(encoding="utf-8")
+
+
+def test_the_stub_harness_targets_the_realm_the_template_keycloak_imports() -> None:
+    services = yaml.safe_load((DEPLOY.parent / "compose.stub.yaml").read_text(encoding="utf-8"))[
+        "services"
+    ]
+    args = services["keycloak-template"]["build"]["args"]
+    environment = services["harness"]["environment"]
+    port = services["keycloak-template"]["ports"][0].rsplit(":", 2)[1]
+    assert environment["E2E_KC_TEMPLATE_REALM"] == args["REALM_NAME"]
+    assert environment["E2E_KC_TEMPLATE_AUDIENCE"] == args["GATEWAY_PUBLIC_URL"]
+    assert environment["E2E_KC_TEMPLATE_URL"] == f"http://localhost:{port}"
+    assert services["keycloak-template"]["environment"]["KC_HOSTNAME"] == f"http://localhost:{port}"
+
+
 def test_the_identity_claims_of_the_examples_are_emitted_by_the_realm() -> None:
     realm = _rendered_realm()
     default_scopes = [_client_scope(realm, n) for n in realm["defaultDefaultClientScopes"]]
