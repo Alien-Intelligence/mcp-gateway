@@ -149,7 +149,7 @@ async def test_bad_rows_are_resolver_errors_without_the_key(dsn_file: Path, emai
     finally:
         await resolver.aclose()
     assert not isinstance(caught.value, ResolverUnavailableError)
-    assert "oat_" not in str(caught.value) and "has space" not in str(caught.value)
+    assert "fake-alien-key-" not in str(caught.value) and "has space" not in str(caught.value)
 
 
 @pytest.mark.usefixtures("table")
