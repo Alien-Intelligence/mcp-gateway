@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import re
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -54,9 +55,11 @@ READ_TIMEOUT_S = 30.0
 BODY_EXCERPT_CHARS = 500
 MCP_PROTOCOL_VERSION = "2025-11-25"
 MCP_TOOL = "datacluster_get_dataset"
-TOKEN_NAME = "mcp-gateway-e2e"
-GRANT_NAME = "mcp-gateway-e2e-dataset-read"
-GROUP_NAME = "mcp-gateway-e2e-sponsored"
+# The prefix of the shared fixture's object names. Another prefix sets up a separate chain (its
+# own grant, group, organizations and users), for example to exercise creation again: nothing
+# the fixture creates can be deleted once metered.
+SHARED_NAME_PREFIX = "mcp-gateway-e2e"
+_NAME_PREFIX = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 FEED_DEADLINE_S = 60.0
 MAX_FEED_PAGES = 20
 FEED_SKEW = timedelta(seconds=60)
@@ -80,13 +83,67 @@ class AlienApiError(FixtureError):
 
 
 @dataclass(frozen=True)
-class ClientSpec:
-    """One persona: a client-managed user in a managed client organization.
+class Persona:
+    """One persona of the fixture. ``client`` is the short name of its client organization (also
+    what the IdP's organization claim carries); several personas may share one organization.
+    ``email`` is its identity at the IdPs (what the gateway's mapping matches)."""
 
-    ``name`` is the short name of the client organization (also what the IdP's organization
-    claim carries); several personas may share one organization. ``email`` is the persona's
-    identity at the IdPs (what the gateway's mapping matches); ``alien_email`` is the
-    client-managed user's own address on the Alien platform.
+    name: str
+    client: str
+    email: str
+    key_file: str
+
+
+PERSONAS: tuple[Persona, ...] = (
+    Persona("alice", "client-x", "alice@client-x.test", "managed-client-x-alice.key"),
+    Persona("bob", "client-y", "bob@client-y.test", "managed-client-y-bob.key"),
+    Persona("carol", "client-x", "carol@client-x.test", "managed-client-x-carol.key"),
+)
+
+
+@dataclass(frozen=True)
+class Naming:
+    """The names of the fixture's objects on the Alien platform, all derived from one prefix."""
+
+    prefix: str
+
+    def __post_init__(self) -> None:
+        if _NAME_PREFIX.fullmatch(self.prefix) is None:
+            raise FixtureError(
+                f"name prefix {self.prefix!r}: 1 to 40 characters of a-z 0-9 -, "
+                "starting with a letter or digit"
+            )
+
+    @property
+    def grant(self) -> str:
+        return f"{self.prefix}-dataset-read"
+
+    @property
+    def group(self) -> str:
+        return f"{self.prefix}-sponsored"
+
+    @property
+    def token(self) -> str:
+        return self.prefix
+
+    def org_name(self, client: str) -> str:
+        return f"{self.prefix}-managed-{client}"
+
+    def alien_email(self, persona: Persona) -> str:
+        """The client-managed user's address on Alien. Addresses are unique across the whole
+        platform, so another prefix needs other addresses; the shared fixture keeps the ones
+        its users were created with."""
+        if self.prefix == SHARED_NAME_PREFIX:
+            return f"{persona.name}@managed-{persona.client}.test"
+        return f"{persona.name}@{self.prefix}.managed-{persona.client}.test"
+
+
+@dataclass(frozen=True)
+class ClientSpec:
+    """One persona as a client-managed user in a managed client organization.
+
+    ``name`` is the short name of the client organization; ``email`` the persona's identity at
+    the IdPs; ``alien_email`` the client-managed user's own address on the Alien platform.
     """
 
     persona: str
@@ -94,35 +151,21 @@ class ClientSpec:
     email: str
     alien_email: str
     key_file: str
-
-    @property
-    def org_name(self) -> str:
-        return f"mcp-gateway-e2e-managed-{self.name}"
+    org_name: str
 
 
-CLIENTS: tuple[ClientSpec, ...] = (
-    ClientSpec(
-        "alice",
-        "client-x",
-        "alice@client-x.test",
-        "alice@managed-client-x.test",
-        "managed-client-x-alice.key",
-    ),
-    ClientSpec(
-        "bob",
-        "client-y",
-        "bob@client-y.test",
-        "bob@managed-client-y.test",
-        "managed-client-y-bob.key",
-    ),
-    ClientSpec(
-        "carol",
-        "client-x",
-        "carol@client-x.test",
-        "carol@managed-client-x.test",
-        "managed-client-x-carol.key",
-    ),
-)
+def client_specs(naming: Naming) -> tuple[ClientSpec, ...]:
+    return tuple(
+        ClientSpec(
+            persona=p.name,
+            name=p.client,
+            email=p.email,
+            alien_email=naming.alien_email(p),
+            key_file=p.key_file,
+            org_name=naming.org_name(p.client),
+        )
+        for p in PERSONAS
+    )
 
 
 @dataclass(frozen=True)
@@ -136,6 +179,7 @@ class Config:
     state_dir: Path
     rotate: bool
     probe_forged_headers: bool
+    naming: Naming
 
 
 @dataclass
@@ -369,9 +413,11 @@ def ensure_user(api: FixtureApi, org_id: int, spec: ClientSpec, tally: Tally) ->
     return user_id
 
 
-def list_named_tokens(api: FixtureApi, org_id: int, user_id: int) -> list[dict[str, Any]]:
+def list_named_tokens(
+    api: FixtureApi, org_id: int, user_id: int, token_name: str
+) -> list[dict[str, Any]]:
     tokens = require_list(api.get(f"/organizations/{org_id}/users/{user_id}/tokens"), "user tokens")
-    return [t for t in tokens if str(t.get("name", "")).endswith(TOKEN_NAME)]
+    return [t for t in tokens if str(t.get("name", "")).endswith(token_name)]
 
 
 def probe_key(api_base: str, key: str) -> dict[str, Any] | None:
@@ -391,7 +437,7 @@ def ensure_key(
 ) -> tuple[str, bool]:
     """Return (token identifier, minted). Reuse a live key unless rotation is requested."""
     key_path = cfg.state_dir / spec.key_file
-    named = list_named_tokens(sponsor, org_id, user_id)
+    named = list_named_tokens(sponsor, org_id, user_id, cfg.naming.token)
     existing_key = read_key_file(key_path)
     if existing_key is not None and named and not cfg.rotate:
         me = probe_key(cfg.api_base, existing_key)
@@ -408,7 +454,7 @@ def ensure_key(
     minted = require_dict(
         sponsor.post(
             f"/organizations/{org_id}/users/{user_id}/tokens",
-            {"name": TOKEN_NAME, "scope": "api-key"},
+            {"name": cfg.naming.token, "scope": "api-key"},
         ),
         "mint token",
     )
@@ -469,15 +515,16 @@ def verify_key(cfg: Config, key: str, user_id: int, org_id: int, email: str) -> 
 
 def ensure_grant(api: FixtureApi, cfg: Config, tally: Tally) -> int:
     org = cfg.sponsor_org_id
+    name = cfg.naming.grant
     for grant in require_list(api.get("/grants", org_id=org), "grants"):
-        if grant.get("name") == GRANT_NAME:
+        if grant.get("name") == name:
             return int(grant["id"])
     result = api.request(
         "POST",
         "/grants",
         org_id=org,
         json_body={
-            "name": GRANT_NAME,
+            "name": name,
             "description": "mcp-gateway end-to-end fixture: read one dataset",
             "abilities": [
                 {
@@ -492,37 +539,36 @@ def ensure_grant(api: FixtureApi, cfg: Config, tally: Tally) -> int:
         handled=(409,),
     )
     if result.status == 409:
-        raise FixtureError(f"grant {GRANT_NAME} answered 409 ({error_name(result)}) but not listed")
+        raise FixtureError(f"grant {name} answered 409 ({error_name(result)}) but not listed")
     grant_id = int(require_dict(result.data, "create grant")["id"])
-    tally.add(f"grant {GRANT_NAME} (id {grant_id})")
+    tally.add(f"grant {name} (id {grant_id})")
     return grant_id
 
 
 def ensure_group(api: FixtureApi, cfg: Config, tally: Tally) -> dict[str, Any]:
     org = cfg.sponsor_org_id
-    group = _find_group(api, org)
+    name = cfg.naming.group
+    group = _find_group(api, org, name)
     if group is not None:
         return group
     data = require_dict(
         api.post(
             "/groups",
-            {"name": GROUP_NAME, "description": "mcp-gateway end-to-end fixture group"},
+            {"name": name, "description": "mcp-gateway end-to-end fixture group"},
             org_id=org,
         ),
         "create group",
     )
     if data.get("status") != "created":
-        raise FixtureError(
-            f"create group {GROUP_NAME}: status {data.get('status')!r}: {data!r:.300}"
-        )
+        raise FixtureError(f"create group {name}: status {data.get('status')!r}: {data!r:.300}")
     group = require_dict(data.get("group"), "created group")
-    tally.add(f"group {GROUP_NAME} (id {group['id']})")
+    tally.add(f"group {name} (id {group['id']})")
     return group
 
 
-def _find_group(api: FixtureApi, org: int) -> dict[str, Any] | None:
+def _find_group(api: FixtureApi, org: int, name: str) -> dict[str, Any] | None:
     groups = require_list(api.get("/groups", org_id=org), "groups")
-    matches = [g for g in groups if g.get("name") == GROUP_NAME]
+    matches = [g for g in groups if g.get("name") == name]
     return matches[0] if matches else None
 
 
@@ -961,11 +1007,12 @@ def build_chain(
     grant_id = ensure_grant(sponsor, cfg, tally)
     group = ensure_group(sponsor, cfg, tally)
     group_id = int(group["id"])
-    orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in CLIENTS]
+    specs = client_specs(cfg.naming)
+    orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in specs]
     org_ids = list(dict.fromkeys(int(o["id"]) for o in orgs))
     configure_group(sponsor, cfg, group, grant_id, org_ids, tally)
     clients: list[ClientState] = []
-    for spec, org in zip(CLIENTS, orgs, strict=True):
+    for spec, org in zip(specs, orgs, strict=True):
         user_id = ensure_user(sponsor, int(org["id"]), spec, tally)
         identifier, minted = ensure_key(sponsor, cfg, int(org["id"]), user_id, spec, tally)
         key = _require_key(cfg, spec)
@@ -1021,11 +1068,24 @@ def parse_args(argv: Sequence[str]) -> Config:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--rotate", action="store_true", help="mint new keys, revoke the old")
     parser.add_argument(
+        "--name-prefix",
+        default=SHARED_NAME_PREFIX,
+        help=(
+            "prefix of every object name (grant, group, organizations, token; the Alien e-mails "
+            f"too, except for the shared fixture's {SHARED_NAME_PREFIX!r}): another prefix "
+            "sets up a separate chain"
+        ),
+    )
+    parser.add_argument(
         "--probe-forged-headers",
         action="store_true",
         help="also probe whether the MCP passes forged x-job-id / x-organization-id through",
     )
     args = parser.parse_args(argv)
+    try:
+        naming = Naming(args.name_prefix)
+    except FixtureError as exc:
+        parser.error(str(exc))
     return Config(
         sponsor_key_file=args.sponsor_key_file,
         api_base=args.api_base,
@@ -1036,6 +1096,7 @@ def parse_args(argv: Sequence[str]) -> Config:
         state_dir=args.state_dir,
         rotate=args.rotate,
         probe_forged_headers=args.probe_forged_headers,
+        naming=naming,
     )
 
 
