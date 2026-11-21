@@ -1,0 +1,4 @@
+{"entries": [
+  {"match": {"email": "alice@example.com"}, "api_key_file": "alice.key", "upstream": "main", "labels": {"client": "example-publisher"}},
+  {"match": {"subject": "3f1c0e52-0f34-4b8e-9a52-1d6b5d7c9a10"}, "api_key_file": "bob.key", "upstream": "main", "labels": {"client": "example-publisher"}}
+]}

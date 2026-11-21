@@ -8,7 +8,11 @@ A gateway you host in front of Alien MCP servers.
 
 Your users sign in with their usual accounts, and your MCP endpoint lives on your own domain.
 
-Status: in development. What exists today is described below; the setup tutorial will be published before the first release.
+Status: in development. What exists today is described below.
+
+## Getting started
+
+The setup tutorial, from your OAuth server and the Alien API calls to deployment and client connection, is in [`docs/tutorial/en/`](docs/tutorial/en/README.md).
 
 ## How it works
 
