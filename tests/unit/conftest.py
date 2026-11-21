@@ -26,6 +26,7 @@ FAKE_API_KEY = "fake-alien-key-testkey_do_not_leak_0123456789"
 
 def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, Any]:
     return {
+        "version": 1,
         "public_url": PUBLIC_URL,
         "listen": {"host": "0.0.0.0", "port": 8000},
         "auth": {

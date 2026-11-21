@@ -15,6 +15,9 @@ from pydantic_core import ErrorDetails
 from mcp_gateway.origin import normalize_origin
 
 CONFIG_ENV_VAR = "MCP_GATEWAY_CONFIG"
+# The one schema version this gateway reads. A new version is a new number, never a silent change
+# of meaning under the same one (docs/protocol.md, docs/config.schema.v1.json).
+CONFIG_VERSION = 1
 
 # Asymmetric algorithms only: HS* would let anyone holding the public key forge tokens.
 ALLOWED_ALGORITHMS = frozenset(
@@ -595,6 +598,7 @@ class PoliciesConfig(_Model):
 
 
 class GatewayConfig(_Model):
+    version: Literal[1]
     public_url: str
     listen: ListenConfig
     auth: AuthConfig
@@ -608,6 +612,24 @@ class GatewayConfig(_Model):
     sessions: SessionsConfig
     state: StateConfig
     policies: PoliciesConfig
+
+    @model_validator(mode="before")
+    @classmethod
+    def _supported_version(cls, data: object) -> object:
+        """Refuse a missing or other schema version with a message that names the supported one.
+
+        The offending value is not echoed: it may be a secret pasted into the wrong key.
+        """
+        if not isinstance(data, dict):
+            return data
+        declared = data.get("version")
+        # ``True == 1`` and ``1.0 == 1`` in Python; neither is the integer 1.
+        if type(declared) is not int or declared != CONFIG_VERSION:
+            raise ValueError(
+                f'version: the document must declare "version": {CONFIG_VERSION} '
+                f"(the only supported configuration schema version); it is missing or different"
+            )
+        return data
 
     @field_validator("public_url")
     @classmethod

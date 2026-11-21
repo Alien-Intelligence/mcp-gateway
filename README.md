@@ -46,7 +46,7 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. The full reference, key by key with bounds and a complete example, is [`docs/configuration.md`](docs/configuration.md). The gateway services in [`compose.yaml`](compose.yaml) are working examples.
 
-Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).
+Top-level keys: `version` (always `1`), `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).
 
 - `sessions`: an upstream `Mcp-Session-Id` is bound to the subject it was issued to (in memory, or in Redis with `state.type` `redis`, which several replicas need). A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-31007`) and is not forwarded; the client starts a new session.
 - `state`: `memory` (one replica) or `redis` (shared by every replica: sessions, the credential cache and the rate limit buckets). With Redis the gateway fails closed (`503`, `-31013`) when it cannot reach it, and `GET /readyz` reports readiness. See [`docs/configuration.md`](docs/configuration.md#state).

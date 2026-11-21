@@ -14,6 +14,7 @@ In the tables, "required" means the key must be present. Durations are in second
 
 | Key | Type | Meaning |
 |---|---|---|
+| `version` | integer | Configuration schema version. Must be `1`; a missing or different value stops the process at start with a message naming the supported version. The JSON Schema of version 1 is [`config.schema.v1.json`](config.schema.v1.json). |
 | `public_url` | string, absolute http(s) URL | The canonical URL of the MCP endpoint, as clients reach it. Its path must not be empty or `/`, and it carries no query or fragment. The gateway serves MCP on that path and must find the URL in `auth.audiences`. The protected-resource metadata is served at `/.well-known/oauth-protected-resource<path>`. |
 | `listen` | object | Where the process listens. |
 | `auth` | object | Token verification and identity claims. |
@@ -508,6 +509,7 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
 
 ```json
 {
+  "version": 1,
   "public_url": "https://mcp.example.com/mcp",
   "listen": {"host": "0.0.0.0", "port": 8000},
   "auth": {
