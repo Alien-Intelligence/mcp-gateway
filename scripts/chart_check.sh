@@ -29,6 +29,7 @@ grace-too-short-values.yaml|must be greater than the largest upstream read_timeo
 existing-secret-no-shared-state-values.yaml|existingSecret.sharedState=true
 no-version-values.yaml|version
 no-image-values.yaml|image.repository is required
+bad-config-values.yaml|Additional property public_urll is not allowed
 '
 
 # values file | text of the refusal: these render, and the gateway's loader must refuse them

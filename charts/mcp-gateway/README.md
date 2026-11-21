@@ -107,7 +107,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | `ingress.*` | off | `enabled`, `className`, `annotations`, `hosts[].host`, `tls`. |
 | `httpRoute.*` | off | `enabled`, `annotations`, `parentRefs`, `hostnames`, `timeouts`. |
 
-`values.schema.json` rejects unknown keys and wrong types, and a non-empty `config` without `version: 1`; the rest of `config` is checked by the gateway itself at start (`startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` in the pod log).
+`values.schema.json` rejects unknown keys and wrong types, and validates a non-empty `config` against the gateway's own JSON Schema (`docs/config.schema.v1.json`, embedded by `scripts/gen_config_schema.py`), so `helm install` refuses a misspelled key, a missing field or a wrong type. What a schema cannot express (the cross-field rules, files that must exist) is checked by the gateway itself at start (`startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` in the pod log).
 
 ## Try it on kind
 
