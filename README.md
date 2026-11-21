@@ -115,6 +115,12 @@ docker build --build-arg VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject
 
 Both base images are pinned by digest in the `Dockerfile`; bump them on purpose. CI scans the pushed digest with trivy and fails on any HIGH or CRITICAL vulnerability that has a fix, so a failing scan means a new base digest, not a retry.
 
+## Deploying
+
+- [`deploy/keycloak/`](deploy/keycloak/): a Keycloak 26.8 realm template for the gateway (audience, production token lifetimes, anonymous registration limited to the redirect hosts of Claude, ChatGPT, Copilot Studio, VS Code and Cursor), with the matching `auth` configuration.
+- [`deploy/compose/`](deploy/compose/): one hardened gateway and its state Redis with Docker Compose, configuration examples for the `static` and `store_redis` resolvers, and a TLS reverse proxy that keeps streams intact.
+- [`charts/mcp-gateway/`](charts/mcp-gateway/): the Helm chart for Kubernetes.
+
 ## Development stack
 
 One compose file set (`compose.yaml` plus a target file) runs the whole thing on loopback. Three targets share it:
