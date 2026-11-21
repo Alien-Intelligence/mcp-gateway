@@ -10,11 +10,27 @@ STUB_PATH = Path(__file__).resolve().parents[2] / "dev" / "upstream-stub" / "app
 
 # Fixture keys: raw secrets never appear in what the stub returns.
 STUB_KEYS = {
-    "fake-alien-key-alice_stub_key": {"persona": "alice", "revoked": False, "payment_required": False},
+    "fake-alien-key-alice_stub_key": {
+        "persona": "alice",
+        "revoked": False,
+        "payment_required": False,
+    },
     "fake-alien-key-bob_stub_key": {"persona": "bob", "revoked": False, "payment_required": False},
-    "fake-alien-key-carol_stub_key": {"persona": "carol", "revoked": False, "payment_required": False},
-    "fake-alien-key-revoked_stub_key": {"persona": "revoked", "revoked": True, "payment_required": False},
-    "fake-alien-key-broke_stub_key": {"persona": "broke", "revoked": False, "payment_required": True},
+    "fake-alien-key-carol_stub_key": {
+        "persona": "carol",
+        "revoked": False,
+        "payment_required": False,
+    },
+    "fake-alien-key-revoked_stub_key": {
+        "persona": "revoked",
+        "revoked": True,
+        "payment_required": False,
+    },
+    "fake-alien-key-broke_stub_key": {
+        "persona": "broke",
+        "revoked": False,
+        "payment_required": True,
+    },
 }
 
 

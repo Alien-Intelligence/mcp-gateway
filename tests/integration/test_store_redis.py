@@ -82,7 +82,9 @@ async def test_allow_with_default_upstream_and_labels(
 ) -> None:
     await admin.set(
         f"{prefix}:client-x:user-1",
-        json.dumps({"api_key": "fake-alien-key-alice", "upstream": None, "labels": {"client": "x"}}),
+        json.dumps(
+            {"api_key": "fake-alien-key-alice", "upstream": None, "labels": {"client": "x"}}
+        ),
     )
     outcome = await lookup(url_file, prefix, identity())
     assert isinstance(outcome, Credential)
@@ -112,7 +114,8 @@ async def test_null_placeholder_is_no_mapping_without_a_lookup(
 ) -> None:
     # A key that would match if the empty organization were substituted must not be found.
     await admin.set(
-        f"{prefix}::user-1", json.dumps({"api_key": "fake-alien-key-wrong", "upstream": None, "labels": None})
+        f"{prefix}::user-1",
+        json.dumps({"api_key": "fake-alien-key-wrong", "upstream": None, "labels": None}),
     )
     assert await lookup(url_file, prefix, identity(org=None)) == Denied("no_mapping")
 

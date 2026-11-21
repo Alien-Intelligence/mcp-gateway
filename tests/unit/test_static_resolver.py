@@ -108,7 +108,8 @@ async def test_precedence_subject_then_email_then_organization_then_group(state:
 
     assert await key(full) == "fake-alien-key-subj"
     assert (
-        await key(identity("x", email="a@x.example", organization="o", groups=("g",))) == "fake-alien-key-mail"
+        await key(identity("x", email="a@x.example", organization="o", groups=("g",)))
+        == "fake-alien-key-mail"
     )
     assert await key(identity("x", organization="o", groups=("g",))) == "fake-alien-key-org"
     assert await key(identity("x", groups=("g",))) == "fake-alien-key-grp-a"

@@ -218,7 +218,9 @@ async def test_invalidate_drops_the_entry_and_tells_the_inner_resolver() -> None
 
 
 async def test_invalidate_discards_a_lookup_already_in_flight() -> None:
-    backend = Backend(credential(key="fake-alien-key-stale"), credential(key="fake-alien-key-fresh"))
+    backend = Backend(
+        credential(key="fake-alien-key-stale"), credential(key="fake-alien-key-fresh")
+    )
     backend.gate = asyncio.Event()
     cache, _ = build(backend)
     stale = asyncio.create_task(cache.resolve(identity()))
