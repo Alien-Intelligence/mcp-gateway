@@ -1,0 +1,4 @@
+# Built from the repository root (it needs deploy/keycloak): send only the template and its renderer.
+*
+!deploy/keycloak/realm-template.json
+!deploy/keycloak/render.sh

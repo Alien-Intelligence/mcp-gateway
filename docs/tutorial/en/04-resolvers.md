@@ -7,7 +7,7 @@ The resolver turns the identity the gateway verified into an Alien API key. It i
 | `subject` | The stable user id from the token |
 | `email` | The e-mail, **only** when the token's `email_verified` claim is `true`, otherwise `null` |
 | `organization` | The organization claim, or `null` |
-| `groups` | The groups claim, a list (possibly empty) |
+| `groups` | The groups claim, a list (possibly empty). The Keycloak realm template of chapter 6 puts full group paths in it (`/analysts`, `/team-a/analysts`) |
 
 The resolver answers with a key, the name of an upstream (one of the keys of `upstreams`) and labels, or with a denial. Labels are strings copied to the audit line and to trace attributes, and used by tool policies (chapter 8).
 
@@ -86,7 +86,7 @@ The gateway sends the identity to your endpoint and gets a decision.
 
 <!-- not-config -->
 ```json
-{"subject":"3f1c0e52-0f34-4b8e-9a52-1d6b5d7c9a10","email":"alice@example.com","organization":"example-publisher","groups":["analysts"]}
+{"subject":"3f1c0e52-0f34-4b8e-9a52-1d6b5d7c9a10","email":"alice@example.com","organization":"example-publisher","groups":["/analysts"]}
 ```
 
 `email` and `organization` are `null` when absent. `groups` is always a list.

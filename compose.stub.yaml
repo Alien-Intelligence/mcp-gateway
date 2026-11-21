@@ -77,6 +77,40 @@ services:
       upstream-stub:
         condition: service_healthy
 
+  # The deployable realm template (deploy/keycloak), rendered by render.sh and imported at start
+  # as its README tells a customer to; tests/e2e/stub/test_keycloak_template.py attacks it. No
+  # gateway uses it: the audience below only has to match the harness's E2E_KC_TEMPLATE_AUDIENCE.
+  keycloak-template:
+    build:
+      context: .
+      dockerfile: dev/keycloak-template/Dockerfile
+      args:
+        REALM_NAME: template-check
+        GATEWAY_PUBLIC_URL: http://localhost:18009/mcp
+    profiles: [stub]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set KC_BOOTSTRAP_ADMIN_PASSWORD in .env}
+      KC_HOSTNAME: http://localhost:18081
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18081:8080"
+    networks: [gatewaydev]
+    healthcheck:
+      # The image has no curl: probe the management port with bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
   # The end-to-end harness, on the host network so the localhost issuers resolve as on a laptop.
   #   docker compose ... --profile harness run --name e2e-run harness
   harness:
@@ -97,6 +131,13 @@ services:
       E2E_OTEL_DIR: /otel
       MCP_GATEWAY_TEST_PG_DSN: postgresql://gateway:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:15432/gateway
       MCP_GATEWAY_TEST_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:16379/0
+      # keycloak-template: its address, realm and audience (the build args above), and its
+      # bootstrap administrator, who creates the test user and groups.
+      E2E_KC_TEMPLATE_URL: http://localhost:18081
+      E2E_KC_TEMPLATE_REALM: template-check
+      E2E_KC_TEMPLATE_AUDIENCE: http://localhost:18009/mcp
+      E2E_KC_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
+      E2E_KC_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set KC_BOOTSTRAP_ADMIN_PASSWORD in .env}
     command:
       - pytest
       - tests/e2e
