@@ -3,8 +3,10 @@
 replicaCount: 1
 
 image:
-  # No registry is assumed: point this at the registry the image was published to.
-  repository: mcp-gateway
+  # Where the release pipeline publishes the image. The public pull location will be announced
+  # (a public registry is pending a decision): until then, mirror the image and point this at
+  # your own registry.
+  repository: rg.fr-par.scw.cloud/ns-data-streaming/mcp-gateway
   # Defaults to the chart's appVersion.
   tag: ""
   pullPolicy: IfNotPresent
@@ -15,7 +17,8 @@ fullnameOverride: ""
 
 # The gateway configuration: the strict JSON document of docs/configuration.md, written here as a
 # YAML object. The chart renders it into a Secret (key MCP_GATEWAY_CONFIG) and the pods read it
-# from there. Every key of the document is required; the gateway refuses to start otherwise.
+# from there. Every key of the document is required, starting with `version: 1`; the gateway
+# refuses to start otherwise (and `helm install` refuses a config without it).
 # Secrets are never written in it: its *_file keys name files, mounted with secretMounts.
 config: {}
 

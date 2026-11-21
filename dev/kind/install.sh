@@ -50,7 +50,12 @@ if ! kind get clusters | grep -qx "$CLUSTER"; then
     kind create cluster --name "$CLUSTER" --config "$HERE/kind-config.yaml" --wait 120s
 fi
 
-docker build -t "mcp-gateway:$IMAGE_TAG" "$ROOT"
+# The Dockerfile refuses a build without its version, revision and date.
+VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/pyproject.toml" | head -n 1)
+VCS_REF=$(git -C "$ROOT" rev-parse HEAD)
+BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+docker build --build-arg "VERSION=$VERSION" --build-arg "VCS_REF=$VCS_REF" --build-arg "BUILD_DATE=$BUILD_DATE" \
+    -t "mcp-gateway:$IMAGE_TAG" "$ROOT"
 for image in "mcp-gateway:$IMAGE_TAG" quay.io/keycloak/keycloak:26.8.2 redis:7.4-alpine; do
     docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
     kind load docker-image --name "$CLUSTER" "$image"
