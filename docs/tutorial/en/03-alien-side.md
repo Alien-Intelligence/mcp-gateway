@@ -2,7 +2,7 @@
 
 The gateway only looks up an existing Alien API key. Before it can serve anyone you must create, on the Alien platform, one **client-managed user** with an **API key** for each person (or, if you accept the consequences in chapter 4, for each group of people) who may use the gateway, inside a **managed organization** whose consumption is paid by your sponsor group.
 
-Everything on this page is taken from `scripts/dev_fixture.py`, the script that does exactly these steps against a real Alien platform for the gateway's own end-to-end tests. Read it next to this chapter if you want to automate the steps.
+The calls on this page are those of `scripts/dev_fixture.py`, the script that runs these steps against an Alien platform for the gateway's own end-to-end tests (read it if you want to automate them), checked against the platform's backend code where the section says so: see [What the backend code shows](#what-the-backend-code-shows) for who may do what, and the status of each call.
 
 ## The objects
 
@@ -18,12 +18,12 @@ Everything on this page is taken from `scripts/dev_fixture.py`, the script that 
 
 Two facts to know first:
 
-- **Managed organizations cannot be deleted on Alien.** Name them with care, and look an organization up by name before you create one (the fixture does).
-- The sponsor organization, the private cluster that holds your datasets and the service account must exist before you start: the fixture takes the organization id, the cluster id, the dataset id and the service account's key as inputs. How the service account and its `api-secret` key are created is not covered by the repository, so this tutorial starts from "you hold that key". Ask your Alien contact if you do not.
+- **Deleting an organization is refused once it has ledger history** (`ORGANIZATION_HAS_LEDGER_HISTORY`): a managed organization that has been metered stays. Name organizations with care, and look an organization up by name before you create one (the fixture does).
+- The sponsor organization (an **enterprise** account), the private cluster that holds your datasets and the service account must exist before you start: the fixture takes the organization id, the cluster id, the dataset id and the service account's key as inputs. Who creates what is in [What the backend code shows](#what-the-backend-code-shows).
 
 ## Conventions used in the examples
 
-- `$ALIEN_API` is the base URL of the Alien platform API. Alien gives you the value; this repository does not state it.
+- `$ALIEN_API` is the base URL of the public Alien API, `https://api.alien.club`. (The variable only keeps the examples short; use another value only when Alien gives you a different environment.)
 - Every answer is an envelope `{"success": true, "data": ..., "meta": ...}`. A non-2xx status, or `success` other than `true`, is an error. A failed call has an `error` object with a `name`.
 - Authentication is `Authorization: Bearer <key>`. To keep a key out of the process list, put the header in a file and let curl read it with `-H @file`:
 
@@ -36,7 +36,7 @@ printf 'Authorization: Bearer %s\n' "$(cat sponsor.key)" > sponsor.hdr   # print
 - The examples write `SPONSOR_ORG`, `GROUP_ID`, `ORG_ID`, `USER_ID` for ids returned by earlier calls.
 
 ```bash
-ALIEN_API=<the Alien API base URL>
+ALIEN_API=https://api.alien.club
 SPONSOR_ORG=<your sponsor organization id>
 ```
 
@@ -91,7 +91,7 @@ curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
 
 Expected: `data.status` is `created` and `data.group.id` is the group id (`GROUP_ID`).
 
-Attach the grant to the group:
+Attach the grant to the group (the grant must be attached before the group can be made sponsored):
 
 <!-- not-config -->
 ```bash
@@ -100,11 +100,19 @@ curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
   "$ALIEN_API/groups/$GROUP_ID/grants"
 ```
 
-The group must be made sponsored **after** the grant and the client organizations are attached (step 3.5): the fixture does it in that order.
+Make the group sponsored. The backend refuses to create a managed organization in a group that is not sponsored yet (`409` `GROUP_NOT_SPONSORED`), and refuses to sponsor a group whose grants name anything but cluster data (a grant whose ability paths start at a `cluster`, as the one above):
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X PATCH -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' -d '{"isSponsored": true}' "$ALIEN_API/groups/$GROUP_ID"
+```
+
+Read the group back with `GET /groups/$GROUP_ID` and check `isSponsored` is `true`. The sponsor must be an enterprise organization, or this call is refused.
 
 ## 3.3 One managed organization per client
 
-Do this once per client organization. The route creates the organization and attaches it to the group in one call:
+Do this once per client organization, after step 3.2 (the group must be sponsored). The route creates the organization, makes the caller its owner and attaches it to the group in one call. A name or a slug already used by another organization answers `409`; the name is compared without regard to case:
 
 <!-- not-config -->
 ```bash
@@ -139,17 +147,9 @@ Expected: `data.id` is the user id (`USER_ID`).
 
 The user's e-mail on Alien does not have to be the address the person signs in with at your OAuth server. The gateway never compares them: your resolver maps the identity from your OAuth server (for example the sign-in e-mail) to this user's key. The fixture uses different addresses on purpose (`alice@client-x.test` at the identity provider, `alice@managed-client-x.test` on Alien) and records both. To find an existing user, `GET /organizations/$ORG_ID/users` and match on `email` (case-insensitive); check that `userType` is `client-managed`.
 
-## 3.5 Make the group sponsored
+## 3.5 Attach an organization that already exists (optional)
 
-After the grant and every client organization are attached:
-
-<!-- not-config -->
-```bash
-curl -sS --max-time 30 -X PATCH -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
-  -H 'Content-Type: application/json' -d '{"isSponsored": true}' "$ALIEN_API/groups/$GROUP_ID"
-```
-
-Attaching organizations that were not attached yet is `POST /groups/$GROUP_ID/organizations` with `{"organizationIds": [..]}` (same headers). Read the group back with `GET /groups/$GROUP_ID` and check `isSponsored` is `true`.
+Organizations that already exist (not created through step 3.3) are attached with `POST /groups/$GROUP_ID/organizations` and `{"organizationIds": [..]}` (same headers). A sponsored group may refuse some of them; nothing is attached then.
 
 ## 3.6 Mint the API key
 
@@ -216,11 +216,29 @@ The list returns each key's `name` and `identifier`. A revoked key is refused by
 
 For each person: an Alien user id, an organization id and a key (`oat_...`) in your secret store. Chapter 4 turns these into the resolver the gateway uses.
 
+## What the backend code shows
+
+Read from the backend's source, branch `dev` of the platform repository at commit `c5d5c746c` (2026-11-20). Nothing here was run against a live API for this chapter.
+
+**Which account and which key.**
+
+- Creating users and keys under an organization (`POST /organizations/{id}/users` and `.../users/{user}/tokens`) is allowed only when the caller's key carries the `user:write` ability, the caller is an **admin of that organization or above**, and the organization's type is **enterprise or managed**. A key of scope `api-key` has `user:read` only: user and key creation need scope `api-secret` (or an unrestricted key). The group routes of this chapter need the `grant:write` ability, which `api-secret` has and `api-key` does not.
+- The managed-organization route needs both `grant:write` and `user:write` and admin rights on the group's organization.
+- A group can be made sponsored only when its organization is an **enterprise** one. An organization's account type is changed only by **platform administrators** (the update route refuses everyone else: "Only platform administrators can update organization account type, limits and internal status"). **So the sponsor organization is made an enterprise account by Alien, at onboarding: ask Alien.**
+- The **sponsor service account** is a `client-managed` user created inside the sponsor organization by `POST /organizations/{sponsor}/users` with `{"userType": "client-managed", "email": ..., "description": ...}`, called by an admin of that organization with a key that has `user:write`; its key is then minted with `POST .../users/{id}/tokens` and `{"name": ..., "scope": "api-secret"}`. The code does not say how the first admin key of the sponsor organization is obtained: ask Alien. A customer can therefore create the service account and its key through the API, once Alien has made the organization an enterprise account and given an admin of it a key that may write users.
+- The service account's email must be **unused on the whole platform**: creating a `client-managed` user with an e-mail that already belongs to any account answers `409` `EMAIL_ALREADY_EXISTS` (the lookup is by e-mail alone, across organizations). The same applies to every per-person user of step 3.4. The e-mail needs to be a valid address; it does not need to receive mail (the code sends none for `client-managed` users).
+- Key scopes accepted at minting: `api-key` (the default when `scope` is omitted) and `api-secret`; anything else answers `400`. An optional `expiresIn` (a number) sets an expiry; without it the code sets none. `api-key` carries read abilities only (access tokens, AI models, chat sessions, clusters, collections, datasets, entries, files, workflows, grants, jobs, licenses, MCP configurations, nodes, providers, roles, tags, users).
+
+**Status of each creation call.** The backend's controllers send their success answers through one helper that sets no status code, so these calls answer the framework's default, `200`, and not `201`; no error path of these calls is a `2xx`. Treat any `2xx` as success, as the fixture does. Failures use these statuses: `400` invalid parameter or key scope, `404` not found, `409` already exists or not sponsored (`EMAIL_ALREADY_EXISTS`, `ORGANIZATION_NAME_ALREADY_EXISTS`, `ORGANIZATION_SLUG_ALREADY_EXISTS`, `GROUP_NOT_SPONSORED`). `POST /groups` is the exception for a taken name: it answers success with `data.status` `name-taken` (not an error status), which is why step 3.2 checks `data.status`. These statuses come from the code, not from a run: confirm them on your own calls.
+
+**Can a key be shown again?** No. The raw key is in the answer of the minting call only (`data.token`); listing a user's keys returns `identifier`, `name`, `abilities`, `lastUsedAt`, `expiresAt` and no key. A lost key is replaced by minting another and revoking the first.
+
+**Availability.** The managed-organization route and the `managed` account type are on the platform's `dev` and `staging` branches and are **not on its `main` branch** at the time of writing. Whether the API at `https://api.alien.club` already has them: ask Alien before you plan around this chapter.
+
 ## What this chapter could not confirm
 
-- The exact HTTP status of each creation call (any `2xx` is accepted by the fixture).
-- Whether an Alien e-mail must be unique across the platform.
-- How a service account is created.
-- Whether the key can be shown again after minting.
+- How the first admin key of a sponsor organization is issued, and when the sponsor organization is made an enterprise account: ask Alien.
+- Whether the public API already runs the managed-organization route (see Availability above).
+- The statuses above were read, not observed.
 
 Continue with [4. Choosing a resolver](04-resolvers.md).
