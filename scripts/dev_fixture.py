@@ -577,30 +577,50 @@ def _attached_ids(api: FixtureApi, org: int, group_id: int, kind: str) -> set[in
     return {int(item["id"]) for item in items}
 
 
-def configure_group(
-    api: FixtureApi,
-    cfg: Config,
-    group: dict[str, Any],
-    grant_id: int,
-    client_org_ids: list[int],
-    t: Tally,
+def sponsor_group(
+    api: FixtureApi, cfg: Config, group: dict[str, Any], grant_id: int, t: Tally
 ) -> int:
-    """Attach the grant and client orgs, then make the group sponsored (that order)."""
+    """Attach the grant, then make the group sponsored: the backend sponsors only a group whose
+    grants name cluster data, so the grant goes first."""
     org = cfg.sponsor_org_id
     group_id = int(group["id"])
     if grant_id not in _attached_ids(api, org, group_id, "grants"):
         api.post(f"/groups/{group_id}/grants", {"grantIds": [grant_id]}, org_id=org)
         t.add(f"grant {grant_id} attached to group {group_id}")
-    attached = _attached_ids(api, org, group_id, "organizations")
-    missing = [o for o in client_org_ids if o not in attached]
-    if missing:
-        api.post(f"/groups/{group_id}/organizations", {"organizationIds": missing}, org_id=org)
-        t.add(f"organizations {missing} attached to group {group_id}")
     current = require_dict(api.get(f"/groups/{group_id}", org_id=org), "group")
     if current.get("isSponsored") is not True:
         api.patch(f"/groups/{group_id}", {"isSponsored": True}, org_id=org)
         t.add(f"group {group_id} made sponsored")
     return group_id
+
+
+def attach_orgs(api: FixtureApi, cfg: Config, group_id: int, org_ids: list[int], t: Tally) -> None:
+    """Attach the client organizations the group does not hold yet (the managed-organization
+    route attaches what it creates; an organization created otherwise is attached here)."""
+    org = cfg.sponsor_org_id
+    attached = _attached_ids(api, org, group_id, "organizations")
+    missing = [o for o in org_ids if o not in attached]
+    if missing:
+        api.post(f"/groups/{group_id}/organizations", {"organizationIds": missing}, org_id=org)
+        t.add(f"organizations {missing} attached to group {group_id}")
+
+
+def prepare_group(
+    sponsor: FixtureApi, cfg: Config, specs: Sequence[ClientSpec], tally: Tally
+) -> tuple[int, int, list[dict[str, Any]]]:
+    """The sponsor side, in the order the backend accepts: grant, group, grant attached, group
+    sponsored, then the managed organizations (refused with 409 GROUP_NOT_SPONSORED in a group
+    that is not sponsored yet), then any organization still unattached. Every step finds what
+    exists first, so a run that stopped half-way is completed by the next one.
+
+    Returns the group id, the grant id and one organization per spec, in order.
+    """
+    grant_id = ensure_grant(sponsor, cfg, tally)
+    group = ensure_group(sponsor, cfg, tally)
+    group_id = sponsor_group(sponsor, cfg, group, grant_id, tally)
+    orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in specs]
+    attach_orgs(sponsor, cfg, group_id, list(dict.fromkeys(int(o["id"]) for o in orgs)), tally)
+    return group_id, grant_id, orgs
 
 
 # --------------------------------------------------------------------------------------------
@@ -1004,13 +1024,8 @@ def build_chain(
     sponsor: FixtureApi, cfg: Config, tally: Tally
 ) -> tuple[list[ClientState], int, int]:
     verify_dataset(sponsor, cfg)
-    grant_id = ensure_grant(sponsor, cfg, tally)
-    group = ensure_group(sponsor, cfg, tally)
-    group_id = int(group["id"])
     specs = client_specs(cfg.naming)
-    orgs = [ensure_org(sponsor, cfg, group_id, spec, tally) for spec in specs]
-    org_ids = list(dict.fromkeys(int(o["id"]) for o in orgs))
-    configure_group(sponsor, cfg, group, grant_id, org_ids, tally)
+    group_id, grant_id, orgs = prepare_group(sponsor, cfg, specs, tally)
     clients: list[ClientState] = []
     for spec, org in zip(specs, orgs, strict=True):
         user_id = ensure_user(sponsor, int(org["id"]), spec, tally)
