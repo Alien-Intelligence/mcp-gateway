@@ -31,7 +31,7 @@ pytestmark = pytest.mark.e2e_stub
 static = pytest.mark.parametrize("provider", STATIC_PROVIDERS, ids=lambda p: p.name)
 TEST_SECONDS = 60.0
 DISCONNECT_SECONDS = 15.0
-SESSION_NOT_FOUND = -32007
+SESSION_NOT_FOUND = -31007
 UPSTREAM_SESSION_NOT_FOUND = -32001
 SSE = {"Accept": "text/event-stream"}
 
@@ -228,7 +228,7 @@ async def test_a_stateless_upstream_refuses_get_and_delete_with_405_untouched(
 
 @pytest.mark.parametrize(
     ("who", "code", "upstream_status"),
-    [("revoked", -32001, 401), ("unpaid", -32002, 402)],
+    [("revoked", -31001, 401), ("unpaid", -31002, 402)],
 )
 async def test_a_key_the_upstream_refuses_is_a_jsonrpc_error_never_a_challenge(
     settings: StubSettings,
@@ -309,7 +309,7 @@ async def test_a_stream_that_fails_before_the_reply_ends_with_a_jsonrpc_error_ev
     *progress, final = events_of(body)
     assert len(progress) == 2
     assert json_of(final)["id"] == 7
-    assert json_of(final)["error"]["code"] == -32006
+    assert json_of(final)["error"]["code"] == -31006
     evidence.update(final=json_of(final)["error"])
 
 

@@ -547,7 +547,7 @@ async def test_an_unfilterable_json_reply_is_replaced_and_nothing_unfiltered_is_
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": 5,
-        "error": {"code": -32005, "message": GAP},
+        "error": {"code": -31005, "message": GAP},
     }
     assert b"delete_all" not in response.content
     (line,) = audit_lines(caplog)
@@ -563,7 +563,7 @@ async def test_an_oversize_json_reply_is_replaced(
     respond_json(upstream, tools_reply())
     async with client_for(build(mapping_dir, transport, max_filtered_response_bytes=50)) as client:
         response = await client.post("/mcp", json=LIST, headers=alice)
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
     assert b"delete_all" not in response.content
 
 
@@ -578,7 +578,7 @@ async def test_an_oversize_chunked_json_reply_is_replaced(
     upstream.responder = lambda _r: httpx.Response(200, headers=JSON_TYPE, stream=stream)
     async with client_for(build(mapping_dir, transport, max_filtered_response_bytes=50)) as client:
         response = await client.post("/mcp", json=LIST, headers=alice)
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
     assert stream.closed
 
 
@@ -591,7 +591,7 @@ async def test_an_encoded_json_reply_is_replaced(
         content=json.dumps(tools_reply()).encode(),
     )
     response = await http.post("/mcp", json=LIST, headers=alice)
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
 
 
 async def test_a_success_reply_that_is_neither_json_nor_sse_is_replaced(
@@ -602,7 +602,7 @@ async def test_a_success_reply_that_is_neither_json_nor_sse_is_replaced(
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": 5,
-        "error": {"code": -32005, "message": GAP},
+        "error": {"code": -31005, "message": GAP},
     }
 
 
@@ -627,7 +627,7 @@ async def test_a_failed_tool_list_keeps_its_status_but_never_its_body(
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": 5,
-        "error": {"code": -32005, "message": UPSTREAM_ERROR},
+        "error": {"code": -31005, "message": UPSTREAM_ERROR},
     }
     assert response.headers["retry-after"] == "3"
     (line,) = audit_lines(caplog)
@@ -730,7 +730,7 @@ async def test_an_unfilterable_sse_reply_is_replaced_by_the_error_event(
         response = await http.post("/mcp", json=LIST, headers=alice)
     assert response.content.startswith(progress)
     (error,) = sse_documents(response.content[len(progress) :])
-    assert error == {"jsonrpc": "2.0", "id": 5, "error": {"code": -32005, "message": GAP}}
+    assert error == {"jsonrpc": "2.0", "id": 5, "error": {"code": -31005, "message": GAP}}
     assert b"delete_all" not in response.content
     (line,) = audit_lines(caplog)
     assert line["outcome"] == "tool_policy_failed"
@@ -742,7 +742,7 @@ async def test_a_batched_sse_reply_is_replaced(
     respond_sse(upstream, [event([tools_reply()])])
     response = await http.post("/mcp", json=LIST, headers=alice)
     (error,) = sse_documents(response.content)
-    assert error["error"]["code"] == -32005
+    assert error["error"]["code"] == -31005
     assert b"delete_all" not in response.content
 
 
@@ -762,7 +762,7 @@ async def test_an_sse_reply_made_too_large_by_rewriting_respects_the_event_limit
     async with client_for(build(mapping_dir, transport, max_sse_event_bytes=len(raw))) as client:
         response = await client.post("/mcp", json=LIST, headers=alice)
     (error,) = sse_documents(response.content)
-    assert error["error"]["code"] == -32005
+    assert error["error"]["code"] == -31005
 
 
 # --- no policy --------------------------------------------------------------------------
@@ -826,7 +826,7 @@ async def post_list(
 
 
 def gateway_error_event(request_id: Any) -> bytes:
-    body = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32005, "message": GAP}}
+    body = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -31005, "message": GAP}}
     return b"event: message\ndata: " + json.dumps(body, separators=(",", ":")).encode() + b"\n\n"
 
 
@@ -1013,7 +1013,7 @@ async def test_a_buffered_tool_list_that_never_finishes_ends_in_a_504(
         with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
             response = await client.post("/mcp", json=LIST, headers=alice)
     assert response.status_code == 504
-    assert response.json()["error"]["code"] == -32004
+    assert response.json()["error"]["code"] == -31004
     assert stream.closed
     (line,) = audit_lines(caplog)
     assert line["outcome"] == "upstream_error"

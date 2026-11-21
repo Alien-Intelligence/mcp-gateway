@@ -22,8 +22,8 @@ from e2e.stub.stack import (
 
 pytestmark = pytest.mark.e2e_stub
 
-NO_MAPPING = -32010
-RESOLVER_UNAVAILABLE = -32009
+NO_MAPPING = -31010
+RESOLVER_UNAVAILABLE = -31009
 
 
 @pytest.mark.parametrize(

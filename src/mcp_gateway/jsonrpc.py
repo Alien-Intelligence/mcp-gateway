@@ -10,21 +10,23 @@ from email.message import Message
 from enum import Enum
 from typing import Any
 
-# Gateway-originated JSON-RPC error codes (server-defined range).
-UPSTREAM_UNAUTHORIZED = -32001
-UPSTREAM_PAYMENT_REQUIRED = -32002
-UPSTREAM_UNREACHABLE = -32003
-UPSTREAM_TIMEOUT = -32004
-GATEWAY_ERROR = -32005
-UPSTREAM_STREAM_FAILED = -32006
-SESSION_NOT_FOUND = -32007
-ORIGIN_REFUSED = -32008
-RESOLVER_UNAVAILABLE = -32009
-NO_MAPPING = -32010
-AMBIGUOUS_MAPPING = -32011
-DENIED = -32012
-STATE_UNAVAILABLE = -32013
-RATE_LIMITED = -32014
+# Gateway-originated JSON-RPC error codes. They sit outside -32768..-32000 (the JSON-RPC reserved
+# range, which MCP partitions between implementation-defined and spec-defined codes) so they collide
+# with no SDK or spec code. Part of the public protocol contract (docs/protocol.md): never renumber.
+UPSTREAM_UNAUTHORIZED = -31001
+UPSTREAM_PAYMENT_REQUIRED = -31002
+UPSTREAM_UNREACHABLE = -31003
+UPSTREAM_TIMEOUT = -31004
+GATEWAY_ERROR = -31005
+UPSTREAM_STREAM_FAILED = -31006
+SESSION_NOT_FOUND = -31007
+ORIGIN_REFUSED = -31008
+RESOLVER_UNAVAILABLE = -31009
+NO_MAPPING = -31010
+AMBIGUOUS_MAPPING = -31011
+DENIED = -31012
+STATE_UNAVAILABLE = -31013
+RATE_LIMITED = -31014
 # Allocated by the MCP 2026-07-28 transport spec for a header that disagrees with the body.
 HEADER_MISMATCH = -32020
 PARSE_ERROR = -32700

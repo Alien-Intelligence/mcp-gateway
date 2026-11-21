@@ -296,8 +296,8 @@ def rpc_message(response: httpx.Response) -> dict[str, Any]:
     return body
 
 
-RETRY_AFTER_META_KEY = "club.alien/retryAfterSeconds"
-RATE_LIMITED = -32014
+RETRY_AFTER_META_KEY = "alien.club/retryAfterSeconds"
+RATE_LIMITED = -31014
 
 
 def is_rate_limited_tool_result(response: httpx.Response) -> bool:

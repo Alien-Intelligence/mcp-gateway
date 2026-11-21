@@ -31,6 +31,7 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
 @pytest.mark.parametrize(
     "path",
     [
+        ("version",),
         ("public_url",),
         ("listen",),
         ("listen", "port"),

@@ -71,7 +71,7 @@ async def test_webhook_down_is_a_503_with_retry_after_and_a_jsonrpc_error(
     assert response.headers["retry-after"] == "5"
     body = response.json()
     assert body["id"] == 7
-    assert body["error"]["code"] == -32009
+    assert body["error"]["code"] == -31009
     assert "www-authenticate" not in response.headers
     assert upstream.requests == []
     assert audit_lines(caplog)[0]["outcome"] == "resolver_unavailable"
@@ -113,7 +113,7 @@ async def test_webhook_protocol_error_stays_a_generic_500(
     finally:
         await resolver.aclose()
     assert response.status_code == 500
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
     assert FAKE_API_KEY not in response.text
 
 
@@ -146,7 +146,7 @@ async def test_upstream_401_invalidates_the_cache_so_the_next_request_asks_again
     finally:
         await cache.aclose()
     assert [first.status_code, second.status_code, fourth.status_code] == [200, 200, 200]
-    assert rejected.json()["error"]["code"] == -32001
+    assert rejected.json()["error"]["code"] == -31001
     assert [i.subject for i in spy.invalidated] == ["user-1"]
     assert len(server.seen) == 2, "after the 401 the webhook must be asked again"
 

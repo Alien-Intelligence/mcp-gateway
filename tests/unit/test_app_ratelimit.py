@@ -106,7 +106,7 @@ async def test_tools_call_over_the_limit_is_a_tool_error_result_with_200(
         "result": {
             "content": [{"type": "text", "text": MESSAGE.format(n=retry)}],
             "isError": True,
-            "_meta": {"club.alien/retryAfterSeconds": retry},
+            "_meta": {"alien.club/retryAfterSeconds": retry},
         },
     }
     assert upstream.requests == []
@@ -127,7 +127,7 @@ async def test_other_request_with_an_id_gets_a_jsonrpc_error_with_200(
         "jsonrpc": "2.0",
         "id": "abc",
         "error": {
-            "code": -32014,
+            "code": -31014,
             "message": MESSAGE.format(n=retry),
             "data": {"retry_after_seconds": retry},
         },
@@ -179,7 +179,7 @@ async def test_a_request_nobody_can_answer_gets_429_with_retry_after(
         "jsonrpc": "2.0",
         "id": None,
         "error": {
-            "code": -32014,
+            "code": -31014,
             "message": MESSAGE.format(n=9),
             "data": {"retry_after_seconds": 9},
         },
@@ -312,7 +312,7 @@ async def test_an_unavailable_store_answers_503_and_forwards_nothing(
         "jsonrpc": "2.0",
         "id": 7,
         "error": {
-            "code": -32013,
+            "code": -31013,
             "message": "The gateway's shared state is unavailable. Retry shortly.",
         },
     }

@@ -25,8 +25,8 @@ MCP client ──OAuth 2.1 + PKCE──> your OAuth server (token aud = the gate
 - The gateway is an OAuth **resource server** only. It issues no tokens and registers no clients: your OAuth server does that.
 - It publishes Protected Resource Metadata (RFC 9728) at the path-specific URL only (`/.well-known/oauth-protected-resource/mcp` for a `/mcp` endpoint), with `resource` equal to `public_url`. The origin-level URL answers `404`: RFC 9728 requires `resource` to match the URL the document was fetched for.
 - A request without a valid token gets `401` with `WWW-Authenticate: Bearer resource_metadata="…", scope="…"`.
-- A signed-in user with no mapping gets `403` with a JSON-RPC error (`-32010`) and no challenge.
-- If Alien rejects the mapped key (`401` or `402`), the client gets a JSON-RPC error (`-32001` / `-32002`), never an OAuth challenge, so it does not loop on re-authentication.
+- A signed-in user with no mapping gets `403` with a JSON-RPC error (`-31010`) and no challenge.
+- If Alien rejects the mapped key (`401` or `402`), the client gets a JSON-RPC error (`-31001` / `-31002`), never an OAuth challenge, so it does not loop on re-authentication.
 - Inbound headers are allow-listed. `Authorization`, `Cookie`, `X-Oauth-Access-Token`, `X-Job-Id`, `X-Organization-Id`, `X-Mcp-Config-Id` and `X-Forwarded-*` never reach Alien.
 - One JSON audit line per request: subject, organization, labels, method, tool, status, outcome, latency. Never content, tokens or keys.
 
@@ -44,17 +44,19 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Configuration
 
+The wire contract (JSON-RPC error codes, `_meta` keys, HTTP statuses, challenges, headers) is in [`docs/protocol.md`](docs/protocol.md); it is stable within a major version.
+
 One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. The full reference, key by key with bounds and a complete example, is [`docs/configuration.md`](docs/configuration.md). The gateway services in [`compose.yaml`](compose.yaml) are working examples.
 
-Top-level keys: `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).
+Top-level keys: `version` (always `1`), `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).
 
-- `sessions`: an upstream `Mcp-Session-Id` is bound to the subject it was issued to (in memory, or in Redis with `state.type` `redis`, which several replicas need). A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-32007`) and is not forwarded; the client starts a new session.
-- `state`: `memory` (one replica) or `redis` (shared by every replica: sessions, the credential cache and the rate limit buckets). With Redis the gateway fails closed (`503`, `-32013`) when it cannot reach it, and `GET /readyz` reports readiness. See [`docs/configuration.md`](docs/configuration.md#state).
-- `policies.allowed_origins`: browser origins allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-32008`) before authentication; no `Origin` header passes.
+- `sessions`: an upstream `Mcp-Session-Id` is bound to the subject it was issued to (in memory, or in Redis with `state.type` `redis`, which several replicas need). A request that presents an unknown, expired or foreign session id gets `404` and a JSON-RPC error (`-31007`) and is not forwarded; the client starts a new session.
+- `state`: `memory` (one replica) or `redis` (shared by every replica: sessions, the credential cache and the rate limit buckets). With Redis the gateway fails closed (`503`, `-31013`) when it cannot reach it, and `GET /readyz` reports readiness. See [`docs/configuration.md`](docs/configuration.md#state).
+- `policies.allowed_origins`: browser origins allowed on the MCP endpoint. An `Origin` header that is not listed gets `403` (`-31008`) before authentication; no `Origin` header passes.
 - `policies.tools`: per-caller tool allow and deny lists (exact names or `*`, matched on organization or resolver label). A denied `tools/call` is answered as an unknown tool and never forwarded, and `tools/list` replies are filtered. See [`docs/configuration.md`](docs/configuration.md#policiestools).
-- `policies.rate_limits`: token buckets per subject and per organization, in memory or shared in Redis. A refused request is answered in the form its sender can read (`isError` tool result, `-32014`, or `429`) with `Retry-After`. See [`docs/configuration.md`](docs/configuration.md#policiesrate_limits).
+- `policies.rate_limits`: token buckets per subject and per organization, in memory or shared in Redis. A refused request is answered in the form its sender can read (`isError` tool result, `-31014`, or `429`) with `Retry-After`. See [`docs/configuration.md`](docs/configuration.md#policiesrate_limits).
 - A client disconnect is not a cancellation: an upstream request already sent keeps being read to its end (and discarded), bounded by the upstream's `read_timeout_seconds` and by `max_detached_reads` per upstream (beyond it the request is cancelled, counted `shed`); only an explicit `notifications/cancelled` cancels. Listen streams, `DELETE` and notifications are closed on disconnect. See [`docs/configuration.md`](docs/configuration.md#client-disconnects).
-- Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-32006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
+- Requests whose `Mcp-Method` or `Mcp-Name` header disagrees with the JSON-RPC body get `400` and `-32020` (MCP 2026-07-28). If the upstream stream fails before the reply to a request was relayed, the client receives one final SSE event with a JSON-RPC error (`-31006`); in every other mid-stream failure the connection is aborted so it cannot pass for a clean end.
 
 ### Resolvers
 
@@ -212,7 +214,7 @@ Against another target (the real dev MCP, any gateway) run the client directly f
 It behaves like a real MCP client against the dev target: it reads the gateway's 401, fetches the resource metadata and the authorization-server metadata, registers through DCR, runs authorization code + PKCE S256 + `resource` through the provider's real login form, then calls `initialize`, `tools/list` and `tools/call` through the gateway with the official `mcp` SDK. It reads the Alien consumption feeds back and asserts each call was billed to the expected client-managed user and client organization, with the sponsorship applied.
 
 - Both static gateways: happy path for two personas, wrong audience (401), expired token (401), unmapped user (403), revoked Alien key (JSON-RPC error, no challenge), forged `X-Job-Id` / `X-Organization-Id` (stripped; each negative case has a positive control that goes direct to the upstream).
-- Policy and limits on both static gateways (tool policy `default deny [datacluster_keyword_search, ...]` with a rule for `client-y`; per-subject rate limit burst 40, 20 per minute): `tools/list` filtered per persona, a denied `tools/call` answered `-32602` and never billed (proved against the same call through `gateway-chain` as a positive control), an allowed call billed, and a rate-limited persona (carol) refused in the documented shapes (`isError` result with `Retry-After` for `tools/call`, `-32014` for `ping`) without any new event in the feed.
+- Policy and limits on both static gateways (tool policy `default deny [datacluster_keyword_search, ...]` with a rule for `client-y`; per-subject rate limit burst 40, 20 per minute): `tools/list` filtered per persona, a denied `tools/call` answered `-32602` and never billed (proved against the same call through `gateway-chain` as a positive control), an allowed call billed, and a rate-limited persona (carol) refused in the documented shapes (`isError` result with `Retry-After` for `tools/call`, `-31014` for `ping`) without any new event in the feed.
 - Replica pair (`gateway-ha-a`/`-b` behind nginx): four calls through the load balancer, each billed.
 - `gateway-chain`: a token carrying `mcp-write` for a persona of each store (Redis, PostgreSQL, webhook); each call is metered for the right managed user and organization, with the sponsor line in the sponsor's feed; every response has an `x-request-id`; the stateless upstream's `GET` and `DELETE` answers (`405`) pass through untouched.
 

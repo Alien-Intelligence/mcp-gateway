@@ -424,7 +424,7 @@ async def test_an_unexpected_exception_is_audited_and_answered_with_the_id(
         async with client_for(observed.app) as http:
             response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert response.status_code == 500
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
     assert "secret-detail" not in response.text
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["status"]) == ("internal_error", 500)

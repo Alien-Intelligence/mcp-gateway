@@ -117,7 +117,7 @@ def test_failure_event_is_a_whole_jsonrpc_error_message_event() -> None:
         "jsonrpc": "2.0",
         "id": 7,
         "error": {
-            "code": -32006,
+            "code": -31006,
             "message": "The service stream failed before the response was complete.",
         },
     }

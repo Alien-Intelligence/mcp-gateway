@@ -37,7 +37,7 @@ pytestmark = pytest.mark.e2e_stub
 
 static = pytest.mark.parametrize("provider", STATIC_PROVIDERS, ids=lambda p: p.name)
 HEADER_MISMATCH = -32020
-ORIGIN_REFUSED = -32008
+ORIGIN_REFUSED = -31008
 
 
 @static

@@ -236,5 +236,5 @@ def test_the_failure_event_is_a_gateway_error_reply() -> None:
     assert data_json(raw) == {
         "jsonrpc": "2.0",
         "id": 3,
-        "error": {"code": -32005, "message": POLICY_FAILED_MESSAGE},
+        "error": {"code": -31005, "message": POLICY_FAILED_MESSAGE},
     }

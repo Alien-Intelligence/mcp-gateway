@@ -121,7 +121,9 @@ def _state_unavailable(audit: AuditRecord, reply_id: str | int | None) -> Respon
     return response
 
 
-RETRY_AFTER_META_KEY = "club.alien/retryAfterSeconds"
+# `_meta` key of the isError result of a rate-limited tools/call (docs/protocol.md). The prefix is the
+# one the Alien MCP servers already emit; the second label `club` is not an MCP-reserved one.
+RETRY_AFTER_META_KEY = "alien.club/retryAfterSeconds"
 
 
 def _rate_limited_message(retry_after: int) -> str:
