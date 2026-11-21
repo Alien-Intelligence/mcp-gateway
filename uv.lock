@@ -985,6 +985,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "commitizen" },
+    { name = "jsonschema" },
     { name = "mcp" },
     { name = "pre-commit" },
     { name = "pyright" },
@@ -999,6 +1000,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.16.0" },
     { name = "commitizen", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jsonschema", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "mcp", marker = "extra == 'dev'", specifier = ">=1.27.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.45.2" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.45.2" },
