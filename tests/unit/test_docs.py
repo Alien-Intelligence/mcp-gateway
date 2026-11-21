@@ -71,7 +71,37 @@ def test_the_protocol_contract_lists_every_gateway_code_with_its_constant() -> N
     assert sorted(defined) == list(range(-31014, -31000))
 
 
-def test_the_configuration_reference_uses_the_current_codes_and_meta_prefix() -> None:
-    text = DOC.read_text(encoding="utf-8")
-    assert not re.search(r"-320(0[1-9]|1[0-4])\b", text)
+ROOT = DOC.parents[1]
+_SKIPPED_DIRECTORIES = {".git", ".venv", "node_modules"}
+
+
+def _markdown_files() -> list[Path]:
+    """Every Markdown file of the repository, whatever its directory."""
+    return sorted(
+        path
+        for path in ROOT.rglob("*.md")
+        if not _SKIPPED_DIRECTORIES.intersection(path.relative_to(ROOT).parts)
+    )
+
+
+def test_every_markdown_file_of_the_repository_is_checked() -> None:
+    names = {path.relative_to(ROOT).as_posix() for path in _markdown_files()}
+    assert {
+        "README.md",
+        "docs/configuration.md",
+        "docs/tutorial/fr/08-operations.md",
+        "charts/mcp-gateway/README.md",
+        "deploy/compose/README.md",
+    } <= names
+
+
+@pytest.mark.parametrize(
+    "path", _markdown_files(), ids=lambda path: path.relative_to(ROOT).as_posix()
+)
+def test_no_markdown_file_uses_the_old_codes_or_meta_prefix(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    # The paragraph that explains why the family sits outside -32768..-32000 names the SDKs' own
+    # -32001, which is not a gateway code.
+    paragraphs = [p for p in text.split("\n\n") if not p.startswith("The gateway family is")]
+    assert not re.search(r"-320(0[1-9]|1[0-4])\b", "\n\n".join(paragraphs))
     assert "club.alien" not in text
