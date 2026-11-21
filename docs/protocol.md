@@ -53,7 +53,7 @@ The audit line carries the outcome and, for denials, the reason; the client sees
 
 | Code | Name | When | HTTP status |
 |---|---|---|---|
-| `-32700` | Parse error | Tool policy active and the body is not strict UTF-8 JSON, or a non-UTF-8 charset is declared. `id` is `null`. | `400` |
+| `-32700` | Parse error | Tool policy active and the body is not strict UTF-8 JSON (or is nested deeper than 128 levels), or a non-UTF-8 charset is declared. `id` is `null`. | `400` |
 | `-32600` | Invalid Request | Request body too large (`413`) or not received in time (`408`); a repeated `Mcp-Session-Id` or `Mcp-Protocol-Version` header (`400`); with a tool policy active, a request whose `id` is neither a string nor an integer, a `tools/call` or `tools/list` without an id, or a batch holding a `tools/call` or `tools/list` (`400`). | `400`, `408` or `413` |
 | `-32602` | Invalid params | Tool policy active: a `tools/call` naming a tool the user may not call (message `Unknown tool: <name>`, indistinguishable from a tool that does not exist) or without a usable `name`. | `200` |
 | `-32020` | Header mismatch (MCP 2026-07-28, spec-defined) | `Mcp-Method` or `Mcp-Name` disagrees with the JSON-RPC body, is repeated, or is not valid base64 in the `=?base64?...?=` form. Headers that are absent are not checked. | `400` |
