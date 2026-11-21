@@ -1,6 +1,6 @@
 # Configuration reference
 
-The gateway reads one JSON document from the environment variable `MCP_GATEWAY_CONFIG`.
+The gateway reads one JSON document from the environment variable `MCP_GATEWAY_CONFIG`. What clients see (error codes, `_meta` keys, statuses, headers) is the [protocol contract](protocol.md).
 
 - Every key is required. There is no default for any key. An optional value is written as an explicit `null`.
 - Unknown keys are refused at every level.

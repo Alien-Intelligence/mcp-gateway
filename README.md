@@ -44,6 +44,8 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Configuration
 
+The wire contract (JSON-RPC error codes, `_meta` keys, HTTP statuses, challenges, headers) is in [`docs/protocol.md`](docs/protocol.md); it is stable within a major version.
+
 One strict JSON document in the `MCP_GATEWAY_CONFIG` environment variable. Every key is required, unknown keys are refused, and there is no default for any issuer, audience or secret: the gateway refuses to start on an incomplete configuration. The full reference, key by key with bounds and a complete example, is [`docs/configuration.md`](docs/configuration.md). The gateway services in [`compose.yaml`](compose.yaml) are working examples.
 
 Top-level keys: `version` (always `1`), `public_url`, `listen`, `auth` (issuer, JWKS, audiences, scopes, claim paths), `resolver`, `resolver_cache`, `upstreams`, `limits`, `audit`, `observability`, `sessions`, `state` and `policies` (allowed origins, tool policy, rate limits).

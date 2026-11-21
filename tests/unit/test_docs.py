@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from mcp_gateway import jsonrpc
 from mcp_gateway.audit import OUTCOMES, AuditRecord
 from mcp_gateway.config import parse_config
 
@@ -49,3 +50,28 @@ def test_the_tool_policy_example_in_the_reference_is_valid_config() -> None:
     tools = parse_config(json.dumps(data)).policies.tools
     assert tools is not None
     assert len(tools.rules) == 2
+
+
+PROTOCOL_DOC = DOC.with_name("protocol.md")
+
+
+def test_the_protocol_contract_lists_every_gateway_code_with_its_constant() -> None:
+    documented = {
+        int(code): constant
+        for code, constant in re.findall(
+            r"^\| `(-31\d{3})` \| `([A-Z_]+)` \|", PROTOCOL_DOC.read_text(encoding="utf-8"), re.M
+        )
+    }
+    defined = {
+        value: name
+        for name, value in vars(jsonrpc).items()
+        if name.isupper() and isinstance(value, int) and -31999 <= value <= -31000
+    }
+    assert documented == defined
+    assert sorted(defined) == list(range(-31014, -31000))
+
+
+def test_the_configuration_reference_uses_the_current_codes_and_meta_prefix() -> None:
+    text = DOC.read_text(encoding="utf-8")
+    assert not re.search(r"-320(0[1-9]|1[0-4])\b", text)
+    assert "club.alien" not in text
