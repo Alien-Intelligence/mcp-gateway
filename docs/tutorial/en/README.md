@@ -10,7 +10,7 @@ All examples use generic names: `example-publisher`, `mcp.example.com` (your gat
 |---|---|
 | [1. What the gateway is and is not](01-what-it-is.md) | The role of the gateway, what it never does, the architecture |
 | [2. Prerequisites](02-prerequisites.md) | What your OAuth server must provide, network and TLS |
-| [3. The Alien side](03-alien-side.md) | The exact API calls that create organizations, users and keys |
+| [3. Creating the Alien side](03-alien-side.md) | The exact API calls that create organizations, users and keys |
 | [4. Choosing a resolver](04-resolvers.md) | How a signed-in user becomes an Alien key; writing a webhook |
 | [5. Deploying](05-deploying.md) | Helm, docker compose, secrets, high availability |
 | [6. Your OAuth server](06-oauth-server.md) | Keycloak setup, and a checklist for other servers |

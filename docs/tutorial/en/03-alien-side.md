@@ -53,7 +53,7 @@ Expected: `success` true and `data` with the user's `id` and `userType` (`client
 
 Skip this step if your datasets are already shared with a sponsored group.
 
-Create the grant, a read permission on one dataset (`CLUSTER_ID` and `DATASET_ID` are numbers):
+Create the grant, a read permission on one dataset (`12` and `345` are example ids: use the numeric ids of your cluster and dataset):
 
 <!-- not-config -->
 ```json
@@ -139,7 +139,7 @@ Call as the service account, without `x-organization-id`:
 <!-- not-config -->
 ```bash
 curl -sS --max-time 30 -H @sponsor.hdr -H 'Content-Type: application/json' \
-  -d '{"userType": "client-managed", "email": "alice@managed-client-x.example", "description": "Alice, example-publisher"}' \
+  -d '{"userType": "client-managed", "email": "alice@managed-client-x.test", "description": "Alice, example-publisher"}' \
   "$ALIEN_API/organizations/$ORG_ID/users"
 ```
 
@@ -226,7 +226,7 @@ For each person: an Alien user id, an organization id and a key (`oat_...`) in y
 
 ## What the backend code shows
 
-Read from the backend's source, branch `dev` of the platform repository at commit `c5d5c746c` (2026-11-20). Nothing here was run against a live API for this chapter.
+Read from the backend's source as of 2026-11-20. Nothing here was run against a live API for this chapter.
 
 **Which account and which key.**
 
@@ -241,7 +241,7 @@ Read from the backend's source, branch `dev` of the platform repository at commi
 
 **Can a key be shown again?** No. The raw key is in the answer of the minting call only (`data.token`); listing a user's keys returns `identifier`, `name`, `abilities`, `lastUsedAt`, `expiresAt` and no key. A lost key is replaced by minting another and revoking the first.
 
-**Availability.** The managed-organization route and the `managed` account type are on the platform's `dev` and `staging` branches and are **not on its `main` branch** at the time of writing. Whether the API at `https://api.alien.club` already has them: ask Alien before you plan around this chapter.
+**Availability.** The managed-organization route and the `managed` account type are **not yet generally available on `https://api.alien.club`**: ask Alien whether your organization has them before you plan around this chapter.
 
 ## What this chapter could not confirm
 

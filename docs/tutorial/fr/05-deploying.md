@@ -164,7 +164,6 @@ curl -si --max-time 10 https://mcp.example.com/mcp -X POST -H 'Content-Type: app
 # 2. The metadata the challenge points to (200)
 curl -s --max-time 10 https://mcp.example.com/.well-known/oauth-protected-resource/mcp
 # {"resource":"https://mcp.example.com/mcp","authorization_servers":["https://idp.example.com/realms/example-publisher"],"scopes_supported":["mcp-gateway","offline_access"],"bearer_methods_supported":["header"]}
-
 ```
 
 Les sondes `/healthz` et `/readyz` sont destinées à la plateforme, pas à Internet : l'ingress du chart n'achemine que le chemin MCP et le chemin des métadonnées.
