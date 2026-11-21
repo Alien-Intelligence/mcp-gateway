@@ -41,7 +41,8 @@ from .webhook_server import WebhookServer, json_responder
 
 TUTORIAL = Path(__file__).resolve().parents[2] / "docs" / "tutorial"
 EXAMPLES = TUTORIAL / "examples"
-CHAPTERS = sorted((TUTORIAL / "en").glob("*.md"))
+LANGUAGES = ("en", "fr")
+CHAPTERS = [path for lang in LANGUAGES for path in sorted((TUTORIAL / lang).glob("*.md"))]
 MARKER = re.compile(
     r"<!-- (config-fragment: [\w.]+(?: base=ha)?|static-mapping|webhook-answer|not-config) -->"
 )
@@ -63,7 +64,7 @@ def json_fences(path: Path) -> Iterator[Fence]:
         end = next(i for i in range(index + 1, len(lines)) if lines[i].strip() == "```")
         found = MARKER.fullmatch(lines[index - 1].strip()) if index else None
         yield Fence(
-            path.name,
+            f"{path.parent.name}/{path.name}",
             index + 1,
             found.group(1) if found else None,
             "\n".join(lines[index + 1 : end]),
@@ -81,8 +82,10 @@ def fence_id(fence: Fence) -> str:
     return f"{fence.chapter}:{fence.line}"
 
 
-def test_the_tutorial_has_every_chapter() -> None:
-    assert [chapter.name for chapter in CHAPTERS] == [
+@pytest.mark.parametrize("language", LANGUAGES)
+def test_the_tutorial_has_every_chapter(language: str) -> None:
+    chapters = sorted((TUTORIAL / language).glob("*.md"))
+    assert [chapter.name for chapter in chapters] == [
         "01-what-it-is.md",
         "02-prerequisites.md",
         "03-alien-side.md",

@@ -1,5 +1,7 @@
 # Alien MCP Gateway: setup tutorial
 
+[Version française](../fr/README.md)
+
 This tutorial is for a publisher (or any organization) that runs the Alien MCP Gateway itself, in front of Alien MCP servers, under its own domain and with its own login. It takes you from nothing to a working deployment that Claude, ChatGPT, Microsoft Copilot Studio, VS Code and Cursor can connect to.
 
 All examples use generic names: `example-publisher`, `mcp.example.com` (your gateway), `idp.example.com` (your OAuth server), `keys.example.com` (your webhook). Replace them with yours. Every configuration key, endpoint, command and error code in these pages was read from the gateway's code, its reference documents ([`configuration.md`](../../configuration.md), [`protocol.md`](../../protocol.md), [`config.schema.v1.json`](../../config.schema.v1.json)), the Helm chart or the scripts in this repository. Where a statement comes from a vendor's documentation, the vendor URL is given. Where something could not be confirmed, the text says so.

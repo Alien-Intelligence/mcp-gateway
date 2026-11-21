@@ -39,7 +39,8 @@ The [setup tutorial](docs/tutorial/en/README.md) takes you from nothing to a wor
 
 | Document | What it covers |
 |---|---|
-| [Tutorial (English)](docs/tutorial/en/README.md) | Setup, step by step, in nine chapters. A French version is coming. |
+| [Tutorial (English)](docs/tutorial/en/README.md) | Setup, step by step, in nine chapters. |
+| [Tutorial (French)](docs/tutorial/fr/README.md) | The same tutorial in French (Tutoriel d'installation). |
 | [Configuration reference](docs/configuration.md) | Every key of `MCP_GATEWAY_CONFIG`, with bounds and a complete example |
 | [Behaviour overview](docs/overview.md) | Sessions, state, policies, resolvers, observability and the audit line |
 | [Wire protocol](docs/protocol.md) | HTTP statuses, JSON-RPC error codes, `_meta` keys, challenges and headers |
