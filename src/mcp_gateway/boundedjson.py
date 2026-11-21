@@ -11,8 +11,9 @@ import json
 import re
 from typing import Any
 
-# Far above any real JSON-RPC message (a tool input schema nests a few dozen levels at most) and
-# far below the depth at which any supported interpreter's own parser gives up.
+# Far above the nesting of any JSON-RPC message the gateway has seen (the schema of a tool's input
+# is the deepest part, and it stays well under this) and far below the depth at which any supported
+# interpreter's own parser gives up.
 MAX_DEPTH = 128
 
 # A string literal (skipped, whatever brackets it holds) or one structural bracket.
@@ -23,10 +24,7 @@ class JsonTooDeepError(ValueError):
     """The document nests deeper than ``MAX_DEPTH``. A ``ValueError`` like any other unreadable JSON."""
 
 
-def _too_deep(data: str | bytes) -> bool:
-    # Latin-1 maps every byte to one character and leaves ASCII alone; the bytes of a multi-byte
-    # UTF-8 sequence are all >= 0x80, so none of them can pass for a quote, a backslash or a bracket.
-    text = data if isinstance(data, str) else data.decode("latin-1")
+def _too_deep(text: str) -> bool:
     # Cheap exit for the usual body: it cannot nest deeper than it has openers.
     if text.count("[") + text.count("{") <= MAX_DEPTH:
         return False
@@ -42,8 +40,15 @@ def _too_deep(data: str | bytes) -> bool:
     return False
 
 
-def loads(data: str | bytes) -> Any:
-    """``json.loads``, refusing (``JsonTooDeepError``) a document nested deeper than ``MAX_DEPTH``."""
+def loads(data: str) -> Any:
+    """``json.loads``, refusing (``JsonTooDeepError``) a document nested deeper than ``MAX_DEPTH``.
+
+    Text only. ``json.loads`` on bytes sniffs the encoding (UTF-16, UTF-32) and may read a
+    document that a scan of the raw bytes saw differently, so the depth check would be blind to
+    it. The caller decodes strictly as UTF-8 first, which is also what the upstream must read.
+    """
+    if not isinstance(data, str):
+        raise TypeError("boundedjson.loads takes text: decode the bytes as UTF-8 first")
     if _too_deep(data):
         raise JsonTooDeepError(f"JSON nested deeper than {MAX_DEPTH} levels")
     return json.loads(data)

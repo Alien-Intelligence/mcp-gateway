@@ -20,7 +20,8 @@ CRD_CATALOG='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Gro
 EXPECTED_FAILURES='
 ha-no-redis-values.yaml|needs the shared state
 hpa-no-redis-values.yaml|needs the shared state
-grace-too-short-values.yaml|must be greater than the largest upstream read_timeout_seconds
+grace-too-short-values.yaml|must be greater than the stop budget
+grace-below-budget-values.yaml|must be greater than the stop budget
 existing-secret-no-shared-state-values.yaml|existingSecret.sharedState=true
 no-version-values.yaml|'version'
 '

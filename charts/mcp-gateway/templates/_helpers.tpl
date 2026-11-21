@@ -46,13 +46,32 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{/*
-Seconds the gateway needs to stop: a request that runs on after its client left is bounded by the
-upstream's read_timeout_seconds, then the application gives the reads 10 s to finish and 10 s to
-close once cancelled (DETACHED_READS_SHUTDOWN_SECONDS in src/mcp_gateway/app.py, twice), and the
-preStop sleep keeps the pod serving while the endpoint is removed from the Services.
+The OTLP flush at shutdown: the traces provider, then the metrics provider, each bounded by
+timeout_seconds plus 2 s (SHUTDOWN_SLACK_SECONDS in src/mcp_gateway/telemetry.py). 0 without OTLP.
+*/}}
+{{- define "mcp-gateway.telemetryShutdownSeconds" -}}
+{{- $seconds := 0.0 -}}
+{{- $observability := get (default dict .Values.config) "observability" -}}
+{{- if kindIs "map" $observability -}}
+{{- $otlp := get $observability "otlp" -}}
+{{- if kindIs "map" $otlp -}}
+{{- $timeout := get $otlp "timeout_seconds" -}}
+{{- if or (kindIs "float64" $timeout) (kindIs "int64" $timeout) (kindIs "int" $timeout) -}}
+{{- $seconds = mulf 2.0 (addf (float64 $timeout) 2.0) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $seconds -}}
+{{- end -}}
+
+{{/*
+Seconds the process needs after the in-flight grace (the largest read_timeout_seconds), as
+src/mcp_gateway/shutdown.py computes them: the application's shutdown (detached reads get 10 s to
+finish and 10 s to close once cancelled, twice DETACHED_READS_SHUTDOWN_SECONDS, then the OTLP
+flush), plus the preStop sleep, during which the pod keeps serving while it leaves the Services.
 */}}
 {{- define "mcp-gateway.shutdownBudgetSeconds" -}}
-{{- add 20 (int .Values.preStopSleepSeconds) -}}
+{{- add (int64 (ceil (float64 (include "mcp-gateway.telemetryShutdownSeconds" .)))) 20 (int .Values.preStopSleepSeconds) -}}
 {{- end -}}
 
 {{/* The largest upstreams.*.read_timeout_seconds of the inline config, 0 when none is readable. */}}
@@ -72,12 +91,17 @@ preStop sleep keeps the pod serving while the endpoint is removed from the Servi
 {{- $max -}}
 {{- end -}}
 
-{{/* terminationGracePeriodSeconds: the configured one, else the largest read timeout plus the shutdown budget. */}}
+{{/* The least terminationGracePeriodSeconds that lets the gateway stop by itself: the largest read timeout plus the shutdown budget. */}}
+{{- define "mcp-gateway.minimumGracePeriodSeconds" -}}
+{{- add (int64 (ceil (float64 (include "mcp-gateway.maxReadTimeoutSeconds" .)))) (int (include "mcp-gateway.shutdownBudgetSeconds" .)) -}}
+{{- end -}}
+
+{{/* terminationGracePeriodSeconds: the configured one, else the minimum plus a margin of 5 s. */}}
 {{- define "mcp-gateway.terminationGracePeriodSeconds" -}}
 {{- if not (kindIs "invalid" .Values.terminationGracePeriodSeconds) -}}
 {{- .Values.terminationGracePeriodSeconds -}}
 {{- else -}}
-{{- add (int64 (ceil (float64 (include "mcp-gateway.maxReadTimeoutSeconds" .)))) (int (include "mcp-gateway.shutdownBudgetSeconds" .)) 5 -}}
+{{- add (int (include "mcp-gateway.minimumGracePeriodSeconds" .)) 5 -}}
 {{- end -}}
 {{- end -}}
 
@@ -132,17 +156,17 @@ failure, so a missing or mistyped key must produce a message here and never a ni
 {{- fail (printf "publicPath (%q) must equal the path of config.public_url (%q): the Ingress and HTTPRoute route it and its /.well-known document" .Values.publicPath $path) -}}
 {{- end -}}
 {{- end -}}
-{{- $maxRead := float64 (include "mcp-gateway.maxReadTimeoutSeconds" .) -}}
-{{- $grace := float64 (include "mcp-gateway.terminationGracePeriodSeconds" .) -}}
-{{- if le $grace $maxRead -}}
-{{- fail (printf "terminationGracePeriodSeconds (%v) must be greater than the largest upstream read_timeout_seconds (%v): requests that run on after their client left are bounded by it, and the kubelet would kill them. Leave it unset for a computed default (%v)" $grace $maxRead (add (int64 (ceil $maxRead)) (int (include "mcp-gateway.shutdownBudgetSeconds" .)) 5)) -}}
+{{- $minimum := int (include "mcp-gateway.minimumGracePeriodSeconds" .) -}}
+{{- $grace := int (include "mcp-gateway.terminationGracePeriodSeconds" .) -}}
+{{- if le $grace $minimum -}}
+{{- fail (printf "terminationGracePeriodSeconds (%v) must be greater than the stop budget (%v): the largest upstream read_timeout_seconds (%v, requests in flight get that long), plus 20 s for the detached reads, plus the OTLP flush (%v) and preStopSleepSeconds (%v). Below it the kubelet kills the gateway before its shutdown ran. Leave it unset for a computed default (%v)" $grace $minimum (include "mcp-gateway.maxReadTimeoutSeconds" .) (include "mcp-gateway.telemetryShutdownSeconds" .) .Values.preStopSleepSeconds (add $minimum 5)) -}}
 {{- end -}}
 {{- else -}}
 {{- if and $multi (not .Values.existingSecret.sharedState) -}}
 {{- fail "more than one replica needs the shared state: the configuration in existingSecret must have state.type \"redis\"; confirm it with existingSecret.sharedState=true" -}}
 {{- end -}}
 {{- if kindIs "invalid" .Values.terminationGracePeriodSeconds -}}
-{{- fail "with existingSecret the chart cannot read the upstream read timeouts: set terminationGracePeriodSeconds above the largest read_timeout_seconds plus the shutdown budget (see README)" -}}
+{{- fail "with existingSecret the chart cannot read the upstream read timeouts: set terminationGracePeriodSeconds above the stop budget: the largest read_timeout_seconds plus the shutdown budget (see the chart README, 'Shutdown')" -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.ingress.enabled .Values.httpRoute.enabled -}}

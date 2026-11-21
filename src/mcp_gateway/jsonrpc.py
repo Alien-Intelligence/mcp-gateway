@@ -76,6 +76,9 @@ class RpcInfo:
     # correlated with it, and the upstream may read it differently from the gateway (1.0 is 1
     # to some parsers), so a policy refuses it.
     invalid_id: bool = False
+    # An ``UNPARSABLE`` body that was refused for its nesting, not for what it holds. Audited with
+    # its own reason.
+    too_deep: bool = False
 
     @property
     def expects_reply(self) -> bool:
@@ -88,23 +91,29 @@ class RpcInfo:
 
 NO_RPC = RpcInfo(method=None, id=None, tool=None, target=None, kind=BodyKind.EMPTY)
 UNPARSABLE = RpcInfo(method=None, id=None, tool=None, target=None, kind=BodyKind.UNPARSABLE)
+TOO_DEEP = RpcInfo(
+    method=None, id=None, tool=None, target=None, kind=BodyKind.UNPARSABLE, too_deep=True
+)
 
 # Methods whose answer or arguments the tool policy governs.
 TOOL_METHODS = frozenset({"tools/call", "tools/list"})
 
 _UNREADABLE = object()
+_TOO_DEEP = object()
 
 
 def _decode(body: bytes) -> Any:
-    """The JSON document of a strict UTF-8 body, else ``_UNREADABLE``.
+    """The JSON document of a strict UTF-8 body, else ``_UNREADABLE`` (``_TOO_DEEP`` past the limit).
 
     ``json.loads`` on bytes would also accept UTF-16/32 and a UTF-8 BOM; a body the
     gateway reads differently from the upstream is exactly what must never pass a check.
     """
     try:
         return boundedjson.loads(body.decode("utf-8"))
+    except boundedjson.JsonTooDeepError:
+        return _TOO_DEEP
     except ValueError:
-        # Not UTF-8, not JSON, or nested past ``boundedjson.MAX_DEPTH``.
+        # Not UTF-8, or not JSON.
         return _UNREADABLE
 
 
@@ -151,6 +160,8 @@ def parse_request(body: bytes) -> RpcInfo:
     if not body:
         return NO_RPC
     document = _decode(body)
+    if document is _TOO_DEEP:
+        return TOO_DEEP
     if isinstance(document, dict):
         return _single(document)
     if isinstance(document, list):

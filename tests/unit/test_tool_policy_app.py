@@ -266,6 +266,8 @@ async def test_a_body_that_is_not_utf8_json_is_refused_and_never_forwarded(
     assert upstream.requests == []
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["status"]) == ("unparsable_request", 400)
+    deep = body == UNREADABLE_BODIES["deep_nesting"]
+    assert line["reason"] == ("too_deep" if deep else None)
 
 
 @pytest.mark.parametrize("charset", ["latin-1", "ISO-8859-1", "utf-16", "UTF-8-SIG", "nonsense"])

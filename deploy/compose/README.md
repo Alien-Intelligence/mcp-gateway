@@ -66,7 +66,7 @@ The keys live in a Redis that you fill and keep (`mcp-gateway:credential:<e-mail
 | Network | `edge` (published port, identity provider, upstreams) and `state`. | `state` only, an `internal` network: no route out, no published port. |
 | Logs | JSON lines on stdout, one audit line per request; rotated at 5 × 50 MB. | Same rotation. |
 
-`stop_grace_period` is 30 s: on shutdown the gateway lets upstream requests whose client already left finish for up to 10 s, then closes the rest within 10 s more.
+`stop_grace_period` is 160 s, above the stop budget of the example configs (largest upstream `read_timeout_seconds` 130 s + 20 s for detached reads + a margin; see "Shutdown" in `docs/configuration.md`). On SIGTERM the gateway closes its listen streams at once, lets requests in flight finish for that time, then runs its shutdown. Raise it with any `read_timeout_seconds` you raise.
 
 Secrets: `init-secrets.sh` makes the directory `0700` and the files in it `0644`. The containers run as uids 1000 and 999, not as your account, so they need to read the files; a bind mount does not go through the parent directory, so other accounts of the host stay out. Redis gets its password as a compose secret file (`requirepass` in `redis.conf`), never on its command line or in its environment.
 

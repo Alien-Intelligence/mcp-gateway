@@ -209,8 +209,41 @@ def test_data_nested_past_the_gateway_limit_is_refused_even_where_the_interprete
 ):
     deep = b"[" * 500 + b"]" * 500
     raw = b'data: {"id":3,"result":{"tools":[{"name":"x","s":' + deep + b"}]}}\n\n"
-    with pytest.raises(ToolPolicyError, match="unparsable"):
+    with pytest.raises(ToolPolicyError, match="too_deep"):
         sse_filter().apply(raw)
+
+
+# A reply 100 000 levels deep in UTF-16: ``json.loads`` on bytes would sniff the encoding and read
+# it, while a scan for brackets in the raw bytes sees something else entirely.
+UTF16_DEEP = (
+    '{"jsonrpc":"2.0","id":3,"result":{"tools":["\\"", '
+    + "[" * 100_000
+    + "]" * 100_000
+    + ', "x"]}}'
+).encode("utf-16-le")
+
+
+def test_a_deep_json_reply_is_refused_as_too_deep() -> None:
+    body = b'{"jsonrpc":"2.0","id":3,"result":{"tools":[' + b"[" * 500 + b"]" * 500 + b"]}}"
+    with pytest.raises(ToolPolicyError, match="too_deep"):
+        filter_json_reply(body, 3, POLICY)
+
+
+@pytest.mark.parametrize("encoding", ["utf-16-le", "utf-16", "utf-32-le"])
+def test_a_json_reply_that_is_not_utf8_is_unparsable_not_a_crash(encoding: str) -> None:
+    body = '{"jsonrpc":"2.0","id":3,"result":{"tools":[]}}'.encode(encoding)
+    with pytest.raises(ToolPolicyError, match="unparsable"):
+        filter_json_reply(body, 3, POLICY)
+
+
+def test_a_utf16_json_reply_100000_levels_deep_is_refused_not_a_recursion_error() -> None:
+    with pytest.raises(ToolPolicyError, match="unparsable"):
+        filter_json_reply(UTF16_DEEP, 3, POLICY)
+
+
+def test_a_utf16_event_100000_levels_deep_is_refused_not_a_recursion_error() -> None:
+    with pytest.raises(ToolPolicyError, match="unparsable"):
+        sse_filter().apply(b"data: " + UTF16_DEEP + b"\n\n")
 
 
 def test_the_failure_event_without_a_request_id_answers_null() -> None:

@@ -10,6 +10,7 @@ from mcp_gateway.sse import (
     TruncatedEventError,
     data_of,
     is_reply_to,
+    parse_reply,
     stream_failed_event,
 )
 
@@ -206,3 +207,29 @@ def test_a_deeply_nested_event_is_not_a_reply_and_does_not_crash_the_relay() -> 
     splitter = SseEventSplitter(1 << 22, 5)
     assert list(splitter.feed(nested)) == [nested]
     assert splitter.reply_relayed is False
+
+
+# The characters U+7222 U+7365 U+6C75 U+2274 are, in UTF-16-LE, the bytes ``"result"``: they get a
+# UTF-16 document past the cheap look for the word before parsing.
+_RESULT_AS_UTF16 = "\u7222\u7365\u6c75\u2274"
+
+
+def test_a_utf16_reply_is_not_a_reply() -> None:
+    # json.loads on bytes sniffs UTF-16: the reply would count as delivered although a strict
+    # UTF-8 reader (the client, the upstream's own parser) cannot read it.
+    document = '{"jsonrpc":"2.0","id":5,"result":{},"x":"' + _RESULT_AS_UTF16 + '"}'
+    data = document.encode("utf-16-le")
+    assert b'"result"' in data
+    assert parse_reply(data, 5) is None
+
+
+def test_a_utf16_reply_100000_levels_deep_does_not_crash_the_relay() -> None:
+    document = (
+        '{"jsonrpc":"2.0","id":5,"result":'
+        + "[" * 100_000
+        + "]" * 100_000
+        + ',"x":"'
+        + _RESULT_AS_UTF16
+        + '"}'
+    )
+    assert parse_reply(document.encode("utf-16-le"), 5) is None

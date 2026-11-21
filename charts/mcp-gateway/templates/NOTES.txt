@@ -14,11 +14,11 @@ The configuration comes from the Secret {{ .Values.existingSecret.name }}, which
   kubectl -n {{ .Release.Namespace }} rollout restart deployment/{{ include "mcp-gateway.fullname" . }}
 {{- end }}
 {{- if not .Values.existingSecret.name }}
-{{- $maxRead := float64 (include "mcp-gateway.maxReadTimeoutSeconds" .) }}
-{{- $grace := float64 (include "mcp-gateway.terminationGracePeriodSeconds" .) }}
-{{- if lt $grace (addf $maxRead (float64 (include "mcp-gateway.shutdownBudgetSeconds" .))) }}
+{{- $minimum := int (include "mcp-gateway.minimumGracePeriodSeconds" .) }}
+{{- $grace := int (include "mcp-gateway.terminationGracePeriodSeconds" .) }}
+{{- if lt $grace (add $minimum 5) }}
 
-WARNING: terminationGracePeriodSeconds ({{ $grace }}) is below the largest upstream read timeout ({{ $maxRead }}) plus the shutdown budget ({{ include "mcp-gateway.shutdownBudgetSeconds" . }}): a request still running on after its client left can be killed by a rollout.
+WARNING: terminationGracePeriodSeconds ({{ $grace }}) leaves less than 5 s of margin above the stop budget ({{ $minimum }}: the largest upstream read timeout plus the shutdown budget): a rollout can kill a gateway that is still flushing.
 {{- end }}
 {{- end }}
 {{- if and (not .Values.ingress.enabled) (not .Values.httpRoute.enabled) }}

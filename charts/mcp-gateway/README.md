@@ -51,7 +51,7 @@ secretMounts:
 |---|---|
 | Neither or both of `config` and `existingSecret.name` | One source of configuration. |
 | More than one replica (`replicaCount` > 1, or `autoscaling.enabled` with `maxReplicas` > 1) and `config.state.type` is not `redis` | A per-process state gives every replica its own sessions, resolver cache and rate limit buckets. With `existingSecret` the chart cannot read the document: you confirm with `existingSecret.sharedState=true`. |
-| `terminationGracePeriodSeconds` not greater than the largest `upstreams.*.read_timeout_seconds` | A request that runs on after its client left is bounded by that read timeout (see "Client disconnects" in the configuration reference); the kubelet would kill it. With `existingSecret` the value is required. |
+| `terminationGracePeriodSeconds` not greater than the stop budget (the largest `upstreams.*.read_timeout_seconds` + 20 s + the OTLP flush, 2 x (`observability.otlp.timeout_seconds` + 2 s), when OTLP is on + `preStopSleepSeconds`) | The kubelet would kill the gateway before its shutdown ran: telemetry unflushed, detached reads unfinished. See "Shutdown". With `existingSecret` the value is required, and the check cannot run: you compute the budget from your configuration. |
 | `config.listen.port` differs from `containerPort`, `config.listen.host` is not `0.0.0.0` or `::`, `publicPath` differs from the path of `config.public_url` | The probes, the Service and the routes depend on them. |
 | `ingress.enabled` and `httpRoute.enabled` together | One way in. |
 
@@ -59,7 +59,9 @@ All reads of `config` are guarded, so `helm lint` reports the message and never 
 
 ## Shutdown
 
-`terminationGracePeriodSeconds` defaults to the largest `read_timeout_seconds` + 20 s (the detached-read deadlines: 10 s to finish, 10 s to close once cancelled) + `preStopSleepSeconds` (5 s: the pod keeps serving while it leaves the Services) + 5 s. With the default upstream `read_timeout_seconds` of 130 that is 160 s. Open streams still running when the process stops are closed; the client reconnects to another replica, which finds its session because the replicas share their state.
+On SIGTERM (sent after the `preStop` sleep) the gateway stops accepting connections and closes its listen streams (GET) at once: a stream is closed cleanly, the client reconnects to another replica, which finds its session because the replicas share their state. Requests in flight (a `tools/call`) get the largest `read_timeout_seconds` to finish; one still running then is cancelled, and a request that was already sent upstream carries on as a detached read. Then the application's own shutdown runs: detached reads get 10 s to finish and 10 s to close once cancelled, the resolver, the state and the HTTP clients are closed, and the telemetry is flushed (when OTLP is on, each of the two providers within `timeout_seconds` + 2 s).
+
+`terminationGracePeriodSeconds` defaults to that sum plus `preStopSleepSeconds` (5 s: the pod keeps serving while it leaves the Services) plus a margin of 5 s, and a value you set must be above it (the render fails otherwise). With the default upstream `read_timeout_seconds` of 130, no OTLP and the default preStop that is 160 s; the same figures with OTLP at `timeout_seconds: 5` give 174 s. The source of the figure is `src/mcp_gateway/shutdown.py`.
 
 ## Probes
 

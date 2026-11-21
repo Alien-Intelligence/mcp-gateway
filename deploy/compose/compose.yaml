@@ -59,8 +59,11 @@ services:
       # Loopback by default: TLS is terminated by the reverse proxy in front (README.md).
       - "${MCP_GATEWAY_BIND:?set MCP_GATEWAY_BIND in .env}:8000"
     networks: [edge, state]
-    # Above the shutdown sequence: detached upstream reads get 10 s to finish, then 10 s to close.
-    stop_grace_period: 30s
+    # Above the stop budget (docs/configuration.md, "Shutdown"): the largest upstream
+    # read_timeout_seconds (requests in flight get that long), 20 s for the detached reads, the
+    # telemetry flush when OTLP is on, and a margin. 160 s fits the example configs (130 s). If
+    # you raise a read timeout, raise this too, or Docker kills the gateway before it has flushed.
+    stop_grace_period: 160s
     deploy:
       resources:
         limits:

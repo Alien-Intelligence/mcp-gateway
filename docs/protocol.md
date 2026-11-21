@@ -36,7 +36,7 @@ for itself and leaves `-32000..-32019` to implementations, where the Python SDK 
 | `-31002` | `UPSTREAM_PAYMENT_REQUIRED` | The upstream answered `402`. Same handling as `-31001`. | `200` with an id, otherwise `502` | `{"upstream_status": 402}` |
 | `-31003` | `UPSTREAM_UNREACHABLE` | Connection to the upstream failed (transport error). | `502` | none |
 | `-31004` | `UPSTREAM_TIMEOUT` | Connect, write, read or pool timeout towards the upstream, including a buffered `tools/list` body that did not arrive in time. | `504` | none |
-| `-31005` | `GATEWAY_ERROR` | The gateway could not do its job: the credential lookup failed, the resolver named an unknown upstream, an unexpected internal error, the tool policy could not be applied to a reply, or the upstream answered a non-2xx to `tools/list`. | `500` for the first three; `200` when the tool policy could not be applied (as a JSON body, or as the SSE event that replaces the offending event); the upstream's own status for a non-2xx `tools/list` (with its `Retry-After` if any) | none |
+| `-31005` | `GATEWAY_ERROR` | The gateway could not do its job: the credential lookup failed, the resolver named an unknown upstream, an unexpected internal error, the tool policy could not be applied to a reply (it could not be parsed as strict UTF-8 JSON, it is nested deeper than 128 levels, it is too large, and so on), or the upstream answered a non-2xx to `tools/list`. | `500` for the first three; `200` when the tool policy could not be applied (as a JSON body, or as the SSE event that replaces the offending event); the upstream's own status for a non-2xx `tools/list` (with its `Retry-After` if any) | none |
 | `-31006` | `UPSTREAM_STREAM_FAILED` | The upstream stream broke before the reply to the request was relayed. Sent as one final SSE event (`event: message`) on the already-open stream; any other mid-stream failure aborts the connection instead. | the status of the stream (normally `200`) | none |
 | `-31007` | `SESSION_NOT_FOUND` | `Mcp-Session-Id` is unknown here, expired, or bound to another user. Not forwarded. The client starts a new session. | `404` | none |
 | `-31008` | `ORIGIN_REFUSED` | An `Origin` header is present and not in `policies.allowed_origins`. Answered before authentication. `id` is `null`. | `403` | none |
@@ -77,7 +77,7 @@ A refused request is answered in the form its sender can read, always with `Retr
 |---|---|
 | single `tools/call` with an id | HTTP `200`, a result with `isError: true`, one text content item and `_meta["alien.club/retryAfterSeconds"]: N`. |
 | any other single request with an id | HTTP `200`, JSON-RPC error `-31014`, `data.retry_after_seconds: N`. |
-| no reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request) | HTTP `429`, JSON-RPC error `-31014` with `id` null, `data.retry_after_seconds: N`. |
+| no reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request, which includes a body nested deeper than 128 levels that no tool policy refused) | HTTP `429`, JSON-RPC error `-31014` with `id` null, `data.retry_after_seconds: N`. |
 
 ## HTTP statuses and challenge shapes before any JSON-RPC
 
