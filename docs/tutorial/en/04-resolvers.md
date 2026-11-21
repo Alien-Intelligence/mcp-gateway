@@ -167,6 +167,8 @@ Test it before you point the gateway at it, with [`examples/resolve_probe.py`](.
 python resolve_probe.py --url https://keys.example.com/resolve --secret-file ./webhook-hmac --email alice@example.com
 ```
 
+The probe verifies the webhook's certificate against the system's authorities. For a certificate from your own authority (the gateway trusts it through `ca_file`), point the probe at the same bundle: `SSL_CERT_FILE=./webhook-ca.crt python resolve_probe.py ...`.
+
 A unit test runs this example against the gateway's own webhook resolver (an allow, a deny, a wrong secret, a replayed request), so it stays correct.
 
 Things the example does not do, and a production webhook may need: mutual TLS (put a reverse proxy that verifies client certificates in front, or use your framework's TLS options), a database connection pool, request logging policy for your own audit needs, and rate limiting of failed signatures. Never log the answer: it carries the key.

@@ -33,7 +33,31 @@ Import the rendered file one of three ways:
 - Offline, with the server stopped: `bin/kc.sh import --file example-publisher-realm.json`.
 - Admin console: *Create realm*, then *Browse* and pick the file.
 
-Then create your users (or connect your user federation or identity provider). Give each a verified e-mail and, if your resolver matches on it, the `org` attribute.
+To try the realm on one machine before you deploy Keycloak for real, run the tested image in development mode with the rendered file in the import directory. `start-dev` serves plain HTTP with an embedded database that is lost when the container is removed: it is for a trial, never for production. The two `KC_BOOTSTRAP_ADMIN_*` variables create the administrator of the `master` realm on the first start; keep them in a file of mode 600 (`--env-file`), not on the command line:
+
+```bash
+umask 077
+printf 'KC_BOOTSTRAP_ADMIN_USERNAME=admin\nKC_BOOTSTRAP_ADMIN_PASSWORD=%s\n' "$(head -c 18 /dev/urandom | base64)" > keycloak-admin.env
+mkdir -p import && cp example-publisher-realm.json import/ && chmod 755 import && chmod 644 import/*.json
+docker run -d --name keycloak --env-file keycloak-admin.env -p 127.0.0.1:8080:8080 \
+  -v "$PWD/import:/opt/keycloak/data/import:ro" quay.io/keycloak/keycloak:26.8.2 start-dev --import-realm
+```
+
+The issuer is then `http://localhost:8080/realms/example-publisher` (Keycloak in development mode takes the host name from the request, so sign in through that address). The realm's `sslRequired: external` accepts plain HTTP from private addresses only, which a trial on one machine is. A gateway that runs in a container cannot fetch the key set from `localhost`: connect Keycloak to the gateway's network (with the compose example of chapter 5: `docker network connect mcp-gateway_edge keycloak`) and set `auth.jwks_uri` to `http://keycloak:8080/realms/example-publisher/protocol/openid-connect/certs`, leaving `auth.issuer` as it is (chapter 2: only the gateway fetches the key set).
+
+Then create your users (or connect your user federation or identity provider). Give each a verified e-mail and, if your resolver matches on it, the `org` attribute. With Keycloak's admin CLI, inside the container (each command that needs a password asks for it, so it stays out of the process list and the shell history; the password must satisfy the realm's policy: at least 12 characters, not the username, not the e-mail):
+
+```bash
+docker exec -it keycloak /opt/keycloak/bin/kcadm.sh config credentials --config /tmp/kcadm.config \
+  --server http://localhost:8080 --realm master --user admin
+docker exec keycloak /opt/keycloak/bin/kcadm.sh create users --config /tmp/kcadm.config -r example-publisher \
+  -s username=alice@example.com -s email=alice@example.com -s emailVerified=true -s enabled=true \
+  -s 'attributes.org=["example-org"]'
+docker exec -it keycloak /opt/keycloak/bin/kcadm.sh set-password --config /tmp/kcadm.config \
+  -r example-publisher --username alice@example.com
+```
+
+Set `emailVerified` only for an address you have checked: the gateway trusts an e-mail only when that flag is `true`, and the `static` and webhook examples map on it.
 
 If your users need Keycloak's account console, one fix is needed after the import: Keycloak creates its built-in `account-console` client without any client scope when a realm is imported with its own client scopes, and the console then answers `403`. Give `account-console` the default client scopes `basic`, `acr`, `profile`, `email`, `roles` and `web-origins` (*Clients* > `account-console` > *Client scopes* > *Add client scope*, type *Default*). MCP clients do not need this.
 

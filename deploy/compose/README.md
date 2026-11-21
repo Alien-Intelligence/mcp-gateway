@@ -42,6 +42,8 @@ What to change in an example:
 - `upstreams`: the Alien MCP servers, by name. The resolver's answer (`upstream` in the mapping, `default_upstream` for `store_redis`) must name one of them.
 - `policies`: `allowed_origins` stays empty unless a browser application calls the gateway directly; `rate_limits.per_subject` is per user.
 
+The gateway reads the file once, at start. `docker compose up -d` does not restart a running gateway when only `config.json` changed: apply a change with `docker compose restart gateway`. The same holds for the secret files, except the static mapping and its key files, which the gateway re-reads by itself.
+
 Secrets are never in the configuration. Every `*_file` key names a file under `/run/mcp-gateway/secrets/`, which is the `gateway/` directory of `MCP_GATEWAY_SECRETS_DIR`, mounted read-only.
 
 ### `static` resolver

@@ -66,6 +66,8 @@ uv run python scripts/dev_fixture.py \
 
 The key is read from the file and never passed on the command line or printed. The IdP personas keep their addresses (`alice@client-x.test`); `fixture.json` records each persona's Alien-side address as `alien_email`.
 
+`--name-prefix` (default `mcp-gateway-e2e`, the shared fixture) names every object the fixture creates: the grant, the group, the organizations, the token and, for any other prefix, the Alien-side addresses (`alice@<prefix>.managed-client-x.test`), which must be unique on the platform. A new prefix with a new `--state-dir` sets up a separate chain from scratch, for example to check the creation path again; nothing it creates can be deleted once metered.
+
 ## Tests
 
 Three layers, from fastest to most real:
