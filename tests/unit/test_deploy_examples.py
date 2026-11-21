@@ -263,6 +263,17 @@ def test_the_token_endpoint_grants_only_authorization_code_and_refresh_token() -
     assert _executors(realm, policy) == {"reject-request": {}}
 
 
+def test_the_groups_claim_carries_full_group_paths() -> None:
+    """With bare names, members of /a/analysts and /b/analysts would get the same claim."""
+    (mapper,) = [
+        m
+        for m in _client_scope(_rendered_realm(), "gateway-identity")["protocolMappers"]
+        if m["protocolMapper"] == "oidc-group-membership-mapper"
+    ]
+    assert mapper["config"]["claim.name"] == "groups"
+    assert mapper["config"]["full.path"] == "true"
+
+
 def test_the_template_keycloak_of_the_stub_target_is_the_pinned_image() -> None:
     """The realm checks run on the Keycloak the README says the template is tested on."""
     root = DEPLOY.parent

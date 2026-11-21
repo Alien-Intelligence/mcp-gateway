@@ -7,7 +7,7 @@ Le resolver transforme l'identité que la passerelle a vérifiée en clé d'API 
 | `subject` | L'identifiant stable de l'utilisateur, tiré du jeton |
 | `email` | L'adresse e-mail, **uniquement** lorsque la revendication `email_verified` du jeton vaut `true`, sinon `null` |
 | `organization` | La revendication d'organisation, ou `null` |
-| `groups` | La revendication de groupes, une liste (éventuellement vide) |
+| `groups` | La revendication de groupes, une liste (éventuellement vide). Le modèle de realm Keycloak du chapitre 6 y met les chemins complets des groupes (`/analysts`, `/team-a/analysts`) |
 
 Le resolver répond par une clé, le nom d'un upstream (l'une des clés de `upstreams`) et des étiquettes (labels), ou par un refus. Les étiquettes sont des chaînes copiées dans la ligne d'audit et dans les attributs de trace, et utilisées par les politiques d'outils (chapitre 8).
 
@@ -86,7 +86,7 @@ La passerelle envoie l'identité à votre point de terminaison et obtient une d�
 
 <!-- not-config -->
 ```json
-{"subject":"3f1c0e52-0f34-4b8e-9a52-1d6b5d7c9a10","email":"alice@example.com","organization":"example-publisher","groups":["analysts"]}
+{"subject":"3f1c0e52-0f34-4b8e-9a52-1d6b5d7c9a10","email":"alice@example.com","organization":"example-publisher","groups":["/analysts"]}
 ```
 
 `email` et `organization` valent `null` lorsqu'ils sont absents. `groups` est toujours une liste.

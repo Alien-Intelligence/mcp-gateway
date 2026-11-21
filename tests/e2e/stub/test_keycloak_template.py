@@ -266,6 +266,8 @@ async def test_a_registered_client_with_pkce_gets_a_token_for_the_gateway(
     assert claims["email"] == user.username
     assert claims["email_verified"] is True
     assert claims["org"] == "client-x"
+    # Full group paths: the member of /team-a-*/analysts is not a member of /team-b-*/analysts.
+    assert claims["groups"] == [user.group_path]
 
     # The refresh grant is the other grant the realm allows.
     refreshed = await _post_token(

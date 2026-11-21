@@ -106,7 +106,7 @@ The gateway reads the identity from the access token (`auth.identity` above): `s
 - `duplicateEmailsAllowed: false` and `loginWithEmailAllowed: true`: one account per e-mail, so an e-mail matcher of the static resolver names one person.
 - `editUsernameAllowed: false`, `verifyEmail: false`: an administrator creating a user sets `emailVerified` to `true` after checking it; with `verifyEmail` on, Keycloak would ask the user to confirm it by e-mail (needs SMTP).
 
-The `gateway-identity` default scope adds the `org` claim (user attribute `org`) and the `groups` claim (group names, without the path). The standard `email` and `profile` scopes add `email`, `email_verified` and the name claims.
+The `gateway-identity` default scope adds the `org` claim (user attribute `org`) and the `groups` claim (full group paths: a member of the subgroup `analysts` of `team-a` gets `"/team-a/analysts"`). Full paths because two groups may share a name under different parents (`/team-a/analysts`, `/team-b/analysts`): with names alone both would be `analysts` in the token, and a resolver matching on `analysts` would give the members of both the same API key. Match on the path: `{"group": "/team-a/analysts"}` in a static mapping file, the same string in a webhook. The standard `email` and `profile` scopes add `email`, `email_verified` and the name claims.
 
 Other realm settings: `sslRequired: external` (HTTPS for every address that is not private; your reverse proxy terminates TLS), `bruteForceProtected: true` with 10 failures, `passwordPolicy` `length(12) and notUsername and notEmail`, login and admin events stored for 30 days (they hold IP addresses: personal data, size the retention to your policy).
 

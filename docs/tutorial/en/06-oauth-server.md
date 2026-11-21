@@ -93,7 +93,7 @@ The configuration requires at least one entry. For another server, advertise onl
 The gateway reads the claims named in `auth.identity`. The template adds them through a client scope `gateway-identity`, a default scope of the realm. The user profile lets only administrators change `username`, `email` and `org`, and self sign-up is off, because whoever can change those values chooses which API key a request uses:
 
 - `org`: an attribute mapper (`oidc-usermodel-attribute-mapper`) from the user attribute `org` to the claim `org`, a string, in the access token. That is `auth.identity.organization: "org"`.
-- `groups`: a group-membership mapper (`oidc-group-membership-mapper`), claim `groups`, `full.path` false, so a group `/analysts` is `analysts` in the claim. That is `auth.identity.groups: "groups"`.
+- `groups`: a group-membership mapper (`oidc-group-membership-mapper`), claim `groups`, `full.path` true, so the subgroup `analysts` of `team-a` is `/team-a/analysts` in the claim and a top-level group `analysts` is `/analysts`. Full paths, because two groups may share a name under different parents: with names alone, the members of `/team-a/analysts` and `/team-b/analysts` would carry the same claim and a resolver would give them the same API key. Match on the path (`{"group": "/team-a/analysts"}` in a static mapping). That is `auth.identity.groups: "groups"`.
 - `sub`, `email` and `email_verified` come from the realm's standard scopes. Set `auth.identity.email_verified` to `email_verified`: an e-mail counts only when that claim is `true`.
 
 ### Token lifetime
