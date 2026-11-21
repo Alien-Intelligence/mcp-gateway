@@ -15,6 +15,7 @@ def test_without_overrides_a_provider_is_at_its_dev_stack_address(
     provider = provider_at("replicas", DEFAULT_URL, DEFAULT_ISSUER, {"scope": "openid"})
     assert provider.gateway_url == DEFAULT_URL
     assert provider.issuer == DEFAULT_ISSUER
+    assert provider.owns_state
 
 
 def test_the_environment_replaces_the_url_and_the_issuer_of_the_named_provider(
@@ -26,6 +27,8 @@ def test_the_environment_replaces_the_url_and_the_issuer_of_the_named_provider(
     assert provider.gateway_url == "https://mcp.example.com/mcp"
     assert provider.issuer == "https://idp.example.com/realms/main"
     assert provider.name == "replicas"
+    # A deployment the harness did not start: its keys cannot be replaced from here.
+    assert not provider.owns_state
 
 
 def test_one_override_leaves_the_other_value_and_other_providers_alone(
@@ -38,6 +41,8 @@ def test_one_override_leaves_the_other_value_and_other_providers_alone(
     assert hydra.gateway_url == "https://mcp.example.com/mcp"
     assert hydra.issuer == "http://localhost:14444"
     assert keycloak.gateway_url == "http://localhost:18000/mcp"
+    assert not hydra.owns_state
+    assert keycloak.owns_state
 
 
 def test_the_module_level_providers_exist() -> None:

@@ -40,12 +40,14 @@ KEYCLOAK = Provider(
     gateway_url="http://localhost:18000/mcp",
     issuer=KEYCLOAK_ISSUER,
     wrong_audience={"scope": "openid"},
+    owns_state=True,
 )
 HYDRA = Provider(
     name="hydra",
     gateway_url="http://localhost:18001/mcp",
     issuer=HYDRA_ISSUER,
     wrong_audience={"resource": "http://localhost:18999/mcp"},
+    owns_state=True,
 )
 # Keycloak, a webhook resolver whose endpoint nobody listens to.
 UNREACHABLE = Provider(
@@ -53,6 +55,7 @@ UNREACHABLE = Provider(
     gateway_url="http://localhost:18003/mcp",
     issuer=KEYCLOAK_ISSUER,
     wrong_audience={"scope": "openid"},
+    owns_state=True,
 )
 STATIC_PROVIDERS = (KEYCLOAK, HYDRA)
 # The replica pair behind its load balancer (Keycloak). Tokens are issued for this address, which
@@ -62,6 +65,7 @@ HA = Provider(
     gateway_url="http://localhost:18004/mcp",
     issuer=KEYCLOAK_ISSUER,
     wrong_audience={"scope": "openid"},
+    owns_state=True,
 )
 # The same two replicas reached directly. Only for posting: the token is the pair's (HA), and
 # the resource metadata of each replica still names the pair's public URL.
@@ -73,6 +77,7 @@ NOREDIS = Provider(
     gateway_url="http://localhost:18007/mcp",
     issuer=KEYCLOAK_ISSUER,
     wrong_audience={"scope": "openid"},
+    owns_state=True,
 )
 # What each gateway's 401 challenge advertises.
 ADVERTISED_SCOPE = {

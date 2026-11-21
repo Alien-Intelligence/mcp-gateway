@@ -177,6 +177,10 @@ class Provider:
     issuer: str
     # Keyword arguments of obtain_grant that make the issued token lack the gateway audience.
     wrong_audience: dict[str, str]
+    # True for the dev-stack service, whose key files the harness can replace (E2E_STATE_DIR is
+    # its bind mount); False for a deployment named by E2E_GATEWAY_URL_<NAME>, whose keys live
+    # where the harness cannot write (a Kubernetes Secret, another host).
+    owns_state: bool
 
 
 def provider_at(
@@ -192,11 +196,13 @@ def provider_at(
     the harness compares them with the protected-resource metadata and the token.
     """
     key = name.upper()
+    url_override = os.environ.get(f"E2E_GATEWAY_URL_{key}")
     return Provider(
         name=name,
-        gateway_url=os.environ.get(f"E2E_GATEWAY_URL_{key}", gateway_url),
+        gateway_url=url_override if url_override is not None else gateway_url,
         issuer=os.environ.get(f"E2E_ISSUER_{key}", issuer),
         wrong_audience=wrong_audience,
+        owns_state=url_override is None,
     )
 
 

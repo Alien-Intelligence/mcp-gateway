@@ -264,7 +264,11 @@ class GrantIssuer:
 def grant_with_claims(persona: str, claims: dict[str, Any], token: str = "t") -> Grant:
     return Grant(
         provider=Provider(
-            name="p", gateway_url="http://gw/mcp", issuer="http://idp", wrong_audience={}
+            name="p",
+            gateway_url="http://gw/mcp",
+            issuer="http://idp",
+            wrong_audience={},
+            owns_state=False,
         ),
         persona=Persona(
             name=persona, email=f"{persona}@x", org_id=None, user_id=None, key_file=None

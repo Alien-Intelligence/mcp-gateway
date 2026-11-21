@@ -840,6 +840,8 @@ def make_auth(target: Target, workload: Workload, state_dir: Path | None) -> Aut
         gateway_url=target.url,
         issuer=target.auth.removeprefix("oauth:"),
         wrong_audience={},
+        # The load client only logs in and calls: it never replaces a key.
+        owns_state=False,
     )
     settings = PasswordSettings(os.environ[PASSWORD_VARIABLE])
 

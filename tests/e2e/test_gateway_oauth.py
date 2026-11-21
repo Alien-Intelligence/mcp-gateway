@@ -169,6 +169,11 @@ async def test_user_without_mapping_is_denied_without_a_challenge(
 async def test_revoked_alien_key_gives_a_jsonrpc_error_not_a_challenge(
     settings: Settings, provider: Provider, evidence: dict[str, Any]
 ) -> None:
+    if not provider.owns_state:
+        pytest.skip(
+            f"{provider.name} is a deployment named by E2E_GATEWAY_URL_{provider.name.upper()}: "
+            "the harness cannot replace its keys, so revocation is proven on the dev stack"
+        )
     alice = settings.personas["alice"]
     revoked_key = await asyncio.to_thread(mint_revoked_key, settings, alice)
     grant = await obtain_grant(settings, provider, alice)
