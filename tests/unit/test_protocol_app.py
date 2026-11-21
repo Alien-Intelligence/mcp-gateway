@@ -143,7 +143,7 @@ async def test_unlisted_origin_is_403_before_authentication(
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": None,
-        "error": {"code": -32008, "message": "The request origin is not allowed."},
+        "error": {"code": -31008, "message": "The request origin is not allowed."},
     }
     assert upstream.requests == []
     (line,) = audit_lines(caplog)
@@ -252,7 +252,7 @@ async def test_session_issued_to_alice_is_usable_by_alice_only(
     assert stolen.json() == {
         "jsonrpc": "2.0",
         "id": 7,
-        "error": {"code": -32007, "message": "The session was not found. Start a new session."},
+        "error": {"code": -31007, "message": "The session was not found. Start a new session."},
     }
     assert upstream.requests == []
     (line,) = audit_lines(caplog)
@@ -318,7 +318,7 @@ async def test_upstream_404_passes_through_untouched_and_drops_the_binding(
     upstream.requests.clear()
     # Now unknown to the gateway: refused locally.
     again = await http.post("/mcp", json=RPC_BODY, headers=session)
-    assert again.json()["error"]["code"] == -32007
+    assert again.json()["error"]["code"] == -31007
     assert upstream.requests == []
 
 
@@ -426,7 +426,7 @@ async def test_failure_before_the_reply_discards_the_partial_event_and_reports_t
         "jsonrpc": "2.0",
         "id": 7,
         "error": {
-            "code": -32006,
+            "code": -31006,
             "message": "The service stream failed before the response was complete.",
         },
     }
@@ -446,7 +446,7 @@ async def test_clean_end_with_a_cut_event_is_also_a_failure(
     sse_responder(upstream, TrackedStream([PROGRESS, b"data: cut"]))
     response = await http.post("/mcp", json=RPC_BODY, headers=alice)
     assert b"data: cut" not in response.content
-    assert b'"code":-32006' in response.content
+    assert b'"code":-31006' in response.content
 
 
 async def test_events_are_relayed_whole_even_when_the_upstream_splits_them(
@@ -534,7 +534,7 @@ async def test_event_over_the_cap_while_the_reply_is_owed_reports_the_failure(
             response = await client.post("/mcp", json=RPC_BODY, headers=alice)
     assert response.content.startswith(b"event: message\ndata: ")
     assert b"x" * 20 not in response.content
-    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -31006
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "event_too_large")
     assert stream.closed
@@ -578,7 +578,7 @@ async def test_compressed_event_stream_is_a_stream_failure(
     with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
         response = await http.post("/mcp", json=RPC_BODY, headers=alice)
     assert "content-encoding" not in response.headers
-    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -32006
+    assert json.loads(response.content.split(b"data: ", 1)[1])["error"]["code"] == -31006
     assert stream.closed
     (line,) = audit_lines(caplog)
     assert (line["outcome"], line["reason"]) == ("upstream_stream_failed", "encoded_event_stream")

@@ -44,8 +44,8 @@ FORGED_HEADERS = {
     "x-mcp-config-id": "cfg_forged",
     "Cookie": "a=b",
 }
-NO_MAPPING = -32010
-UPSTREAM_UNAUTHORIZED = -32001
+NO_MAPPING = -31010
+UPSTREAM_UNAUTHORIZED = -31001
 
 
 def assert_invalid_token_challenge(response: httpx.Response) -> dict[str, str]:

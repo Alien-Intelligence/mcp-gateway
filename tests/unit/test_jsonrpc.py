@@ -119,12 +119,12 @@ def test_batch_is_not_a_single_request() -> None:
 
 
 def test_error_body_shape() -> None:
-    assert error_body(-32001, "m", 3, {"upstream_status": 401}) == {
+    assert error_body(-31001, "m", 3, {"upstream_status": 401}) == {
         "jsonrpc": "2.0",
         "id": 3,
-        "error": {"code": -32001, "message": "m", "data": {"upstream_status": 401}},
+        "error": {"code": -31001, "message": "m", "data": {"upstream_status": 401}},
     }
-    assert "data" not in error_body(-32001, "m", None)["error"]
+    assert "data" not in error_body(-31001, "m", None)["error"]
 
 
 def _rpc(method: str, **params: object) -> bytes:

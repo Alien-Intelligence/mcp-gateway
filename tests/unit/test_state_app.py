@@ -59,7 +59,7 @@ def assert_state_unavailable(response: httpx.Response) -> None:
     assert response.status_code == 503
     assert response.headers["retry-after"] == "5"
     error = response.json()["error"]
-    assert error["code"] == -32013
+    assert error["code"] == -31013
     assert error["message"] == UNAVAILABLE_MESSAGE
 
 

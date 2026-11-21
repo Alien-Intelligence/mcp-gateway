@@ -266,7 +266,7 @@ async def test_no_mapping_is_403_jsonrpc_without_challenge(
     assert response.json() == {
         "jsonrpc": "2.0",
         "id": 7,
-        "error": {"code": -32010, "message": DENIED_MESSAGE},
+        "error": {"code": -31010, "message": DENIED_MESSAGE},
     }
     assert upstream.requests == []
 
@@ -287,7 +287,7 @@ async def test_ambiguous_mapping_uses_its_own_code(
     async with client_for(app) as http:
         response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == -32011
+    assert response.json()["error"]["code"] == -31011
 
 
 async def test_unknown_denial_reason_still_403_without_challenge(
@@ -297,7 +297,7 @@ async def test_unknown_denial_reason_still_403_without_challenge(
     async with client_for(app) as http:
         response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert response.status_code == 403
-    assert response.json()["error"]["code"] == -32012
+    assert response.json()["error"]["code"] == -31012
     assert "www-authenticate" not in response.headers
 
 
@@ -309,7 +309,7 @@ async def test_resolver_failure_is_a_generic_500(
     async with client_for(app) as http:
         response = await http.post("/mcp", json=RPC_BODY, headers=bearer(token))
     assert response.status_code == 500
-    assert response.json()["error"]["code"] == -32005
+    assert response.json()["error"]["code"] == -31005
     assert "entry 3" not in response.text
     assert "/run/secret" not in response.text
     assert upstream.requests == []
@@ -592,7 +592,7 @@ async def test_client_leaving_during_resolution_cancels_it(
 # --- upstream auth failures -----------------------------------------------------------
 
 
-@pytest.mark.parametrize(("upstream_status", "code"), [(401, -32001), (402, -32002)])
+@pytest.mark.parametrize(("upstream_status", "code"), [(401, -31001), (402, -31002)])
 async def test_upstream_auth_failure_becomes_jsonrpc_error_with_http_200(
     mapping_dir: Path,
     transport: httpx.MockTransport,
@@ -629,7 +629,7 @@ async def test_upstream_auth_failure_without_a_request_id_is_http_502(
     response = await client.post("/mcp", json=notification, headers=bearer(token))
     assert response.status_code == 502
     assert response.json()["id"] is None
-    assert response.json()["error"]["code"] == -32001
+    assert response.json()["error"]["code"] == -31001
     assert "www-authenticate" not in response.headers
 
 
@@ -639,7 +639,7 @@ async def test_upstream_auth_failure_on_get_is_http_502(
     upstream.responder = lambda _r: httpx.Response(402)
     response = await client.get("/mcp", headers=bearer(token))
     assert response.status_code == 502
-    assert response.json()["error"]["code"] == -32002
+    assert response.json()["error"]["code"] == -31002
 
 
 async def test_oversized_upstream_401_body_is_drained_not_relayed(
@@ -659,10 +659,10 @@ async def test_oversized_upstream_401_body_is_drained_not_relayed(
 @pytest.mark.parametrize(
     ("failure", "status", "code"),
     [
-        (httpx.ConnectError("refused"), 502, -32003),
-        (httpx.ConnectTimeout("slow"), 504, -32004),
-        (httpx.ReadTimeout("slow"), 504, -32004),
-        (httpx.PoolTimeout("busy"), 504, -32004),
+        (httpx.ConnectError("refused"), 502, -31003),
+        (httpx.ConnectTimeout("slow"), 504, -31004),
+        (httpx.ReadTimeout("slow"), 504, -31004),
+        (httpx.PoolTimeout("busy"), 504, -31004),
     ],
 )
 async def test_upstream_transport_failures(

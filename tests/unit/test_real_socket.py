@@ -78,7 +78,7 @@ async def test_sse_failure_before_the_reply_gives_the_client_a_jsonrpc_error_eve
         "jsonrpc": "2.0",
         "id": 7,
         "error": {
-            "code": -32006,
+            "code": -31006,
             "message": "The service stream failed before the response was complete.",
         },
     }
@@ -267,7 +267,7 @@ async def test_session_of_alice_is_refused_to_bob_and_still_works_for_alice(stac
             headers=stack.headers("bob", **{"Mcp-Session-Id": session}),
         )
         assert stolen.status_code == 404
-        assert stolen.json()["error"]["code"] == -32007
+        assert stolen.json()["error"]["code"] == -31007
         assert len(await stack.stub_requests()) == seen, "a refused request must not be forwarded"
         again = await stack.client.post(
             f"{stack.gateway}/mcp",
@@ -291,7 +291,7 @@ async def test_delete_ends_the_session_for_good(stack: Stack) -> None:
             f"{stack.gateway}/mcp", json=rpc_call("echo"), headers=headers
         )
     assert reuse.status_code == 404
-    assert reuse.json()["error"]["code"] == -32007
+    assert reuse.json()["error"]["code"] == -31007
     assert len(await stack.stub_requests()) == seen
 
 
@@ -312,7 +312,7 @@ async def test_upstream_expired_session_is_a_404_passed_through_then_dropped(sta
     assert first.status_code == 404
     assert first.json()["error"] == {"code": -32001, "message": "Session not found"}
     assert second.status_code == 404
-    assert second.json()["error"]["code"] == -32007
+    assert second.json()["error"]["code"] == -31007
     assert len(await stack.stub_requests()) == seen
 
 
@@ -369,8 +369,8 @@ async def test_revoked_and_unpaid_keys_become_jsonrpc_errors_never_a_challenge(
         unpaid = await stack.client.post(
             f"{stack.gateway}/mcp", json=rpc_call("echo"), headers=stack.headers("broke")
         )
-    assert (revoked.status_code, revoked.json()["error"]["code"]) == (200, -32001)
-    assert (unpaid.status_code, unpaid.json()["error"]["code"]) == (200, -32002)
+    assert (revoked.status_code, revoked.json()["error"]["code"]) == (200, -31001)
+    assert (unpaid.status_code, unpaid.json()["error"]["code"]) == (200, -31002)
     assert "www-authenticate" not in revoked.headers
 
 
@@ -396,4 +396,4 @@ async def test_sse_failure_with_an_upstream_content_length_still_gives_the_error
             assert "content-encoding" not in response.headers
             body, error = await read_body(response)
     assert error is None, "the stream must end cleanly after the error event"
-    assert json_of(events_of(body)[-1])["error"]["code"] == -32006
+    assert json_of(events_of(body)[-1])["error"]["code"] == -31006
