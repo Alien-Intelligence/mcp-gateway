@@ -195,6 +195,14 @@
         },
         "annotations": {
           "type": "object"
+        },
+        "nodePort": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 30000,
+          "maximum": 32767
         }
       },
       "additionalProperties": false,

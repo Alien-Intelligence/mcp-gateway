@@ -90,7 +90,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | `env` | `[]` | Plain environment variables. |
 | `containerPort` | `8000` | Must equal `config.listen.port`. |
 | `publicPath` | `/mcp` | Must equal the path of `config.public_url`. |
-| `service.type`, `.port`, `.annotations` | `ClusterIP`, `80`, `{}` | The Service. |
+| `service.type`, `.port`, `.nodePort`, `.annotations` | `ClusterIP`, `80`, unset, `{}` | The Service (`nodePort` for `NodePort` and `LoadBalancer`). |
 | `serviceAccount.create`, `.name`, `.annotations`, `.automountServiceAccountToken` | `true`, `""`, `{}`, `false` | The gateway never calls the Kubernetes API. |
 | `terminationGracePeriodSeconds` | `null` | Computed when null (see Shutdown). |
 | `preStopSleepSeconds` | `5` | Pause before the process gets SIGTERM. |

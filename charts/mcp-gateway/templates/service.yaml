@@ -14,6 +14,9 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+      {{- if and .Values.service.nodePort (ne .Values.service.type "ClusterIP") }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
       protocol: TCP
   selector:
     {{- include "mcp-gateway.selectorLabels" . | nindent 4 }}
