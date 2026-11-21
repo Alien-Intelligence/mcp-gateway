@@ -52,6 +52,7 @@ variables:
   - tests/**/*
   - scripts/**/*
   - dev/**/*
+  - deploy/**/*
   - compose*.yaml
   - Dockerfile*
   - pyproject.toml
