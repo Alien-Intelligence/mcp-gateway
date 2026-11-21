@@ -3,12 +3,13 @@
 import base64
 import binascii
 import codecs
-import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from email.message import Message
 from enum import Enum
 from typing import Any
+
+from mcp_gateway import boundedjson
 
 # Gateway-originated JSON-RPC error codes. They sit outside -32768..-32000 (the JSON-RPC reserved
 # range, which MCP partitions between implementation-defined and spec-defined codes) so they collide
@@ -101,9 +102,9 @@ def _decode(body: bytes) -> Any:
     gateway reads differently from the upstream is exactly what must never pass a check.
     """
     try:
-        return json.loads(body.decode("utf-8"))
-    except (ValueError, RecursionError):
-        # Not UTF-8, not JSON, or nested past the interpreter's limit.
+        return boundedjson.loads(body.decode("utf-8"))
+    except ValueError:
+        # Not UTF-8, not JSON, or nested past ``boundedjson.MAX_DEPTH``.
         return _UNREADABLE
 
 

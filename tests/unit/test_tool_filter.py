@@ -204,6 +204,15 @@ def test_deeply_nested_data_raises_instead_of_recursing() -> None:
         sse_filter().apply(raw)
 
 
+def test_data_nested_past_the_gateway_limit_is_refused_even_where_the_interpreter_could_read_it() -> (
+    None
+):
+    deep = b"[" * 500 + b"]" * 500
+    raw = b'data: {"id":3,"result":{"tools":[{"name":"x","s":' + deep + b"}]}}\n\n"
+    with pytest.raises(ToolPolicyError, match="unparsable"):
+        sse_filter().apply(raw)
+
+
 def test_the_failure_event_without_a_request_id_answers_null() -> None:
     assert data_json(policy_failed_event(None))["id"] is None
 

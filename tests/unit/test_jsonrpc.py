@@ -208,10 +208,16 @@ def test_a_client_response_is_not_a_request_that_expects_a_reply(body: bytes) ->
 
 
 DEEP = b"[" * 10_000 + b"]" * 10_000
+# Readable by CPython 3.14 and refused by 3.12: only the gateway's own limit gives one answer.
+MID_DEEP = b"[" * 500 + b"]" * 500
 
 
 def test_a_deeply_nested_body_is_unreadable_not_a_crash() -> None:
     assert parse_request(DEEP) == UNPARSABLE
+
+
+def test_a_body_nested_past_the_gateway_limit_is_unreadable_on_every_python() -> None:
+    assert parse_request(MID_DEEP) == UNPARSABLE
 
 
 @pytest.mark.parametrize(
