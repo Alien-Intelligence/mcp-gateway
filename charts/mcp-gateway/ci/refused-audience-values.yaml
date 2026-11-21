@@ -1,0 +1,65 @@
+# Renders, but the gateway refuses it: public_url is not among auth.audiences. Proves the config check refuses.
+replicaCount: 1
+config:
+  version: 1
+  public_url: https://mcp.example.com/mcp
+  listen:
+    host: 0.0.0.0
+    port: 8000
+  auth:
+    issuer: https://idp.example.com/realms/main
+    jwks_uri: https://idp.example.com/realms/main/protocol/openid-connect/certs
+    audiences:
+    - https://other.example.com/mcp
+    algorithms:
+    - RS256
+    required_scopes: []
+    scopes_advertised:
+    - openid
+    clock_skew_seconds: 5
+    jwks_cache_ttl_seconds: 300
+    jwks_max_stale_seconds: 3600
+    jwks_fetch_timeout_seconds: 5
+    identity:
+      subject: sub
+      email: email
+      email_verified: email_verified
+      organization: org
+      groups: groups
+  resolver:
+    type: static
+    mapping_file: /run/gateway/secrets/mapping.json
+  resolver_cache: null
+  upstreams:
+    main:
+      url: https://upstream.example.com/mcp
+      connect_timeout_seconds: 10
+      read_timeout_seconds: 130
+      write_timeout_seconds: 30
+      pool_timeout_seconds: 10
+      max_connections: 200
+      max_detached_reads: 50
+  limits:
+    max_request_body_bytes: 1048576
+    request_body_timeout_seconds: 30
+    max_sse_event_bytes: 1048576
+    max_filtered_response_bytes: 4194304
+  audit:
+    enabled: true
+  observability:
+    otlp: null
+  sessions:
+    max_entries: 10000
+    max_entries_per_subject: 50
+    idle_ttl_seconds: 600
+  state:
+    type: memory
+  policies:
+    allowed_origins:
+    - https://claude.ai
+    tools: null
+    rate_limits: null
+secretMounts:
+- name: secrets
+  secretName: mcp-gateway-secrets
+  mountPath: /run/gateway/secrets

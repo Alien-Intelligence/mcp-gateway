@@ -56,7 +56,21 @@
     },
     "config": {
       "type": "object",
-      "description": "The MCP_GATEWAY_CONFIG document (docs/configuration.md)."
+      "description": "The MCP_GATEWAY_CONFIG document (docs/configuration.md). When set it must declare \"version\": 1.",
+      "if": {
+        "minProperties": 1
+      },
+      "then": {
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "const": 1,
+            "description": "The configuration schema version; 1 is the only one supported."
+          }
+        }
+      }
     },
     "existingSecret": {
       "type": "object",

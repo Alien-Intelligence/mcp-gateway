@@ -28,6 +28,7 @@ def upstream(url: str) -> dict[str, object]:
 
 def values(image_tag: str, upstream_url: str) -> dict[str, object]:
     config = {
+        "version": 1,
         "public_url": PUBLIC_URL,
         "listen": {"host": "0.0.0.0", "port": 8000},
         "auth": {

@@ -14,10 +14,11 @@ A minimal two-replica `my-values.yaml` (the configuration keys are all required,
 
 ```yaml
 image:
-  repository: registry.example.com/mcp-gateway
+  repository: registry.example.com/mcp-gateway   # your mirror; the default is the release pipeline's registry
   tag: "0.5.0"
 replicaCount: 2
 config:            # the MCP_GATEWAY_CONFIG document, as YAML
+  version: 1       # required: the configuration schema version (the only one supported)
   public_url: https://mcp.example.com/mcp
   listen: {host: 0.0.0.0, port: 8000}
   # ... auth, resolver, upstreams, limits, audit, observability, sessions, policies ...
@@ -80,7 +81,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | Key | Default | Meaning |
 |---|---|---|
 | `replicaCount` | `1` | Replicas (ignored while `autoscaling.enabled`). Above 1 needs Redis state. |
-| `image.repository`, `image.tag`, `image.pullPolicy` | `mcp-gateway`, chart `appVersion`, `IfNotPresent` | The image. Set the repository to your registry. |
+| `image.repository`, `image.tag`, `image.pullPolicy` | `rg.fr-par.scw.cloud/ns-data-streaming/mcp-gateway`, chart `appVersion`, `IfNotPresent` | The image. The repository is where the release pipeline publishes it; the public pull location will be announced, until then mirror it and set the repository to your registry. |
 | `imagePullSecrets` | `[]` | Pull secrets. |
 | `nameOverride`, `fullnameOverride` | `""` | Naming. |
 | `config` | `{}` | The `MCP_GATEWAY_CONFIG` document as an object. |
@@ -106,7 +107,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | `ingress.*` | off | `enabled`, `className`, `annotations`, `hosts[].host`, `tls`. |
 | `httpRoute.*` | off | `enabled`, `annotations`, `parentRefs`, `hostnames`, `timeouts`. |
 
-`values.schema.json` rejects unknown keys and wrong types; `config` is checked by the gateway itself at start (`startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` in the pod log).
+`values.schema.json` rejects unknown keys and wrong types, and a non-empty `config` without `version: 1`; the rest of `config` is checked by the gateway itself at start (`startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` in the pod log).
 
 ## Try it on kind
 
