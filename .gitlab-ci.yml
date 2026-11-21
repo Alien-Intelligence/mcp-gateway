@@ -11,6 +11,7 @@ include:
       - '/templates/jobs/release.gitlab-ci.yml'
       - '/templates/jobs/python-test.gitlab-ci.yml'
       - '/templates/jobs/python-lint.gitlab-ci.yml'
+  - local: ci/chart.gitlab-ci.yml
 
 # One pipeline per change: a branch push is skipped while the branch has an open merge request
 # (its merge request pipeline runs instead).
