@@ -265,6 +265,8 @@ class _Release:
         self._released = False
         # Set by the relay when the upstream body was relayed to its end.
         self.completed = False
+        # Set when the stream was ended because the gateway is stopping.
+        self.ended_by_shutdown = False
 
     async def _touch_session(self, session_id: str) -> None:
         try:
@@ -288,7 +290,11 @@ class _Release:
 
     def record_outcome(self, *, delivered: bool) -> None:
         """Audit the request: forwarded when the client got all of it, else the client left."""
-        if self.completed and delivered:
+        if self.ended_by_shutdown and delivered:
+            # The client's stream was closed cleanly by the gateway: not a departure of the client.
+            self._audit.reason = "shutdown"
+            self._audit.emit(status=self._response.status_code, outcome="forwarded")
+        elif self.completed and delivered:
             self._audit.emit(status=self._response.status_code, outcome="forwarded")
         else:
             # A failure was audited already (emit is first-wins); this is the client leaving.
@@ -323,6 +329,11 @@ class _Outlet:
     @property
     def open(self) -> bool:
         return not self._broken and not self._handle.detached
+
+    @property
+    def drained(self) -> bool:
+        """True when the read is being ended because the gateway is stopping."""
+        return self._handle.drained
 
     def close(self) -> None:
         """End the client's stream: it delivers what was put in it, then finishes."""
@@ -448,7 +459,11 @@ class UpstreamProxy:
         self._max_detached = config.max_detached_reads
 
     def _own[T](
-        self, detachable: bool, body: Callable[[ReadHandle[T]], Awaitable[T]]
+        self,
+        detachable: bool,
+        body: Callable[[ReadHandle[T]], Awaitable[T]],
+        *,
+        listen: bool = False,
     ) -> ReadHandle[T]:
         """Run ``body`` as a read owned by the application (see ``DetachedReads``)."""
         return self._reads.start(
@@ -457,6 +472,7 @@ class UpstreamProxy:
             detachable=detachable,
             detach_limit=self._max_detached,
             body=body,
+            listen=listen,
         )
 
     async def _send_or_discard(
@@ -901,6 +917,8 @@ class UpstreamProxy:
                 lambda handle: self._read_upstream(
                     response, _Outlet(handle, sink), reply_id, audit, reply_filter, release
                 ),
+                # Nothing to complete on a stream that is not the answer to a request.
+                listen=not detachable,
             )
 
         return RelayResponse(
@@ -941,6 +959,9 @@ class UpstreamProxy:
         """Read the whole upstream response, handing it to the client while the client is there."""
         try:
             await self._relay(response, out, reply_id, audit, reply_filter, release)
+        except asyncio.CancelledError:
+            release.ended_by_shutdown = out.drained
+            raise
         except (httpx.HTTPError, SseError):
             # An upstream failure: audited and reported to the client by ``_relay`` while it is
             # there; once it left, the failure is the read's result.

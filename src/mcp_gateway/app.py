@@ -71,6 +71,7 @@ from mcp_gateway.resolver import (
     build_resolver,
     with_cache,
 )
+from mcp_gateway.shutdown import DETACHED_READS_SHUTDOWN_SECONDS
 from mcp_gateway.state import (
     MemorySessionStore,
     SessionStore,
@@ -103,9 +104,6 @@ def _quoted(value: str) -> str:
     """Make ``value`` safe inside a quoted WWW-Authenticate parameter (no quote, backslash, controls)."""
     return _QUOTED_UNSAFE.sub(" ", value)
 
-
-# How long the lifespan waits for upstream reads it cancelled to close their responses.
-DETACHED_READS_SHUTDOWN_SECONDS = 10.0
 
 RESOLVER_UNAVAILABLE_MESSAGE = "Credentials are temporarily unavailable. Retry shortly."
 RESOLVER_RETRY_AFTER_SECONDS = 5
@@ -655,4 +653,6 @@ def create_app(
     )
     # Exposed for tests: the reads still running (and the set must be empty once they ended).
     app.state.upstream_reads = reads
+    # What the server calls first when it is told to stop (``mcp_gateway.main``).
+    app.state.begin_drain = reads.begin_drain
     return app

@@ -74,7 +74,7 @@ LABEL_ATTRIBUTE_PREFIX = "mcp_gateway.label."
 _DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120]
 _MAX_TEXT = 256
 # Slack on top of the export timeout for the shutdown of one provider.
-_SHUTDOWN_SLACK_SECONDS = 2.0
+SHUTDOWN_SLACK_SECONDS = 2.0
 
 # Outcomes that are failures of the gateway or of the service behind it, whatever the status.
 _ERROR_OUTCOMES = frozenset({"upstream_stream_failed", "tool_policy_failed", "internal_error"})
@@ -593,7 +593,7 @@ def build_telemetry(
         otlp_span, otlp_metric = _exporters(otlp, failures)
     interval_ms = int(otlp.export_interval_seconds * 1000) if otlp else None
     timeout_ms = int(otlp.timeout_seconds * 1000) if otlp else None
-    shutdown_seconds = (otlp.timeout_seconds if otlp else 1.0) + _SHUTDOWN_SLACK_SECONDS
+    shutdown_seconds = (otlp.timeout_seconds if otlp else 1.0) + SHUTDOWN_SLACK_SECONDS
 
     closers: list[Callable[[], Awaitable[None]]] = []
     tracer: Tracer = trace.NoOpTracer()

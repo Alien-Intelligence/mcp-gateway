@@ -45,7 +45,12 @@ class Rig:
         return point.value
 
     async def start(
-        self, body: Any, *, detachable: bool = True, ceiling: float = CEILING
+        self,
+        body: Any,
+        *,
+        detachable: bool = True,
+        ceiling: float = CEILING,
+        listen: bool = False,
     ) -> ReadHandle[Any]:
         """Start a read and wait until its body is running."""
         running = asyncio.Event()
@@ -63,6 +68,7 @@ class Rig:
             detachable=detachable,
             detach_limit=100,
             body=run,
+            listen=listen,
         )
         await running.wait()
         return handle
@@ -249,3 +255,48 @@ async def test_nothing_starts_after_closing(rig: Rig) -> None:
 
     with pytest.raises(RuntimeError, match="closed"):
         await rig.start(body)
+
+
+async def test_draining_ends_a_listen_stream_and_leaves_an_exchange_to_finish(rig: Rig) -> None:
+    release = asyncio.Event()
+
+    async def listening(handle: ReadHandle[Any]) -> None:
+        await asyncio.Event().wait()
+
+    async def exchange(handle: ReadHandle[Any]) -> str:
+        await release.wait()
+        return "reply"
+
+    stream = await rig.start(listening, detachable=False, listen=True)
+    call = await rig.start(exchange)
+
+    rig.reads.begin_drain()
+    with anyio.fail_after(2):
+        await asyncio.wait({stream.task})
+    assert stream.task.cancelled() and stream.drained
+    assert not call.task.done() and not call.drained
+
+    release.set()
+    assert await call.task == "reply"
+    assert rig.counted() == {}, "a stream ended by the drain is not a detached read"
+
+
+async def test_a_listen_stream_that_starts_during_the_drain_is_ended_and_cleans_up(
+    rig: Rig,
+) -> None:
+    rig.reads.begin_drain()
+    cleaned = asyncio.Event()
+
+    async def listening(handle: ReadHandle[Any]) -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.set()
+
+    stream = await rig.start(listening, detachable=False, listen=True)
+
+    with anyio.fail_after(2):
+        await cleaned.wait()
+        await asyncio.wait({stream.task})
+    assert stream.drained
+    assert rig.closed, "the body's cleanup must run even for a read ended at its start"

@@ -6,6 +6,9 @@ leaves, a read of a request that was already sent upstream is *detached*: it kee
 discards what it reads, so the upstream finishes its work and the connection goes back to the
 pool. Every other read (a listen stream, a ``DELETE``, a notification) is cancelled instead.
 
+A listen stream also ends when the process begins to stop (``begin_drain``): it has no exchange to
+complete, only a client that reconnects, so holding it open would only delay the stop.
+
 The reads are owned here, never by the request that started them: tracked in a set (no task is
 ever left to the garbage collector), bounded in time once detached, and cancelled and awaited by
 the lifespan at shutdown.
@@ -47,14 +50,18 @@ class ReadHandle[T]:
         upstream: str,
         ceiling_seconds: float,
         detachable: bool,
+        listen: bool,
         admit: Callable[[], bool],
     ) -> None:
         self.upstream = upstream
         self._admit = admit
         self.shed = False
+        # Set when the process is stopping and this listen stream was ended for that reason.
+        self.drained = False
         self.started = time.monotonic()
         self._ceiling_seconds = ceiling_seconds
         self._detachable = detachable
+        self.listen = listen
         self._detached = False
         self._scope: anyio.CancelScope | None = None
         self._task: asyncio.Task[T] | None = None
@@ -125,6 +132,7 @@ class DetachedReads:
         self._telemetry = telemetry
         self._handles: set[ReadHandle[Any]] = set()
         self._closed = False
+        self._draining = False
 
     def __len__(self) -> int:
         return len(self._handles)
@@ -145,6 +153,7 @@ class DetachedReads:
         detachable: bool,
         detach_limit: int,
         body: Callable[[ReadHandle[T]], Awaitable[T]],
+        listen: bool = False,
     ) -> ReadHandle[T]:
         """Run ``body`` as an owned task.
 
@@ -152,6 +161,8 @@ class DetachedReads:
         the client left (httpx's per-read timeouts still apply on top of it). At most
         ``detach_limit`` reads of one upstream run on after their client left; a read beyond that
         is cancelled instead (``shed``). ``body`` closes the upstream response itself, in every case.
+        A ``listen`` read (the relay of a listen stream) is ended by ``begin_drain``, also when it
+        starts after the drain began.
         """
         if self._closed:
             raise ReadsClosedError("the upstream reads are closed")
@@ -159,13 +170,33 @@ class DetachedReads:
             upstream=upstream,
             ceiling_seconds=ceiling_seconds,
             detachable=detachable,
+            listen=listen,
             admit=lambda: self._detached_count(upstream) < detach_limit,
         )
         task = asyncio.create_task(self._run(handle, body))
         handle.attach_task(task)
         self._handles.add(handle)
         task.add_done_callback(lambda _task: self._reap(handle))
+        if listen and self._draining:
+            # The task runs its first step (which reaches the body's first await, so its cleanup
+            # is armed) before this callback: a task cancelled before it started would never run
+            # the body's ``finally`` and would leak the upstream response.
+            handle.drained = True
+            asyncio.get_running_loop().call_soon(task.cancel)
         return handle
+
+    def begin_drain(self) -> None:
+        """The process is stopping: end every listen stream, cleanly, now.
+
+        The relay ends its client's stream as a finished one (the body is closed, not aborted):
+        the client's reconnection is the protocol's answer to a server that closes a stream.
+        Exchanges that have a reply to deliver are left to finish.
+        """
+        self._draining = True
+        for handle in self._handles:
+            if handle.listen and not handle.task.done():
+                handle.drained = True
+                handle.task.cancel()
 
     def _reap(self, handle: ReadHandle[Any]) -> None:
         self._handles.discard(handle)
