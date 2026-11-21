@@ -1,0 +1,80 @@
+# Gateway API HTTPRoute.
+replicaCount: 2
+config:
+  public_url: https://mcp.example.com/mcp
+  listen:
+    host: 0.0.0.0
+    port: 8000
+  auth:
+    issuer: https://idp.example.com/realms/main
+    jwks_uri: https://idp.example.com/realms/main/protocol/openid-connect/certs
+    audiences:
+    - https://mcp.example.com/mcp
+    algorithms:
+    - RS256
+    required_scopes: []
+    scopes_advertised:
+    - openid
+    clock_skew_seconds: 5
+    jwks_cache_ttl_seconds: 300
+    jwks_max_stale_seconds: 3600
+    jwks_fetch_timeout_seconds: 5
+    identity:
+      subject: sub
+      email: email
+      email_verified: email_verified
+      organization: org
+      groups: groups
+  resolver:
+    type: static
+    mapping_file: /run/gateway/secrets/mapping.json
+  resolver_cache:
+    positive_ttl_seconds: 60
+    negative_ttl_seconds: 1
+    max_entries: null
+  upstreams:
+    main:
+      url: https://upstream.example.com/mcp
+      connect_timeout_seconds: 10
+      read_timeout_seconds: 130
+      write_timeout_seconds: 30
+      pool_timeout_seconds: 10
+      max_connections: 200
+      max_detached_reads: 50
+  limits:
+    max_request_body_bytes: 1048576
+    request_body_timeout_seconds: 30
+    max_sse_event_bytes: 1048576
+    max_filtered_response_bytes: 4194304
+  audit:
+    enabled: true
+  observability:
+    otlp: null
+  sessions:
+    max_entries: null
+    max_entries_per_subject: 50
+    idle_ttl_seconds: 600
+  state:
+    type: redis
+    url_file: /run/gateway/secrets/state-redis-url
+    key_prefix: 'mcp-gateway:state:'
+    connect_timeout_seconds: 2
+    operation_timeout_seconds: 2
+    max_connections: 32
+    encryption_key_file: /run/gateway/secrets/state-encryption-key
+  policies:
+    allowed_origins:
+    - https://claude.ai
+    tools: null
+    rate_limits: null
+secretMounts:
+- name: secrets
+  secretName: mcp-gateway-secrets
+  mountPath: /run/gateway/secrets
+httpRoute:
+  enabled: true
+  parentRefs:
+  - name: example-gateway
+    namespace: gateway-system
+  hostnames:
+  - mcp.example.com

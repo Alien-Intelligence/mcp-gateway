@@ -251,6 +251,8 @@ E2E_UPSTREAM_URL=<dev MCP URL> E2E_EXISTING_JOB_ID=<an existing dev job id the p
 E2E_RUN_DIR=<evidence dir> uv run pytest tests/e2e -m e2e -v
 ```
 
+Against another deployment of the same gateway (a Helm install on a cluster, say), set `E2E_GATEWAY_URL_<NAME>` and `E2E_ISSUER_<NAME>` for the providers the selected tests use (`KEYCLOAK`, `HYDRA`, `CHAIN`, `REPLICAS`). They replace the dev stack's `http://localhost:1800x/mcp` and issuer; each string must be exactly the deployment's `public_url` and issuer (the harness compares them with the protected-resource metadata and the token), the gateway must be configured like the dev-stack service of that name, and the identity provider must put the gateway URL in the token's audience. The state, sponsor key and upstream variables stay as above; `test_revoked_alien_key_gives_a_jsonrpc_error_not_a_challenge` swaps a key file in `E2E_STATE_DIR` and so only works where the gateway reads that directory.
+
 It needs the dev target up (`docker compose up -d --build --wait` with `.env`), the fixture applied and network access to the Alien dev platform. A run takes about fifteen minutes, mostly waiting for tokens to expire and for metering to appear in the feeds.
 
 ## CI

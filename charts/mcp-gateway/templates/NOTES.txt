@@ -1,0 +1,27 @@
+mcp-gateway {{ .Chart.AppVersion }} installed as {{ include "mcp-gateway.fullname" . }}: {{ if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }} to {{ .Values.autoscaling.maxReplicas }} replicas (autoscaling){{ else }}{{ .Values.replicaCount }} replica(s){{ end }}.
+
+Wait for the rollout, then check readiness (/readyz pings the shared state):
+
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ include "mcp-gateway.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ include "mcp-gateway.fullname" . }} 8000:{{ .Values.service.port }}
+  curl -s localhost:8000/readyz
+
+MCP is served on {{ .Values.publicPath }} and the protected-resource metadata on /.well-known/oauth-protected-resource{{ .Values.publicPath }}.
+Both must be reachable from clients under config.public_url{{ if .Values.config }} ({{ get .Values.config "public_url" }}){{ end }}.
+{{- if and .Values.existingSecret.name }}
+
+The configuration comes from the Secret {{ .Values.existingSecret.name }}, which the chart cannot watch: after changing it, run
+  kubectl -n {{ .Release.Namespace }} rollout restart deployment/{{ include "mcp-gateway.fullname" . }}
+{{- end }}
+{{- if not .Values.existingSecret.name }}
+{{- $maxRead := float64 (include "mcp-gateway.maxReadTimeoutSeconds" .) }}
+{{- $grace := float64 (include "mcp-gateway.terminationGracePeriodSeconds" .) }}
+{{- if lt $grace (addf $maxRead (float64 (include "mcp-gateway.shutdownBudgetSeconds" .))) }}
+
+WARNING: terminationGracePeriodSeconds ({{ $grace }}) is below the largest upstream read timeout ({{ $maxRead }}) plus the shutdown budget ({{ include "mcp-gateway.shutdownBudgetSeconds" . }}): a request still running on after its client left can be killed by a rollout.
+{{- end }}
+{{- end }}
+{{- if and (not .Values.ingress.enabled) (not .Values.httpRoute.enabled) }}
+
+No Ingress or HTTPRoute is enabled: expose the Service yourself. Whatever sits in front must not buffer responses (SSE) and must allow long-lived requests.
+{{- end }}

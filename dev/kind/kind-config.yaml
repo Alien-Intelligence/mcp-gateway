@@ -1,0 +1,12 @@
+# A kind cluster for the chart install: the identity provider and the gateway are published on the
+# host's loopback so that the e2e harness, which runs on the host, reaches them by the same
+# `http://localhost:<port>` strings the pods use as issuer and audience.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      # Keycloak (NodePort 30080 of infra.yaml)
+      - {containerPort: 30080, hostPort: 38080, listenAddress: 127.0.0.1, protocol: TCP}
+      # The gateway (service.nodePort 30000)
+      - {containerPort: 30000, hostPort: 38000, listenAddress: 127.0.0.1, protocol: TCP}

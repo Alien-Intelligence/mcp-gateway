@@ -179,36 +179,57 @@ class Provider:
     wrong_audience: dict[str, str]
 
 
+def provider_at(
+    name: str, gateway_url: str, issuer: str, wrong_audience: dict[str, str]
+) -> Provider:
+    """A provider at its dev-stack address, unless the environment points it elsewhere.
+
+    ``E2E_GATEWAY_URL_<NAME>`` and ``E2E_ISSUER_<NAME>`` (name upper-cased: KEYCLOAK, HYDRA,
+    CHAIN, REPLICAS) replace the gateway's public URL and the issuer, so the suite runs against
+    any deployment of the same gateway (a Helm install, a staging cluster): the gateway must be
+    configured like the dev-stack service of that name and its identity provider must put the
+    gateway URL in the token's audience. Both strings must be exactly those of the deployment:
+    the harness compares them with the protected-resource metadata and the token.
+    """
+    key = name.upper()
+    return Provider(
+        name=name,
+        gateway_url=os.environ.get(f"E2E_GATEWAY_URL_{key}", gateway_url),
+        issuer=os.environ.get(f"E2E_ISSUER_{key}", issuer),
+        wrong_audience=wrong_audience,
+    )
+
+
 PROVIDERS = (
-    Provider(
-        name="keycloak",
-        gateway_url="http://localhost:18000/mcp",
-        issuer="http://localhost:18080/realms/alien-gateway-dev",
-        wrong_audience={"scope": "openid"},
+    provider_at(
+        "keycloak",
+        "http://localhost:18000/mcp",
+        "http://localhost:18080/realms/alien-gateway-dev",
+        {"scope": "openid"},
     ),
-    Provider(
-        name="hydra",
-        gateway_url="http://localhost:18001/mcp",
-        issuer="http://localhost:14444",
-        wrong_audience={"resource": "http://localhost:18999/mcp"},
+    provider_at(
+        "hydra",
+        "http://localhost:18001/mcp",
+        "http://localhost:14444",
+        {"resource": "http://localhost:18999/mcp"},
     ),
 )
 
 
 # Keycloak, resolver chain [store_redis, store_sql, webhook] behind a cache, scope mcp-write
 # required. Not in PROVIDERS: the per-provider tests run on the two static gateways.
-CHAIN = Provider(
-    name="chain",
-    gateway_url="http://localhost:18002/mcp",
-    issuer="http://localhost:18080/realms/alien-gateway-dev",
-    wrong_audience={"scope": "openid"},
+CHAIN = provider_at(
+    "chain",
+    "http://localhost:18002/mcp",
+    "http://localhost:18080/realms/alien-gateway-dev",
+    {"scope": "openid"},
 )
 # The replica pair behind nginx (Keycloak, store_redis resolver, state in Redis).
-REPLICAS = Provider(
-    name="replicas",
-    gateway_url="http://localhost:18004/mcp",
-    issuer="http://localhost:18080/realms/alien-gateway-dev",
-    wrong_audience={"scope": "openid"},
+REPLICAS = provider_at(
+    "replicas",
+    "http://localhost:18004/mcp",
+    "http://localhost:18080/realms/alien-gateway-dev",
+    {"scope": "openid"},
 )
 # Which store of the chain resolves each persona (see scripts/state_layout.py).
 CHAIN_STORE = {"alice": "redis", "bob": "postgres", "carol": "webhook"}

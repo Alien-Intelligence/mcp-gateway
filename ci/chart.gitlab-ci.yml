@@ -1,0 +1,32 @@
+# The Helm chart (charts/mcp-gateway): lint, render with several values files and validate the
+# manifests with kubeconform; the values files that must not render are asserted to fail.
+# The steps live in scripts/chart_check.sh, which runs the same way on a laptop.
+# Included from .gitlab-ci.yml. The real install on a cluster is not a CI job (README of the chart).
+
+.chart-changes: &chart-changes
+  - charts/**/*
+  - scripts/chart_check.sh
+  - ci/chart.gitlab-ci.yml
+
+chart-validate:
+  stage: test
+  image:
+    name: alpine/helm:3.14.0
+    entrypoint: [""]
+  variables:
+    KUBECONFORM_VERSION: "0.7.0"
+    KUBECONFORM_SHA256: "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3"
+    KUBERNETES_VERSION: "1.31.0"
+  before_script:
+    - apk add --no-cache curl
+    - curl --fail --silent --show-error --location --max-time 120 -o kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+    - echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+    - tar -xzf kubeconform.tgz -C /usr/local/bin kubeconform
+    - rm kubeconform.tgz
+  script:
+    - sh scripts/chart_check.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *chart-changes
+    - if: '$CI_COMMIT_BRANCH'
+      changes: *chart-changes

@@ -1,0 +1,8 @@
+apiVersion: v2
+name: mcp-gateway
+description: OAuth resource server and streaming reverse proxy for MCP that swaps the client's OAuth token for a per-user API key.
+type: application
+version: 0.1.0
+appVersion: "0.5.0"
+kubeVersion: ">=1.27.0-0"
+keywords: [mcp, oauth, gateway, proxy]
