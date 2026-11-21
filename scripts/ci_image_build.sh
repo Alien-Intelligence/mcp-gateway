@@ -66,6 +66,7 @@ fi
 export BUILDX_BUILDER
 
 output="type=image,name=$image:$tag,push=true"
+metadata_file="${TMPDIR:-/tmp}/buildx-metadata.$$.json"
 if [ "${REGISTRY_INSECURE:-false}" = "true" ]; then
     output="$output,registry.insecure=true"
 fi
@@ -81,11 +82,15 @@ docker buildx build \
     --sbom=true \
     --provenance=mode=max \
     --output "$output" \
+    --metadata-file "$metadata_file" \
     .
 
 docker buildx imagetools create --tag "$image:$moving_tag" "$image:$tag"
 
-digest=$(docker buildx imagetools inspect "$image:$tag" --format '{{.Manifest.Digest}}')
+# The digest of what was pushed (the multi-arch index), as the build itself recorded it. Not
+# `imagetools inspect --format '{{.Manifest.Digest}}'`: buildx v0.27.0 (docker:28.3.3-cli, the CI image)
+# prints its human listing for this index (two platforms plus attestations) instead.
+digest=$(sed -n 's/.*"containerimage\.digest": *"\(sha256:[0-9a-f]\{64\}\)".*/\1/p' "$metadata_file" | head -n 1)
 case "$digest" in
     sha256:*) ;;
     *)
