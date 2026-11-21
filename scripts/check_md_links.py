@@ -10,7 +10,6 @@ Exits non-zero and prints ``file:line: target: reason`` for each broken link.
 """
 
 import re
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -93,15 +92,28 @@ def check_file(path: Path, root: Path) -> list[Broken]:
     return broken
 
 
+# Directories that hold no documentation of ours: tool caches, environments, VCS data. Walking the tree
+# instead of asking git keeps the check runnable where git is absent (the CI test image has none).
+SKIPPED_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".mypy_cache",
+    }
+)
+
+
 def markdown_files(root: Path) -> list[Path]:
-    listed = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "-z", "--", "*.md"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    ).stdout
-    return [root / name for name in listed.split("\0") if name]
+    return sorted(
+        path
+        for path in root.rglob("*.md")
+        if not SKIPPED_DIRS.intersection(path.relative_to(root).parts[:-1])
+    )
 
 
 def main(argv: list[str]) -> int:
