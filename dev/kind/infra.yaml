@@ -1,0 +1,101 @@
+# What the gateway chart needs around it on a throwaway cluster: a Redis for the shared state and
+# Keycloak with the dev realm imported. Secrets are created by install.sh, never written here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: redis}
+  template:
+    metadata:
+      labels: {app: redis}
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          # Disposable: no persistence.
+          command: ["sh", "-c", "exec redis-server --requirepass \"$REDIS_PASSWORD\" --save '' --appendonly no"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: {secretKeyRef: {name: redis, key: password}}
+          ports:
+            - {name: redis, containerPort: 6379}
+          readinessProbe:
+            tcpSocket: {port: redis}
+            periodSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: gateway
+spec:
+  selector: {app: redis}
+  ports:
+    - {name: redis, port: 6379, targetPort: redis}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: keycloak}
+  template:
+    metadata:
+      labels: {app: keycloak}
+    spec:
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.8.2
+          args: ["start-dev", "--import-realm"]
+          env:
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              valueFrom: {secretKeyRef: {name: keycloak-env, key: KC_BOOTSTRAP_ADMIN_USERNAME}}
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: {secretKeyRef: {name: keycloak-env, key: KC_BOOTSTRAP_ADMIN_PASSWORD}}
+            # Substituted into the realm import (${E2E_USER_PASSWORD} placeholder).
+            - name: E2E_USER_PASSWORD
+              valueFrom: {secretKeyRef: {name: keycloak-env, key: E2E_USER_PASSWORD}}
+            # The issuer: the host's loopback port published by kind-config.yaml. Tokens carry
+            # it as `iss`; the gateway's auth.issuer is the same string and its jwks_uri is the
+            # in-cluster Service, so a pod never needs to resolve this name.
+            - {name: KC_HOSTNAME, value: "http://localhost:38080"}
+            - {name: KC_HTTP_ENABLED, value: "true"}
+            - {name: KC_HEALTH_ENABLED, value: "true"}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: management, containerPort: 9000}
+          readinessProbe:
+            httpGet: {path: /health/ready, port: management}
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 200m, memory: 768Mi}
+            limits: {memory: 1536Mi}
+          volumeMounts:
+            - {name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}
+      volumes:
+        - name: realm
+          configMap: {name: keycloak-realm}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: gateway
+spec:
+  type: NodePort
+  selector: {app: keycloak}
+  ports:
+    - {name: http, port: 8080, targetPort: http, nodePort: 30080}

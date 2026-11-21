@@ -108,6 +108,10 @@ The `public_url` clients use, the token audience and the route host must be the 
 
 `values.schema.json` rejects unknown keys and wrong types; `config` is checked by the gateway itself at start (`startup refused: invalid MCP_GATEWAY_CONFIG: <path>: <rule>` in the pod log).
 
+## Try it on kind
+
+`dev/kind/install.sh` installs the chart on a throwaway kind cluster with what it needs around it: Redis, Keycloak with the dev realm (`dev/keycloak/`), the Secrets (staged as files, never put in an argument list), the image built from this checkout, and two gateway replicas sharing their state in Redis (`dev/kind/gateway_values.py` writes the values: the dev stack's `gateway-keycloak` configuration). `dev/kind/kind-config.yaml` publishes Keycloak on `localhost:38080` and the gateway on `localhost:38000`: token issuer, audience and the URLs the pods and the host use are the same strings, and the gateway pods only reach Keycloak by its in-cluster Service (`auth.jwks_uri`). The real-dev suite then runs from the host against `http://localhost:38000/mcp` (see "`e2e`: the real-dev suite" in the repository README for `E2E_GATEWAY_URL_<NAME>`).
+
 ## Checks
 
 ```bash
