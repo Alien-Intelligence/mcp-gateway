@@ -1,4 +1,6 @@
 # Autoscaler and Ingress.
+image:
+  repository: registry.example.com/team/mcp-gateway
 autoscaling:
   enabled: true
   minReplicas: 2

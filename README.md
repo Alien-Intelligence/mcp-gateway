@@ -75,7 +75,17 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Container image
 
-The release flow builds one image for `linux/amd64` and `linux/arm64` and pushes it to the registry configured in `.gitlab-ci.yml` (`REGISTRY`, `IMAGE_NAME`). Tags: `<version>` from `main`, `<version>-rc` from `staging`, `<version>-dev` from `dev`, plus the moving tags `latest`, `latest-staging` and `latest-dev`. Pin deployments to a version, or better to the digest. The public pull location of the release image is not announced yet; until it is, mirror the image into your own registry. Each image carries an SBOM and a provenance attestation, and the OCI labels `source`, `version`, `revision` and `created`.
+The release flow builds one image for `linux/amd64` and `linux/arm64` and pushes it to the project's own registry (`.gitlab-ci.yml`, internal release flow). Tags: `<version>` from `main`, `<version>-rc` from `staging`, `<version>-dev` from `dev`, plus the moving tags `latest`, `latest-staging` and `latest-dev`. Pin deployments to a version, or better to the digest. The public pull location of the release image will be announced here; until then, build the image yourself:
+
+```sh
+docker buildx build \
+  --build-arg VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --tag mcp-gateway:local --load .
+```
+
+The three build arguments are required: the build refuses to run without them. Each image carries an SBOM and a provenance attestation, and the OCI labels `source`, `version`, `revision` and `created`.
 
 The image runs as uid 1000 with no writable path: the gateway keeps its state in memory or in Redis and logs to stdout. Run it the way it is tested, read-only and without capabilities:
 

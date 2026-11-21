@@ -81,7 +81,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | Key | Default | Meaning |
 |---|---|---|
 | `replicaCount` | `1` | Replicas (ignored while `autoscaling.enabled`). Above 1 needs Redis state. |
-| `image.repository`, `image.tag`, `image.pullPolicy` | `rg.fr-par.scw.cloud/ns-data-streaming/mcp-gateway`, chart `appVersion`, `IfNotPresent` | The image. The repository is where the release pipeline publishes it; the public pull location will be announced, until then mirror it and set the repository to your registry. |
+| `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | none (required), chart `appVersion`, none, `IfNotPresent` | The image. `repository` has no default: the pull location of the release image is announced in the project README; until then build it from the Dockerfile (README, "Container image") and push it to your registry. With `digest` (`sha256:...`) set the Deployment pulls `repository@digest`, whatever `tag` is. |
 | `imagePullSecrets` | `[]` | Pull secrets. |
 | `nameOverride`, `fullnameOverride` | `""` | Naming. |
 | `config` | `{}` | The `MCP_GATEWAY_CONFIG` document as an object. |

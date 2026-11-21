@@ -16,6 +16,7 @@ import pytest
 import yaml
 from chart_config_check import (
     RenderError,
+    check_image,
     check_inline,
     check_none,
     config_secrets_in,
@@ -39,7 +40,9 @@ def secret(name: str, document: str) -> dict[str, object]:
     }
 
 
-def deployment(secret_name: str | None, key: str = CONFIG_ENV_VAR) -> dict[str, object]:
+def deployment(
+    secret_name: str | None, key: str = CONFIG_ENV_VAR, image: str = "registry.example.com/x:1"
+) -> dict[str, object]:
     env: list[dict[str, object]] = []
     if secret_name is not None:
         env.append(
@@ -52,7 +55,9 @@ def deployment(secret_name: str | None, key: str = CONFIG_ENV_VAR) -> dict[str, 
         "apiVersion": "apps/v1",
         "kind": "Deployment",
         "metadata": {"name": "gateway"},
-        "spec": {"template": {"spec": {"containers": [{"name": "gateway", "env": env}]}}},
+        "spec": {
+            "template": {"spec": {"containers": [{"name": "gateway", "image": image, "env": env}]}}
+        },
     }
 
 
@@ -169,6 +174,13 @@ def test_the_deployment_reference_must_be_complete() -> None:
     }
     with pytest.raises(RenderError, match="not a full secretKeyRef"):
         deployment_config_ref([incomplete])
+
+
+def test_the_deployment_must_run_the_expected_image() -> None:
+    digest = "r.example/x@sha256:" + "0" * 64
+    check_image([deployment("s", image=digest)], digest)
+    with pytest.raises(RenderError, match="expected r.example/x:1"):
+        check_image([deployment("s", image=digest)], "r.example/x:1")
 
 
 def write_executable(path: Path, text: str) -> None:

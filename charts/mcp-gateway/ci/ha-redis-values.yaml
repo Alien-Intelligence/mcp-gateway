@@ -1,4 +1,6 @@
 # Two replicas sharing state through Redis.
+image:
+  repository: registry.example.com/team/mcp-gateway
 replicaCount: 2
 config:
   version: 1

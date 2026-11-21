@@ -27,7 +27,8 @@ ha-no-redis-values.yaml|needs the shared state
 hpa-no-redis-values.yaml|needs the shared state
 grace-too-short-values.yaml|must be greater than the largest upstream read_timeout_seconds
 existing-secret-no-shared-state-values.yaml|existingSecret.sharedState=true
-no-version-values.yaml|'version'
+no-version-values.yaml|version
+no-image-values.yaml|image.repository is required
 '
 
 # values file | text of the refusal: these render, and the gateway's loader must refuse them
@@ -38,6 +39,11 @@ refused-audience-values.yaml|public_url must be listed in auth.audiences
 # values file | name and key of the existing Secret the Deployment must read (no inline configuration)
 NO_INLINE_CONFIG='
 existing-secret-values.yaml|mcp-gateway-config|MCP_GATEWAY_CONFIG
+'
+
+# values file | image the Deployment must run (checked on the parsed render)
+EXPECTED_IMAGES='
+image-digest-values.yaml|registry.example.com/team/mcp-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000
 '
 
 status=0
@@ -91,6 +97,9 @@ config_check() {
             set -- --expect-none --secret-name "${existing%%|*}" --secret-key "${existing#*|}"
         else
             set --
+        fi
+        if image=$(echo "$EXPECTED_IMAGES" | grep -F "$name|" | cut -d'|' -f2-) && [ -n "$image" ]; then
+            set -- "$@" --expect-image "$image"
         fi
         uv run --frozen --extra dev python -I scripts/chart_config_check.py "$@" \
             <"$WORK_DIR/render.yaml" || failed "gateway configuration $name"

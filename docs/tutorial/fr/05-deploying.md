@@ -4,7 +4,15 @@ La passerelle est une seule image de conteneur. Ce chapitre couvre les deux mani
 
 ## 5.1 L'image
 
-Écrivez `<registry>/mcp-gateway:<version>` ci-dessous comme référence d'image. Le pipeline de publication dépose l'image dans un registre interne au projet : l'**emplacement public de téléchargement est annoncé dans le README du dépôt** et n'est pas répété ici. D'ici là, copiez l'image dans votre propre registre et utilisez votre référence.
+Écrivez `<registry>/mcp-gateway:<version>` ci-dessous comme référence d'image. L'**emplacement public de téléchargement est annoncé dans le README du dépôt** et n'est pas répété ici. D'ici là, construisez l'image vous-même depuis la racine du dépôt et déposez-la dans votre propre registre (ou utilisez l'étiquette locale `mcp-gateway:local` sur une seule machine). Les trois arguments de construction sont obligatoires : la construction refuse de s'exécuter sans eux.
+
+```bash
+docker buildx build \
+  --build-arg VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' pyproject.toml | head -n 1)" \
+  --build-arg VCS_REF="$(git rev-parse HEAD)" \
+  --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --tag mcp-gateway:local --load .
+```
 
 - Une seule image pour `linux/amd64` et `linux/arm64`. Étiquettes : `<version>` (une version issue de `main`), `<version>-rc` (`staging`), `<version>-dev` (`dev`) et les étiquettes mobiles `latest`, `latest-staging`, `latest-dev`.
 - Épinglez une version, ou mieux le condensat (digest). N'exécutez jamais `latest` en production.
@@ -132,7 +140,7 @@ Ni `.env`, ni `config.json`, ni `secrets/` n'ont leur place dans le contrôle de
 - **Modifier la configuration :** compose monte `config.json` et la passerelle ne le lit qu'une fois, au démarrage ; `docker compose up -d` ne redémarre pas une passerelle en cours d'exécution pour un fichier modifié. Appliquez un changement avec `docker compose restart gateway` (il en va de même pour une nouvelle `state-encryption-key` ou un nouveau secret de webhook). Les fichiers de correspondance et de clés du resolver `static` font exception : ils sont relus sans redémarrage.
 - **TLS :** la passerelle est publiée sur `127.0.0.1:8000` en HTTP simple. Placez un proxy inverse sur le nom d'hôte de `public_url` ; il ne doit ni mettre en tampon, ni compresser, ni interrompre par délai les flux d'événements, ce que fait `nginx.example.conf` (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
 - **Fournisseur d'identité :** avec le modèle Keycloak du chapitre 6, `auth.issuer` vaut `https://<keycloak>/realms/<realm>` ; conservez tels quels les `scopes_advertised` et `identity` de l'exemple.
-- **Image :** les exemples nomment l'image de la release ; son emplacement public de téléchargement n'est pas encore annoncé : d'ici là, copiez l'image dans votre propre registre et définissez `MCP_GATEWAY_IMAGE` sur ce miroir.
+- **Image :** `MCP_GATEWAY_IMAGE` n'a pas de valeur par défaut et compose refuse de démarrer sans elle. L'emplacement public de téléchargement est annoncé dans le README du dépôt ; d'ici là, construisez l'image comme en 5.1 et définissez `MCP_GATEWAY_IMAGE=mcp-gateway:local` (ou la référence de votre registre).
 
 Autres faits :
 

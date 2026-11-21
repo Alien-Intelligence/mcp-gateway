@@ -1,4 +1,6 @@
 # EXPECTED TO FAIL: an autoscaler above one replica with in-process state.
+image:
+  repository: registry.example.com/team/mcp-gateway
 autoscaling:
   enabled: true
   minReplicas: 1

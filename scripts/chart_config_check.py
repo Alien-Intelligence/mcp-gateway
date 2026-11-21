@@ -10,12 +10,15 @@ The Deployment must also read that Secret: its ``MCP_GATEWAY_CONFIG`` variable m
 ``secretKeyRef`` to the rendered Secret and its key.
 
 Usage: chart_config_check.py [--expect-refused TEXT | --expect-none --secret-name NAME --secret-key KEY]
+                             [--expect-image IMAGE]
 
   (default)               exactly one such Secret must be present, the Deployment must read it, and
                           its document must be accepted
   --expect-refused TEXT   the document must be refused, and the refusal must contain TEXT
   --expect-none           no Secret with the configuration may be rendered, and the Deployment must
                           read the existing Secret NAME, key KEY (existingSecret)
+
+  --expect-image IMAGE    the Deployment's container must run exactly IMAGE (name:tag or name@digest)
 
 Exit status 0 when the expectation holds, 1 when it does not.
 """
@@ -109,6 +112,25 @@ def deployment_config_ref(manifests: list[dict[str, Any]]) -> SecretRef:
     return refs[0]
 
 
+def deployment_image(manifests: list[dict[str, Any]]) -> str:
+    """The image of the gateway container of the single Deployment."""
+    deployments = [m for m in manifests if m.get("kind") == "Deployment"]
+    if len(deployments) != 1:
+        raise RenderError(f"expected exactly one Deployment, found {len(deployments)}")
+    pod_spec = (((deployments[0].get("spec") or {}).get("template") or {}).get("spec")) or {}
+    images = [c.get("image") for c in pod_spec.get("containers") or []]
+    if len(images) != 1 or not isinstance(images[0], str):
+        raise RenderError(f"expected one container with an image, found {images!r}")
+    return images[0]
+
+
+def check_image(manifests: list[dict[str, Any]], expected: str) -> None:
+    """The Deployment runs exactly the expected image."""
+    image = deployment_image(manifests)
+    if image != expected:
+        raise RenderError(f"the Deployment runs {image}, expected {expected}")
+
+
 def check_none(manifests: list[dict[str, Any]], secret_name: str, secret_key: str) -> None:
     """existingSecret: no inline configuration, and the Deployment reads the named Secret."""
     rendered = config_secrets_in(manifests)
@@ -143,6 +165,7 @@ def main() -> int:
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--expect-refused", metavar="TEXT")
     group.add_argument("--expect-none", action="store_true")
+    parser.add_argument("--expect-image", metavar="IMAGE")
     parser.add_argument("--secret-name", help="with --expect-none: the existing Secret's name")
     parser.add_argument("--secret-key", help="with --expect-none: the key in the existing Secret")
     args = parser.parse_args()
@@ -155,6 +178,8 @@ def main() -> int:
         return 1
     try:
         manifests = list(manifests_in(stream))
+        if args.expect_image is not None:
+            check_image(manifests, args.expect_image)
         if args.expect_none:
             check_none(manifests, args.secret_name, args.secret_key)
             print(

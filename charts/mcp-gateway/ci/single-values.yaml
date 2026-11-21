@@ -1,4 +1,6 @@
 # One replica, in-process state.
+image:
+  repository: registry.example.com/team/mcp-gateway
 replicaCount: 1
 config:
   version: 1

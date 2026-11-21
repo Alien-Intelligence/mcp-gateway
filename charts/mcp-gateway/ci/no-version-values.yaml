@@ -1,4 +1,6 @@
 # config without "version": helm install must refuse it (values.schema.json).
+image:
+  repository: registry.example.com/team/mcp-gateway
 replicaCount: 1
 config:
   public_url: https://mcp.example.com/mcp
