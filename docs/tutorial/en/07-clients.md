@@ -19,7 +19,7 @@ All of them use the authorization code flow with PKCE. Your server must let each
 
 - Add the gateway's URL as a **custom connector** (the vendor page above describes how a custom connector identifies Claude to your server: through the Client ID Metadata Document that Anthropic hosts, through Dynamic Client Registration, or with an OAuth client id that you registered and that the user enters in the dialog, with a client secret only if your server needs one).
 - Claude requires a `401` (not a header on a `200`) to start sign-in, uses only the first entry of `authorization_servers`, and sends PKCE `S256` on every authorization request. The gateway does all three.
-- Claude requests the scopes in the challenge's `scope`, or else the metadata's `scopes_supported`; with none it asks for every scope and fails with `invalid_scope`. Advertise `openid` (chapter 6).
+- Claude requests the scopes in the challenge's `scope`, or else the metadata's `scopes_supported`; with none it asks for every scope and fails with `invalid_scope`. It also adds `offline_access` when the server's metadata lists it, so against Keycloak advertise `mcp-gateway` and `offline_access`, and not `openid` (chapter 6).
 - **CIMD**: Claude normally uses it only when your server's metadata advertises both `"client_id_metadata_document_supported": true` and `"none"` in `token_endpoint_auth_methods_supported`, and otherwise falls back to DCR. Keycloak's CIMD is experimental (chapter 6): DCR is the path that works with it today.
 - Reachability and the 10-second limit: chapter 2.
 - Add `https://claude.ai` to `policies.allowed_origins`; the examples do.
