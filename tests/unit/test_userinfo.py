@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import re
+import ssl
 import time
 from collections.abc import Coroutine
 from typing import Any, cast
@@ -122,6 +123,21 @@ async def test_a_transport_error_is_retried_up_to_max_attempts() -> None:
     with pytest.raises(UserinfoUnavailableError, match="ConnectError"):
         await client_with(fake, max_attempts=4).fetch(TOKEN, SUBJECT)
     assert fake.calls == 4
+
+
+async def test_a_server_certificate_that_fails_verification_is_not_retried() -> None:
+    fake = FakeUserinfo()
+
+    def untrusted(request: httpx.Request) -> httpx.Response:
+        try:
+            raise ssl.SSLCertVerificationError("certificate verify failed")
+        except ssl.SSLCertVerificationError as exc:
+            raise httpx.ConnectError("handshake failed", request=request) from exc
+
+    fake.responder = untrusted
+    with pytest.raises(UserinfoResponseError, match="certificate verification"):
+        await client_with(fake, max_attempts=4).fetch(TOKEN, SUBJECT)
+    assert fake.calls == 1
 
 
 async def test_a_transport_timeout_is_retried() -> None:

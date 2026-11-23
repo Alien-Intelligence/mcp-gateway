@@ -13,7 +13,7 @@ Failure handling, one class per answer the gateway gives:
 * ``UserinfoRejectedError``: status 401 or 403. The IdP no longer accepts the token. Not retried.
 * ``UserinfoSubjectMismatchError``: the document describes another subject. Not retried.
 * ``UserinfoClaimsError``: a claim the identity paths name has the wrong type. Not retried.
-* ``UserinfoResponseError``: any other status, a body that is too large, not UTF-8, not JSON, not an
+* ``UserinfoResponseError``: a server certificate that fails verification, any other status, a body that is too large, not UTF-8, not JSON, not an
   object, a signed or encrypted (``application/jwt``) reply, a missing ``sub``. Not retried.
 
 Messages and logs name the setting and the failure class, never the URL, the token or the document.
@@ -32,6 +32,7 @@ from mcp_gateway import boundedjson
 from mcp_gateway.config import IdentityPathsConfig, UserinfoConfig
 from mcp_gateway.identity import IdentityError, Profile, read_profile
 from mcp_gateway.jsonrpc import declares_non_utf8_charset
+from mcp_gateway.tls import is_certificate_failure
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,11 @@ class UserinfoClient:
         except (TimeoutError, httpx.TimeoutException) as exc:
             raise _TransientError("timeout") from exc
         except httpx.TransportError as exc:
+            if is_certificate_failure(exc):
+                # Retrying cannot fix a certificate the gateway does not trust.
+                raise UserinfoResponseError(
+                    "auth.userinfo TLS certificate verification failed"
+                ) from exc
             raise _TransientError(type(exc).__name__) from exc
         except httpx.HTTPError as exc:
             raise UserinfoResponseError(

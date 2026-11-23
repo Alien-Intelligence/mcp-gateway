@@ -68,6 +68,7 @@ from mcp_gateway.resolver.base import (
     is_machine_reason,
     read_secret_file,
 )
+from mcp_gateway.tls import is_certificate_failure
 
 logger = logging.getLogger(__name__)
 
@@ -107,18 +108,6 @@ class _Deny(BaseModel):
 _DECISION: TypeAdapter[_Allow | _Deny] = TypeAdapter(
     Annotated[_Allow | _Deny, Field(discriminator="decision")]
 )
-
-
-def _is_certificate_failure(exc: BaseException) -> bool:
-    """True when a transport error was caused by a failed certificate verification."""
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        if isinstance(current, ssl.SSLCertVerificationError):
-            return True
-        seen.add(id(current))
-        current = current.__cause__ or current.__context__
-    return False
 
 
 class _TransientError(Exception):
@@ -205,7 +194,7 @@ class WebhookResolver:
         except (TimeoutError, httpx.TimeoutException) as exc:
             raise _TransientError("timeout") from exc
         except httpx.TransportError as exc:
-            if _is_certificate_failure(exc):
+            if is_certificate_failure(exc):
                 # Retrying cannot fix a certificate the gateway does not trust.
                 raise ResolverError("webhook TLS certificate verification failed") from exc
             raise _TransientError(type(exc).__name__) from exc
