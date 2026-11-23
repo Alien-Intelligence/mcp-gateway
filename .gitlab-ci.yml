@@ -209,8 +209,8 @@ gitleaks:
     - gitleaks git . --config .gitleaks.toml --redact --no-banner --exit-code 1
 
 # The full history against a deny-list of customer names, internal hosts and personal names: `main` is
-# mirrored to a public repository, so a string anywhere in its history is published, and `dev` is
-# where that history is written. The deny-list is
+# published to a public repository (job publish-github), so a string anywhere in its history is
+# published, and `dev` is where that history is written. The deny-list is
 # itself sensitive and is not in the repository: it is the File-type, protected CI variable
 # HISTORY_DENYLIST_FILE (one Perl regex per line). The job fails when the variable is missing (a
 # check that is skipped is not a pass: on a merge request from an unprotected branch it is not
@@ -239,7 +239,7 @@ gitleaks:
 history-denylist-tests:
   extends: .history-denylist-base
   script:
-    - uv run --frozen --extra dev pytest tests/unit/test_history_denylist.py -q
+    - uv run --frozen --extra dev pytest tests/unit/test_history_denylist.py tests/unit/test_publish_github.py -q
 
 history-denylist:
   extends: .history-denylist-base
@@ -251,3 +251,25 @@ history-denylist:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
     - if: '$CI_COMMIT_BRANCH =~ /^(main|dev)$/'
 
+# The public GitHub repository receives `main` and the release tags reachable from it, from here only
+# (no push mirror: a mirror also pushed tags cut on dev). scripts/ci_publish_github.sh copies exactly
+# those refs into a scratch repository, scans them with the history deny-list (any hit stops it), and
+# pushes them with a repository-scoped GitHub deploy key over SSH with GitHub's host keys pinned, as a
+# plain push: a diverged or rewritten GitHub history is refused, never overwritten. The deploy key is
+# the protected File variable GITHUB_PUBLISH_DEPLOY_KEY (base64 of the private key, masked), so only
+# protected refs get it. On a tag pipeline a tag that is not on main publishes nothing and succeeds;
+# release tags are cut on dev and reach GitHub with the main pipeline that first contains them.
+publish-github:
+  extends: .history-denylist-base
+  stage: publish
+  needs: [history-denylist-tests, gitleaks]
+  variables:
+    GIT_DEPTH: 0
+    GITHUB_PUBLISH_REPO: git@github.com:Alien-Intelligence/mcp-gateway.git
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl openssh-client
+  script:
+    - sh scripts/ci_publish_github.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG =~ /^v/'
