@@ -1,0 +1,5 @@
+# Extends the default gitleaks rules. Allowlist only exact fake fixtures, never paths.
+title = "mcp-gateway"
+
+[extend]
+useDefault = true

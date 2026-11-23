@@ -1,0 +1,45 @@
+# The Helm chart (charts/mcp-gateway): lint, render with several values files and validate the
+# manifests with kubeconform; the values files that must not render are asserted to fail.
+# Each render's gateway configuration is also run through the gateway's own loader, so the image
+# carries Python and uv next to helm and kubeconform.
+# The steps live in scripts/chart_check.sh, which runs the same way on a laptop.
+# Included from .gitlab-ci.yml. The real install on a cluster is not a CI job (README of the chart).
+
+.chart-changes: &chart-changes
+  - charts/**/*
+  - scripts/chart_check.sh
+  - scripts/chart_config_check.py
+  - src/mcp_gateway/config.py
+  - ci/chart.gitlab-ci.yml
+
+chart-validate:
+  stage: test
+  image:
+    # uv with Python 3.12, pinned by the digest of the multi-arch index (as the Dockerfile's bases).
+    name: ghcr.io/astral-sh/uv:0.8.13-python3.12-trixie-slim@sha256:f0c3f034ab7f061c47cd402b5575ce222fcd3a6cbc49ae2b3f02201b5a56f2d5
+    entrypoint: [""]
+  variables:
+    HELM_VERSION: "3.14.0"
+    HELM_SHA256: "f43e1c3387de24547506ab05d24e5309c0ce0b228c23bd8aa64e9ec4b8206651"
+    KUBECONFORM_VERSION: "0.7.0"
+    KUBECONFORM_SHA256: "c31518ddd122663b3f3aa874cfe8178cb0988de944f29c74a0b9260920d115d3"
+    KUBERNETES_VERSION: "1.31.0"
+    UV_FROZEN: "1"
+    UV_LINK_MODE: copy
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ca-certificates curl
+    - curl --fail --silent --show-error --location --max-time 120 -o helm.tgz "https://get.helm.sh/helm-v${HELM_VERSION}-linux-amd64.tar.gz"
+    - echo "${HELM_SHA256}  helm.tgz" | sha256sum -c -
+    - tar -xzf helm.tgz -C /usr/local/bin --strip-components=1 linux-amd64/helm
+    - rm helm.tgz
+    - curl --fail --silent --show-error --location --max-time 120 -o kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+    - echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+    - tar -xzf kubeconform.tgz -C /usr/local/bin kubeconform
+    - rm kubeconform.tgz
+  script:
+    - sh scripts/chart_check.sh
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *chart-changes
+    - if: '$CI_COMMIT_BRANCH'
+      changes: *chart-changes

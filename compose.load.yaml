@@ -1,0 +1,23 @@
+# The load client, on the host network so the localhost issuers resolve as on a laptop. Used with
+# the stub target by scripts/loadtest_stub.sh:
+#   docker compose -f compose.yaml -f compose.stub.yaml -f compose.load.yaml \
+#     --env-file .env.stub --profile stub run --name load-run load \
+#     python -m load.loadtest <arguments>
+
+services:
+  load:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [load]
+    network_mode: host
+    working_dir: /app/tests
+    volumes:
+      # The stub personas' API keys, for the direct-to-upstream baseline.
+      - state:/run/gateway/state:ro
+    environment:
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
+      PYTHONPATH: /app/src:/app/scripts
+      LOADTEST_GIT_COMMIT: ${LOADTEST_GIT_COMMIT:-}
+    command: [python, -m, load.loadtest, --help]

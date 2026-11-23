@@ -1,0 +1,81 @@
+[project]
+name = "mcp-gateway"
+version = "0.8.0"
+description = "Alien MCP Gateway: an OAuth resource server in front of Alien MCP servers that swaps the caller's identity for an Alien API key"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = [
+    "anyio>=4.16.0",
+    "httpx>=0.28.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.45.2",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.2",
+    "opentelemetry-sdk>=1.45.2",
+    "psycopg[binary,pool]>=3.2",
+    "pydantic>=2.9.0",
+    "pyjwt[crypto]>=2.10.0",
+    "redis>=5",
+    "starlette>=0.46.0",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.9.0",
+    "pyright>=1.1.390",
+    "pre-commit>=4.0.0",
+    "commitizen>=4.1.0",
+    "mcp>=1.27.0",
+    "jsonschema>=4.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+mcp-gateway = "mcp_gateway.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_gateway"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+# PLC0415: imports at the top of the file only (preview rule, opted in alone).
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = ["E", "W", "F", "I", "N", "UP", "B", "C4", "SIM", "PLC0415"]
+ignore = [
+    "E501",  # line length is the formatter's job
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["mcp_gateway"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+include = ["src"]
+exclude = ["tests", ".venv"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["src", "scripts"]
+markers = [
+    "integration: needs real PostgreSQL and Redis servers (MCP_GATEWAY_TEST_PG_DSN, MCP_GATEWAY_TEST_REDIS_URL)",
+    "e2e: runs against the docker compose dev target, the real dev Alien platform and a real dev MCP server",
+    "e2e_stub: runs against the docker compose stub target (real OAuth servers, fault-injection upstream stub)",
+]

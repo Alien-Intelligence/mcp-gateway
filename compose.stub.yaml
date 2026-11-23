@@ -1,0 +1,163 @@
+# Stub target: the gateways forward to the fault-injection upstream stub and the stack writes
+# its own state (fake keys), so nothing outside the repository is needed.
+#   docker compose -f compose.yaml -f compose.stub.yaml --profile stub --env-file .env.stub \
+#     up --build --wait
+
+services:
+  state-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [stub]
+    user: "1000:1000"
+    command: [python, scripts/stub_fixture.py, --state-dir, /run/gateway/state]
+    volumes:
+      - state:/run/gateway/state
+    networks: [gatewaydev]
+    restart: "no"
+
+  upstream-stub:
+    build:
+      context: ./dev/upstream-stub
+    profiles: [stub]
+    user: "1000:1000"
+    environment:
+      STUB_KEYS_FILE: /run/gateway/state/stub-keys.json
+    volumes:
+      - state:/run/gateway/state:ro
+    ports:
+      - "127.0.0.1:14000:4000"
+    networks: [gatewaydev]
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:4000/_stub/requests", timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 3s
+
+  seed:
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+
+  gateway-keycloak:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-hydra:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-chain:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-unreachable:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-ha-a:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-ha-b:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-noredis:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+
+  gateway-userinfo-keycloak:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-userinfo-hydra:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-userinfo-down:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+
+  # The deployable realm template (deploy/keycloak), rendered by render.sh and imported at start
+  # as its README tells a customer to; tests/e2e/stub/test_keycloak_template.py attacks it. No
+  # gateway uses it: the audience below only has to match the harness's E2E_KC_TEMPLATE_AUDIENCE.
+  keycloak-template:
+    build:
+      context: .
+      dockerfile: dev/keycloak-template/Dockerfile
+      args:
+        REALM_NAME: template-check
+        GATEWAY_PUBLIC_URL: http://localhost:18009/mcp
+    profiles: [stub]
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set KC_BOOTSTRAP_ADMIN_PASSWORD in .env}
+      KC_HOSTNAME: http://localhost:18081
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18081:8080"
+    networks: [gatewaydev]
+    healthcheck:
+      # The image has no curl: probe the management port with bash.
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+          grep -q '"status": "UP"' <&3
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+
+  # The end-to-end harness, on the host network so the localhost issuers resolve as on a laptop.
+  #   docker compose ... --profile harness run --name e2e-run harness
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [harness]
+    network_mode: host
+    volumes:
+      # The stub personas' API keys (to prove none reaches the telemetry) and the collector output.
+      - state:/run/gateway/state:ro
+      - otel:/otel:ro
+    environment:
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD in .env}
+      E2E_RUN_DIR: /out
+      E2E_STATE_DIR: /run/gateway/state
+      E2E_OTEL_DIR: /otel
+      MCP_GATEWAY_TEST_PG_DSN: postgresql://gateway:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@127.0.0.1:15432/gateway
+      MCP_GATEWAY_TEST_REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@127.0.0.1:16379/0
+      # keycloak-template: its address, realm and audience (the build args above), and its
+      # bootstrap administrator, who creates the test user and groups.
+      E2E_KC_TEMPLATE_URL: http://localhost:18081
+      E2E_KC_TEMPLATE_REALM: template-check
+      E2E_KC_TEMPLATE_AUDIENCE: http://localhost:18009/mcp
+      E2E_KC_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:?set KC_BOOTSTRAP_ADMIN_USERNAME in .env}
+      E2E_KC_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?set KC_BOOTSTRAP_ADMIN_PASSWORD in .env}
+    command:
+      - pytest
+      - tests/e2e
+      - tests/integration
+      - -m
+      - e2e_stub or integration
+      - -v
+      - -p
+      - no:cacheprovider
+      - --junitxml=/out/junit.xml

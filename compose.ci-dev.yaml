@@ -1,0 +1,93 @@
+# CI real-dev target: the gateways forward to the real dev MCP server and the Alien dev platform
+# is the metering backend, but the state comes from CI-provided files instead of a directory on
+# the developer's machine (compose.dev.yaml), so it works against a remote daemon (the dind
+# service). Used by scripts/ci_e2e_dev.sh; the variables are listed in docs/development.md.
+#
+# Key files and the fixture reach the containers as Compose secrets taken from environment
+# variables (E2E_DEV_*_CONTENT, set by the script from the CI-provided files): Compose copies such
+# a secret into the container through the daemon API. A file-based secret would be a bind mount,
+# which fails on a remote daemon (the dind service) because the path is not on its host.
+
+secrets:
+  sponsor_key:
+    environment: E2E_DEV_SPONSOR_KEY_CONTENT
+  alice_key:
+    environment: E2E_DEV_ALICE_KEY_CONTENT
+  bob_key:
+    environment: E2E_DEV_BOB_KEY_CONTENT
+  carol_key:
+    environment: E2E_DEV_CAROL_KEY_CONTENT
+  fixture:
+    environment: E2E_DEV_FIXTURE_CONTENT
+
+x-secret-of-user-1000: &owner
+  uid: "1000"
+  gid: "1000"
+  mode: 0400
+
+services:
+  # Lays the state directory out in the state volume from the secrets.
+  state-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    user: "1000:1000"
+    command:
+      - python
+      - scripts/ci_dev_state.py
+      - --state-dir
+      - /run/gateway/state
+      - --secrets-dir
+      - /run/secrets
+    volumes:
+      - state:/run/gateway/state
+    secrets:
+      - source: alice_key
+        <<: *owner
+      - source: bob_key
+        <<: *owner
+      - source: carol_key
+        <<: *owner
+      - source: fixture
+        <<: *owner
+    networks: [gatewaydev]
+    restart: "no"
+
+  seed:
+    depends_on:
+      state-init:
+        condition: service_completed_successfully
+
+  # The real-dev end-to-end suite, on the host network so the localhost issuers resolve as on a
+  # laptop. It owns the state volume: the revoked-key test swaps a persona's key file in it.
+  #   docker compose ... --profile harness run --name e2e-run harness
+  harness:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    image: mcp-gateway-e2e:local
+    profiles: [harness]
+    network_mode: host
+    volumes:
+      - state:/run/gateway/state
+    secrets:
+      - source: sponsor_key
+        <<: *owner
+    environment:
+      E2E_USER_PASSWORD: ${E2E_USER_PASSWORD:?set E2E_USER_PASSWORD}
+      E2E_STATE_DIR: /run/gateway/state
+      E2E_SPONSOR_KEY_FILE: /run/secrets/sponsor_key
+      E2E_API_BASE: ${E2E_DEV_API_BASE:?set E2E_DEV_API_BASE}
+      E2E_UPSTREAM_URL: ${E2E_DEV_UPSTREAM_URL:?set E2E_DEV_UPSTREAM_URL}
+      E2E_EXISTING_JOB_ID: ${E2E_DEV_EXISTING_JOB_ID:?set E2E_DEV_EXISTING_JOB_ID}
+      E2E_RUN_DIR: /out
+    command:
+      - pytest
+      - tests/e2e
+      - -m
+      - e2e
+      - -v
+      - -p
+      - no:cacheprovider
+      - --junitxml=/out/junit.xml

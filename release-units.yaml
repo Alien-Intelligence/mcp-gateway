@@ -1,0 +1,13 @@
+# Post-merge versioning (ci-scripts docs/VERSIONING.md): the release bot bumps these after merge to dev.
+release_branch: dev
+units:
+  # The mcp-gateway image: what the Dockerfile copies (src/) plus the files it is built from, and
+  # the Helm chart released with it (chart version and appVersion equal the image version).
+  - name: mcp-gateway
+    tag_format: "v{version}"
+    paths: [src/, pyproject.toml, uv.lock, Dockerfile, charts/]
+    files:
+      - {path: pyproject.toml, kind: regex, pattern: '^version = "(?P<version>[^"]+)"'}
+      - {path: uv.lock, kind: uv-lock, package: mcp-gateway}
+      - {path: charts/mcp-gateway/Chart.yaml, kind: regex, pattern: '^version: *"?(?P<version>[^"\s]+)"?'}
+      - {path: charts/mcp-gateway/Chart.yaml, kind: regex, pattern: '^appVersion: *"?(?P<version>[^"\s]+)"?'}

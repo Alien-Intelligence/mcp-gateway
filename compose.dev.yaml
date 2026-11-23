@@ -1,0 +1,10 @@
+# Dev target: the gateways forward to the real dev MCP (UPSTREAM_*_URL in .env) and read the
+# state that scripts/dev_fixture.py wrote into MCP_GATEWAY_STATE_DIR.
+
+volumes:
+  state:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MCP_GATEWAY_STATE_DIR:?set MCP_GATEWAY_STATE_DIR in .env}

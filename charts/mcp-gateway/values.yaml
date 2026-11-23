@@ -1,0 +1,194 @@
+# Default values of the mcp-gateway chart. Documented key by key in README.md.
+
+replicaCount: 1
+
+image:
+  # Required, no default: the public image is ghcr.io/alien-intelligence/mcp-gateway (README, "Container image"),
+  # or your own build of the Dockerfile pushed to your registry.
+  repository: ""
+  # Defaults to the chart's appVersion. Ignored when digest is set.
+  tag: ""
+  # An image digest (sha256:...). When set, the Deployment pulls repository@digest: the exact bytes,
+  # whatever the tag points to later.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# The gateway configuration: the strict JSON document of docs/configuration.md, written here as a
+# YAML object. The chart renders it into a Secret (key MCP_GATEWAY_CONFIG) and the pods read it
+# from there. Every key of the document is required, starting with `version: 1`; the gateway
+# refuses to start otherwise (and `helm install` refuses a config without it).
+# Secrets are never written in it: its *_file keys name files, mounted with secretMounts.
+config: {}
+
+# Alternative to config: a Secret you manage (sealed, external-secrets, ...) holding the document
+# under `key`. The chart cannot read it, so it cannot check it: sharedState must be set to true
+# when more than one replica runs (state.type "redis" in that document), terminationGracePeriodSeconds
+# must be set, and a change rolls the pods only through podAnnotations or `kubectl rollout restart`.
+existingSecret:
+  name: ""
+  key: MCP_GATEWAY_CONFIG
+  sharedState: false
+
+# Secrets holding the files the configuration's *_file keys name (the Redis URL of `state`, the
+# state encryption key, the static resolver's mapping and key files, a webhook HMAC secret, DSNs...).
+# Each entry mounts one Secret read-only as a directory. `items` limits and renames the files.
+#   - name: state
+#     secretName: mcp-gateway-secrets
+#     mountPath: /run/gateway/secrets
+#     items:
+#       - {key: state-redis-url, path: state-redis-url}
+secretMounts: []
+
+# Secrets read as environment variables, by reference only (valueFrom.secretKeyRef). The gateway's
+# own settings all come from MCP_GATEWAY_CONFIG; its OpenTelemetry exporters also read the standard
+# OTEL_EXPORTER_OTLP_* variables for what the config's otlp block does not carry (headers, CA).
+secretEnv: []
+#   - {name: OTEL_EXPORTER_OTLP_HEADERS, secretName: otlp-auth, key: headers}
+
+# Plain (non-secret) environment variables.
+env: []
+
+# Must equal config.listen.port (checked for an inline config).
+containerPort: 8000
+# Must equal the path of config.public_url (checked for an inline config). The Ingress and the
+# HTTPRoute route it and /.well-known/oauth-protected-resource<publicPath>.
+publicPath: /mcp
+
+service:
+  type: ClusterIP
+  port: 80
+  # Fixed node port for the NodePort and LoadBalancer types; unset lets Kubernetes choose.
+  nodePort: null
+  annotations: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  # The gateway never calls the Kubernetes API.
+  automountServiceAccountToken: false
+
+# Seconds the pod gets to stop. The stop budget of an inline config is the largest upstream
+# read_timeout_seconds (in-flight requests) + 20 s (detached reads) + the OTLP flush when enabled
+# + preStopSleepSeconds. null: that budget plus 5 s. A value not greater than the budget fails the
+# render (chart README, "Shutdown").
+terminationGracePeriodSeconds: null
+# The pod keeps serving this long after it is marked terminating, so Services and load balancers
+# stop sending it requests before it stops accepting them.
+preStopSleepSeconds: 5
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+  seccompProfile:
+    type: RuntimeDefault
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 192Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# /healthz never looks at the state backend; /readyz pings it, so a replica that lost Redis
+# leaves the Service. startupProbe gives a slow start (JWKS and Redis checks) time without
+# loosening the liveness probe.
+startupProbe:
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 30
+readinessProbe:
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+livenessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# A new pod is ready before an old one stops: open streams are not cut by a rollout beyond what
+# the grace period allows.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: null
+
+# enabled: null is on whenever more than one replica can run.
+podDisruptionBudget:
+  enabled: null
+  # Exactly one of these is used; minAvailable wins when both are set.
+  maxUnavailable: 1
+  minAvailable: null
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Spreading the replicas over nodes or zones, for example:
+#   - maxSkew: 1
+#     topologyKey: kubernetes.io/hostname
+#     whenUnsatisfiable: ScheduleAnyway
+#     labelSelector:
+#       matchLabels:
+#         app.kubernetes.io/name: mcp-gateway
+topologySpreadConstraints: []
+
+# Off by default. MCP answers are Server-Sent Events: the proxy in front must not buffer the
+# response and must not cut a quiet stream, so raise its timeouts above the largest upstream
+# read_timeout_seconds. The annotations below are for ingress-nginx; adapt them to your controller.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  #   nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  #   nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+  #   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  #   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  hosts: []
+  #   - host: mcp.example.com
+  tls: []
+  #   - secretName: mcp-example-com-tls
+  #     hosts: [mcp.example.com]
+
+# Gateway API, off by default. The Gateway itself is yours; the route attaches to it.
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+  #   - name: example-gateway
+  #     namespace: gateway-system
+  hostnames: []
+  #   - mcp.example.com
+  # Gateway API timeouts (rules[].timeouts): "0s" disables the request timeout, which an SSE
+  # stream needs. Implementations differ in what they support; some need a policy object instead.
+  timeouts:
+    request: 0s
+    backendRequest: 0s

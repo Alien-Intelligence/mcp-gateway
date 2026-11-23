@@ -1,0 +1,124 @@
+# Production-like example: one gateway and the Redis that holds its shared state. Not the
+# development stack (compose.yaml at the repository root). README.md next to this file explains
+# every choice; start from .env.example and a config.*.example.json.
+#
+#   cp .env.example .env            # then edit it
+#   ./init-secrets.sh               # Redis password, state key, empty key directory
+#   docker compose up -d --wait
+#
+# Nothing here holds a secret: the configuration names files, and the files live in the
+# directory MCP_GATEWAY_SECRETS_DIR, which is never committed.
+
+name: mcp-gateway
+
+networks:
+  # The gateway reaches the identity provider and the upstream MCP servers; the reverse proxy
+  # reaches the gateway through the published port.
+  edge: {}
+  # Redis only: no route out of the host and no published port.
+  state:
+    internal: true
+
+configs:
+  gateway-config:
+    file: ${MCP_GATEWAY_CONFIG_FILE:?set MCP_GATEWAY_CONFIG_FILE in .env}
+
+secrets:
+  redis-conf:
+    file: ${MCP_GATEWAY_SECRETS_DIR:?set MCP_GATEWAY_SECRETS_DIR in .env}/redis.conf
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+  gateway:
+    <<: *hardening
+    image: ${MCP_GATEWAY_IMAGE:?set MCP_GATEWAY_IMAGE in .env}
+    # The gateway reads its configuration from the MCP_GATEWAY_CONFIG variable only. The shell
+    # loads it from the mounted file; a missing file stops the start (sh -e), and an empty or
+    # invalid one is refused by the gateway with a message naming the key.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - 'config="$$(cat /etc/mcp-gateway/config.json)"; MCP_GATEWAY_CONFIG="$$config" exec mcp-gateway'
+    configs:
+      - source: gateway-config
+        target: /etc/mcp-gateway/config.json
+    volumes:
+      # Every *_file path of the configuration points under this directory.
+      - ${MCP_GATEWAY_SECRETS_DIR:?set MCP_GATEWAY_SECRETS_DIR in .env}/gateway:/run/mcp-gateway/secrets:ro
+    ports:
+      # Loopback by default: TLS is terminated by the reverse proxy in front (README.md).
+      - "${MCP_GATEWAY_BIND:?set MCP_GATEWAY_BIND in .env}:8000"
+    networks: [edge, state]
+    # Above the stop budget (docs/configuration.md, "Shutdown"): the largest upstream
+    # read_timeout_seconds (requests in flight get that long), 20 s for the detached reads, the
+    # telemetry flush when OTLP is on, and a margin. 160 s fits the example configs (130 s). If
+    # you raise a read timeout, raise this too, or Docker kills the gateway before it has flushed.
+    stop_grace_period: 160s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      # Ready, not only alive: /readyz answers 503 while Redis is unreachable.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/readyz", timeout=3)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    <<: *hardening
+    # Pinned by the digest of its multi-arch index; bump the tag and the digest together.
+    image: redis:7.4.12-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    # The image's own user: its entrypoint then has nothing to chown or drop, so no capability
+    # is needed.
+    user: "999:999"
+    # The password is in the config file (a secret), never on the command line. Nothing is
+    # persisted: the state is rebuilt by the gateway (README.md, "Redis").
+    command:
+      - redis-server
+      - /run/secrets/redis-conf
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 256mb
+      - --maxmemory-policy
+      - noeviction
+    secrets:
+      - redis-conf
+    tmpfs:
+      - /data:size=16m,uid=999,gid=999,mode=0700
+    networks: [state]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 320M
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$(sed -n 's/^requirepass //p' /run/secrets/redis-conf)" redis-cli ping | grep -q PONG
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
