@@ -3,8 +3,8 @@
 replicaCount: 1
 
 image:
-  # Required, no default: the public pull location of the image is announced in the project README.
-  # Until then, build the image from the Dockerfile and push it to your own registry.
+  # Required, no default: the public image is ghcr.io/alien-intelligence/mcp-gateway (README, "Container image"),
+  # or your own build of the Dockerfile pushed to your registry.
   repository: ""
   # Defaults to the chart's appVersion. Ignored when digest is set.
   tag: ""

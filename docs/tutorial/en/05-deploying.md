@@ -4,7 +4,7 @@ The gateway is one container image. This chapter covers the two supported ways t
 
 ## 5.1 The image
 
-Write `<registry>/mcp-gateway:<version>` below as the image reference. The **public pull location is announced in the repository README** and not repeated here. Until then, build the image yourself from the repository root, and push it to your own registry (or use the local tag `mcp-gateway:local` on a single host). The three build arguments are required: the build refuses to run without them.
+The public image is **`ghcr.io/alien-intelligence/mcp-gateway`**, with the tags `X.Y.Z`, `X.Y`, `X` and `latest` (README, "Container image"); pin a version, or better its digest. Alternatively, build the image yourself from the repository root and push it to your own registry (or use the local tag `mcp-gateway:local` on a single host). The three build arguments are required: the build refuses to run without them.
 
 ```bash
 docker buildx build \
@@ -22,7 +22,7 @@ docker buildx build \
 docker run --read-only --cap-drop ALL --security-opt no-new-privileges \
   -e MCP_GATEWAY_CONFIG="$(cat config.json)" \
   -v "$PWD/secrets:/run/secrets:ro" \
-  -p 8000:8000 <registry>/mcp-gateway:<version>
+  -p 8000:8000 ghcr.io/alien-intelligence/mcp-gateway:<version>
 
 curl http://localhost:8000/healthz   # {"status":"ok"}: the process is up
 curl http://localhost:8000/readyz    # {"status":"ready"}; 503 {"status":"state_unavailable"} when the shared state cannot be reached
@@ -140,7 +140,7 @@ Neither `.env`, `config.json` nor `secrets/` belongs in version control.
 - **Changing the configuration:** compose mounts `config.json` and the gateway reads it once, at start; `docker compose up -d` does not restart a running gateway for a changed file. Apply a change with `docker compose restart gateway` (the same for a new `state-encryption-key` or webhook secret). The `static` resolver's mapping and key files are the exception: they are re-read without a restart.
 - **TLS:** the gateway is published on `127.0.0.1:8000` over plain HTTP. Put a reverse proxy on the host name of `public_url`; it must not buffer, compress or time out the event streams, which `nginx.example.conf` does (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
 - **Identity provider:** with the Keycloak template of chapter 6, `auth.issuer` is `https://<keycloak>/realms/<realm>`; keep the example's `scopes_advertised` and `identity` as they are.
-- **Image:** `MCP_GATEWAY_IMAGE` has no default and compose refuses to start without it. The public pull location is announced in the repository README; until then, build the image as in 5.1 and set `MCP_GATEWAY_IMAGE=mcp-gateway:local` (or your registry's reference).
+- **Image:** `MCP_GATEWAY_IMAGE` has no default and compose refuses to start without it. Set it to `ghcr.io/alien-intelligence/mcp-gateway:<version>`, or build the image as in 5.1 and set `MCP_GATEWAY_IMAGE=mcp-gateway:local` (or your registry's reference).
 
 Other facts:
 

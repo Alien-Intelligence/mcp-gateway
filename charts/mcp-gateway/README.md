@@ -14,7 +14,7 @@ A minimal two-replica `my-values.yaml` (the configuration keys are all required,
 
 ```yaml
 image:
-  repository: registry.example.com/mcp-gateway   # your mirror; the default is the release pipeline's registry
+  repository: ghcr.io/alien-intelligence/mcp-gateway   # or your own registry's copy
   tag: "<version>"   # a released version; the default is the chart appVersion
 replicaCount: 2
 config:            # the MCP_GATEWAY_CONFIG document, as YAML
@@ -83,7 +83,7 @@ The `public_url` clients use, the token audience and the route host must be the 
 | Key | Default | Meaning |
 |---|---|---|
 | `replicaCount` | `1` | Replicas (ignored while `autoscaling.enabled`). Above 1 needs Redis state. |
-| `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | none (required), chart `appVersion`, none, `IfNotPresent` | The image. `repository` has no default: the pull location of the release image is announced in the project README; until then build it from the Dockerfile (README, "Container image") and push it to your registry. With `digest` (`sha256:...`) set the Deployment pulls `repository@digest`, whatever `tag` is. |
+| `image.repository`, `image.tag`, `image.digest`, `image.pullPolicy` | none (required), chart `appVersion`, none, `IfNotPresent` | The image. `repository` has no default: set the public image `ghcr.io/alien-intelligence/mcp-gateway`, or your own build of the Dockerfile (README, "Container image") pushed to your registry. With `digest` (`sha256:...`) set the Deployment pulls `repository@digest`, whatever `tag` is. |
 | `imagePullSecrets` | `[]` | Pull secrets. |
 | `nameOverride`, `fullnameOverride` | `""` | Naming. |
 | `config` | `{}` | The `MCP_GATEWAY_CONFIG` document as an object. |

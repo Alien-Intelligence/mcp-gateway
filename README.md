@@ -77,7 +77,7 @@ Known incompatibility: authentik 2026.8 dynamic client registration requires a p
 
 ## Container image
 
-The release flow builds one image for `linux/amd64` and `linux/arm64` and pushes it to the project's own registry (`.gitlab-ci.yml`, internal release flow). Tags: `<version>` from `main`, `<version>-rc` from `staging`, `<version>-dev` from `dev`, plus the moving tags `latest`, `latest-staging` and `latest-dev`. Pin deployments to a version, or better to the digest. The public pull location of the release image will be announced here; until then, build the image yourself:
+The release flow builds one image for `linux/amd64` and `linux/arm64` and pushes it to the project's own registry (`.gitlab-ci.yml`, internal release flow). Tags: `<version>` from `main`, `<version>-rc` from `staging`, `<version>-dev` from `dev`, plus the moving tags `latest`, `latest-staging` and `latest-dev`. Releases from `main` are also published at **`ghcr.io/alien-intelligence/mcp-gateway`** with the tags `X.Y.Z`, `X.Y`, `X` and `latest`: the same digest as the release, copied after its vulnerability scan, never rebuilt. Pin deployments to a version, or better to the digest. You can also build the image yourself:
 
 ```sh
 docker buildx build \
@@ -95,7 +95,7 @@ The image runs as uid 1000 with no writable path: the gateway keeps its state in
 docker run --read-only --cap-drop ALL --security-opt no-new-privileges \
   -e MCP_GATEWAY_CONFIG="$(cat config.json)" \
   -v "$PWD/secrets:/run/secrets:ro" \
-  -p 8000:8000 <registry>/mcp-gateway:<version>
+  -p 8000:8000 ghcr.io/alien-intelligence/mcp-gateway:<version>
 
 curl http://localhost:8000/healthz   # {"status":"ok"}: the process is up
 curl http://localhost:8000/readyz    # {"status":"ready"}: the shared state answers; 503 drains the replica

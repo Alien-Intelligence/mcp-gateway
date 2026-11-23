@@ -29,7 +29,7 @@ curl -fsS http://127.0.0.1:8000/readyz                # {"status":"ready"}
 
 Neither `.env`, `config.json` nor `secrets/` belongs in version control.
 
-`MCP_GATEWAY_IMAGE` has no default: compose refuses to start without it. The pull location of the release image is announced in the project README. Until then, build the image from the repository's `Dockerfile` (from the repository root) and set `MCP_GATEWAY_IMAGE=mcp-gateway:local`:
+`MCP_GATEWAY_IMAGE` has no default: compose refuses to start without it. Set it to the public image `ghcr.io/alien-intelligence/mcp-gateway:<version>` (or its digest), or build the image from the repository's `Dockerfile` (from the repository root) and set `MCP_GATEWAY_IMAGE=mcp-gateway:local`:
 
 ```sh
 docker buildx build \

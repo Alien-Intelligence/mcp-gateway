@@ -4,7 +4,7 @@ La passerelle est une seule image de conteneur. Ce chapitre couvre les deux mani
 
 ## 5.1 L'image
 
-Écrivez `<registry>/mcp-gateway:<version>` ci-dessous comme référence d'image. L'**emplacement public de téléchargement est annoncé dans le README du dépôt** et n'est pas répété ici. D'ici là, construisez l'image vous-même depuis la racine du dépôt et déposez-la dans votre propre registre (ou utilisez l'étiquette locale `mcp-gateway:local` sur une seule machine). Les trois arguments de construction sont obligatoires : la construction refuse de s'exécuter sans eux.
+L'image publique est **`ghcr.io/alien-intelligence/mcp-gateway`**, avec les étiquettes `X.Y.Z`, `X.Y`, `X` et `latest` (README, « Container image ») ; fixez une version, ou mieux son empreinte (digest). Vous pouvez aussi construire l'image vous-même depuis la racine du dépôt et la déposer dans votre propre registre (ou utiliser l'étiquette locale `mcp-gateway:local` sur une seule machine). Les trois arguments de construction sont obligatoires : la construction refuse de s'exécuter sans eux.
 
 ```bash
 docker buildx build \
@@ -22,7 +22,7 @@ docker buildx build \
 docker run --read-only --cap-drop ALL --security-opt no-new-privileges \
   -e MCP_GATEWAY_CONFIG="$(cat config.json)" \
   -v "$PWD/secrets:/run/secrets:ro" \
-  -p 8000:8000 <registry>/mcp-gateway:<version>
+  -p 8000:8000 ghcr.io/alien-intelligence/mcp-gateway:<version>
 
 curl http://localhost:8000/healthz   # {"status":"ok"}: the process is up
 curl http://localhost:8000/readyz    # {"status":"ready"}; 503 {"status":"state_unavailable"} when the shared state cannot be reached
@@ -140,7 +140,7 @@ Ni `.env`, ni `config.json`, ni `secrets/` n'ont leur place dans le contrôle de
 - **Modifier la configuration :** compose monte `config.json` et la passerelle ne le lit qu'une fois, au démarrage ; `docker compose up -d` ne redémarre pas une passerelle en cours d'exécution pour un fichier modifié. Appliquez un changement avec `docker compose restart gateway` (il en va de même pour une nouvelle `state-encryption-key` ou un nouveau secret de webhook). Les fichiers de correspondance et de clés du resolver `static` font exception : ils sont relus sans redémarrage.
 - **TLS :** la passerelle est publiée sur `127.0.0.1:8000` en HTTP simple. Placez un proxy inverse sur le nom d'hôte de `public_url` ; il ne doit ni mettre en tampon, ni compresser, ni interrompre par délai les flux d'événements, ce que fait `nginx.example.conf` (`proxy_buffering off`, `gzip off`, `proxy_read_timeout 3600s`).
 - **Fournisseur d'identité :** avec le modèle Keycloak du chapitre 6, `auth.issuer` vaut `https://<keycloak>/realms/<realm>` ; conservez tels quels les `scopes_advertised` et `identity` de l'exemple.
-- **Image :** `MCP_GATEWAY_IMAGE` n'a pas de valeur par défaut et compose refuse de démarrer sans elle. L'emplacement public de téléchargement est annoncé dans le README du dépôt ; d'ici là, construisez l'image comme en 5.1 et définissez `MCP_GATEWAY_IMAGE=mcp-gateway:local` (ou la référence de votre registre).
+- **Image :** `MCP_GATEWAY_IMAGE` n'a pas de valeur par défaut et compose refuse de démarrer sans elle. Définissez-la à `ghcr.io/alien-intelligence/mcp-gateway:<version>`, ou construisez l'image comme en 5.1 et définissez `MCP_GATEWAY_IMAGE=mcp-gateway:local` (ou la référence de votre registre).
 
 Autres faits :
 
