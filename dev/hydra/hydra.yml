@@ -1,0 +1,44 @@
+# Development Hydra. The system secret comes from the environment
+# (SECRETS_SYSTEM, set from HYDRA_SYSTEM_SECRET in compose.yaml).
+
+# In-memory store: the stack is disposable, tokens and DCR clients do not need to
+# outlive a restart, and it removes a database from the dev stack.
+dsn: memory
+
+serve:
+  public:
+    host: 0.0.0.0
+    port: 4444
+  admin:
+    host: 0.0.0.0
+    port: 4445
+
+urls:
+  self:
+    issuer: http://localhost:14444
+    public: http://localhost:14444
+  login: http://localhost:13000/login
+  consent: http://localhost:13000/consent
+
+strategies:
+  access_token: jwt
+
+oidc:
+  dynamic_client_registration:
+    enabled: true
+
+oauth2:
+  pkce:
+    enforced_for_public_clients: true
+
+ttl:
+  access_token: 60s
+
+# Advertise the registration endpoint in the discovery documents.
+webfinger:
+  oidc_discovery:
+    client_registration_url: http://localhost:14444/oauth2/register
+
+log:
+  level: info
+  leak_sensitive_values: false

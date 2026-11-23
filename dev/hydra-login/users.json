@@ -1,0 +1,58 @@
+{
+  "alice@client-x.test": {
+    "subject": "usr-alice",
+    "email": "alice@client-x.test",
+    "org": "client-x",
+    "groups": [
+      "client-x"
+    ]
+  },
+  "bob@client-y.test": {
+    "subject": "usr-bob",
+    "email": "bob@client-y.test",
+    "org": "client-y",
+    "groups": [
+      "client-y"
+    ]
+  },
+  "nomap@client-z.test": {
+    "subject": "usr-nomap",
+    "email": "nomap@client-z.test",
+    "org": "client-z",
+    "groups": [
+      "client-z"
+    ]
+  },
+  "carol@client-x.test": {
+    "subject": "usr-carol",
+    "email": "carol@client-x.test",
+    "org": "client-x",
+    "groups": [
+      "client-x"
+    ]
+  },
+  "revoked@client-r.test": {
+    "subject": "usr-revoked",
+    "email": "revoked@client-r.test",
+    "org": "client-r",
+    "groups": [
+      "client-r"
+    ]
+  },
+  "unpaid@client-p.test": {
+    "subject": "usr-unpaid",
+    "email": "unpaid@client-p.test",
+    "org": "client-p",
+    "groups": [
+      "client-p"
+    ]
+  },
+  "dave@client-x.test": {
+    "subject": "usr-dave",
+    "email": "dave@client-x.test",
+    "org": "client-x",
+    "groups": [
+      "client-x"
+    ]
+  }
+}

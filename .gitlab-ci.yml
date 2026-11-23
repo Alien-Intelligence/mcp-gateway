@@ -1,0 +1,307 @@
+# GitLab CI/CD for mcp-gateway.
+# Tests, lint, security scans, and the image: built for linux/amd64 and linux/arm64, pushed and scanned
+# from the release flow. Nothing deploys the image from here yet, so there is no gitops-update job.
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  # `ref: main` is the house convention: every repository of the platform includes ci-scripts at main
+  # (47 includes checked), which is how a fix to a shared template reaches all of them.
+  - project: 'alias3/datastreaming/ci-scripts'
+    ref: main
+    file:
+      - '/templates/stages.gitlab-ci.yml'
+      - '/templates/jobs/release.gitlab-ci.yml'
+      - '/templates/jobs/python-test.gitlab-ci.yml'
+      - '/templates/jobs/python-lint.gitlab-ci.yml'
+      - '/templates/jobs/docker.gitlab-ci.yml'
+  - local: ci/chart.gitlab-ci.yml
+
+# One pipeline per change: a branch push is skipped while the branch has an open merge request
+# (its merge request pipeline runs instead).
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS && $CI_PIPELINE_SOURCE == "push"'
+      when: never
+    - when: always
+
+variables:
+  REGISTRY: "rg.fr-par.scw.cloud/ns-data-streaming"
+  REGISTRY_HOST: "rg.fr-par.scw.cloud"
+  IMAGE_NAME: "mcp-gateway"
+  # Versioning: the release bot bumps after merge (ci-scripts docs/VERSIONING.md)
+  VBUMP_RELEASE_BRANCH: "dev"
+  GIT_SUBMODULE_STRATEGY: none
+  PYTHON_VERSION: "3.12"
+  PYTHON_EXTRAS: "--extra dev"
+  WITH_TYPE_CHECK: "true"
+  LINT_DIRS: "src/ tests/ scripts/ dev/"
+  # Unit tests only: the integration, e2e_stub (job e2e-stub) and e2e (local, docs/development.md) suites need
+  # the compose stack.
+  PYTEST_MARKER: "not e2e and not e2e_stub and not integration"
+
+# The stack and the harness, end to end, on every push that changes code, tests, the stack or the
+# lockfile: real Keycloak and Hydra, the gateways, the credential backends, the telemetry
+# collector and the fault-injection upstream stub (compose stub target). The harness
+# runs in a container on the host network of the Docker daemon (the dind service), so the
+# localhost issuers resolve as on a laptop. The steps live in scripts/ci_e2e_stub.sh, which also
+# runs inside a local docker:dind container (docs/development.md): run it there before pushing, CI minutes
+# are paid. The stub target holds fake keys only, so the artifacts hold no secret.
+.e2e-changes: &e2e-changes
+  - src/**/*
+  - tests/**/*
+  - scripts/**/*
+  - dev/**/*
+  - deploy/**/*
+  - compose*.yaml
+  - Dockerfile*
+  - pyproject.toml
+  - uv.lock
+  - .gitlab-ci.yml
+
+.dind:
+  stage: test
+  tags:
+    - saas-linux-small-amd64
+  image: docker:28.3.3-cli@sha256:0135662b510037ea581d99c2e5929c5e01185139c0b86986a418bd4da0b98a44
+  services:
+    - name: docker:28.3.3-dind@sha256:a56b3bdde89315ed2cc0e4906e582b5033d93bf20d9cb9510c2cdd4e7f7690b1
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    ARTIFACTS_DIR: artifacts
+    UP_TIMEOUT_SECONDS: "420"
+  before_script:
+    - for attempt in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
+    - docker info >/dev/null
+    - docker version
+    - docker compose version
+
+e2e-stub:
+  extends: .dind
+  variables:
+    RUN_TIMEOUT_SECONDS: "900"
+  timeout: 25m
+  script:
+    - sh scripts/ci_e2e_stub.sh
+  artifacts:
+    when: always
+    expire_in: 1 week
+    paths:
+      - artifacts/
+    reports:
+      junit: artifacts/junit.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *e2e-changes
+    - if: '$CI_COMMIT_BRANCH'
+      changes: *e2e-changes
+
+# The real-dev suite (pytest -m e2e): the same stack against the real dev MCP server and the Alien
+# dev platform, which meters the calls. Merge requests and the default branch only, never a push
+# to dev: it takes about a quarter of an hour and bills a few dev calls. The inputs are CI
+# variables (names in docs/development.md, "CI"); the personas' keys, the sponsor service account's key and
+# the fixture are File-type variables, protected, so the job gets them on protected refs only.
+# One run at a time: the suite reads each call back as the single new event in the shared
+# dev feeds. The artifacts hold evidence (ids, claims) and the compose logs: developers only.
+e2e-dev:
+  extends: .dind
+  variables:
+    # The real-dev suite takes about 30 min (each billed call waits for its event in the feed).
+    RUN_TIMEOUT_SECONDS: "2700"
+  timeout: 55m
+  resource_group: e2e-dev
+  script:
+    - sh scripts/ci_e2e_dev.sh
+  artifacts:
+    when: always
+    access: developer
+    expire_in: 1 week
+    paths:
+      - artifacts/
+    reports:
+      junit: artifacts/junit.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      changes: *e2e-changes
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes: *e2e-changes
+
+# The image. The shared `docker-build` job (ci-scripts docker.gitlab-ci.yml) builds with Kaniko, which
+# builds one architecture per job and publishes no SBOM or provenance, so it is redeclared here: GitLab
+# merges this over the shared job, which keeps its `rules:` (the post-merge release hold: on the
+# release branch only the release bot's commit publishes, with the branch -> tag scheme the other
+# images use) and replaces what runs. Three jobs, in this order, all under those rules:
+#   docker-build   buildx in the dind service, emulating arm64 with QEMU, pushes both architectures BY
+#                  DIGEST ONLY (no tag) with the SBOM and provenance attestations;
+#   image-scan     trivy on that digest;
+#   image-publish  only when the scan passed: the version tag and the moving tag are applied to the
+#                  digest, and an existing version tag that points elsewhere is never overwritten.
+# A failed scan therefore leaves no tagged image, and a rerun cannot move a released tag.
+# The steps live in scripts/ci_image_build.sh, ci_image_scan.sh and ci_image_publish.sh, which also run
+# on a laptop (README, "Container image"). The toolchain (job images, BuildKit, binfmt) is pinned by
+# digest in this file and in ci_image_build.sh.
+docker-build:
+  extends: .dind
+  stage: build
+  timeout: 45m
+  script:
+    - sh scripts/ci_image_build.sh
+  artifacts:
+    expire_in: 1 week
+    paths:
+      # IMAGE_REF (name@digest), IMAGE_TAG and MOVING_TAG for the scan and publish jobs.
+      - build.env
+
+# The scan of exactly the digest that was pushed, both architectures. It fails on a HIGH or CRITICAL
+# vulnerability that has a fix; unfixed findings stay in the report. A failure means: bump the pinned
+# base image in the Dockerfile, do not retry. The CycloneDX SBOM per architecture is the job's artifact.
+# `rules:` come from the shared job, so the scan runs whenever the build does.
+image-scan:
+  extends: docker-build
+  stage: build
+  needs: [docker-build]
+  timeout: 20m
+  image:
+    name: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+    entrypoint: [""]
+  services: []
+  before_script: []
+  variables:
+    ARTIFACTS_DIR: artifacts
+  script:
+    - set -a && . ./build.env && set +a
+    - sh scripts/ci_image_scan.sh
+  artifacts:
+    when: always
+    expire_in: 90 days
+    paths:
+      - artifacts/
+    reports:
+      cyclonedx:
+        - artifacts/sbom-amd64.cdx.json
+        - artifacts/sbom-arm64.cdx.json
+
+# The tags, applied to the scanned digest. `needs` both jobs: it runs only when the scan succeeded.
+# One at a time, so two pipelines never race for the moving tag.
+image-publish:
+  extends: docker-build
+  stage: build
+  needs: [docker-build, image-scan]
+  timeout: 10m
+  resource_group: image-publish
+  script:
+    - set -a && . ./build.env && set +a
+    - sh scripts/ci_image_publish.sh
+
+# The public image: the scanned release digest copied, never rebuilt, from our registry to GHCR with
+# the tags X.Y.Z (written once), X.Y, X and latest (scripts/ci_image_ghcr.sh). Only on `main`, in the
+# pipelines that built the image (same `changes:` as the shared docker-build rule), and only when the
+# protected variables GHCR_USERNAME and GHCR_TOKEN exist (a classic token with write:packages: GHCR
+# takes no other kind); until then the job does not appear. GitHub creates the package private: it is
+# made public once by hand (docs/development.md, "Public image").
+ghcr-publish:
+  extends: docker-build
+  stage: publish
+  needs: [docker-build, image-scan, image-publish]
+  timeout: 15m
+  resource_group: ghcr-publish
+  variables:
+    GHCR_IMAGE: ghcr.io/alien-intelligence/mcp-gateway
+  script:
+    - set -a && . ./build.env && set +a
+    - sh scripts/ci_image_ghcr.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $GHCR_TOKEN && $GHCR_USERNAME'
+      changes:
+        - Dockerfile
+        - "**/*.py"
+        - "**/*.ts"
+        - "**/*.tsx"
+        - "**/*.js"
+        - "**/*.jsx"
+        - "**/pyproject.toml"
+        - "**/uv.lock"
+        - "**/package.json"
+        - "**/yarn.lock"
+        - .gitlab-ci.yml
+
+# The full history, not only the pushed commits, with the repository's gitleaks config: `main` is
+# mirrored to a public repository, so a secret anywhere in its history is published. GitLab's
+# Secret-Detection job above scans the pushed range with GitLab's ruleset; this one is the gate the
+# mirror relies on. A finding fails the pipeline: remove the secret (and rotate it), never allowlist it.
+gitleaks:
+  stage: test
+  image:
+    name: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - gitleaks git . --config .gitleaks.toml --redact --no-banner --exit-code 1
+
+# The full history against a deny-list of customer names, internal hosts and personal names: `main` is
+# published to a public repository (job publish-github), so a string anywhere in its history is
+# published, and `dev` is where that history is written. The deny-list is
+# itself sensitive and is not in the repository: it is the File-type, protected CI variable
+# HISTORY_DENYLIST_FILE (one Perl regex per line). The job fails when the variable is missing (a
+# check that is skipped is not a pass: on a merge request from an unprotected branch it is not
+# provided, so the job fails there too) and on any hit, printing the commit and the pattern, never the
+# matched line (scripts/ci_history_denylist.sh).
+# It is a blocking gate (allow_failure: false) on the `dev` and `main` branches and on merge requests
+# into `main` (from dev or staging, protected): a string caught on dev never reaches main (the history
+# was rewritten clean on 2026-11-23). Merge requests into dev come from unprotected feature branches,
+# which do not get the protected deny-list: dev itself is scanned once they are merged. Its own
+# tests (a planted string must be found) run in `history-denylist-tests` on every pipeline, so a change
+# to the script is
+# tested where it is made; the generic unit-test image has no git, so they are skipped there.
+.history-denylist-base:
+  stage: test
+  image:
+    # uv with Python 3.12, pinned by the digest of the multi-arch index (as the chart job).
+    name: ghcr.io/astral-sh/uv:0.8.13-python3.12-trixie-slim@sha256:f0c3f034ab7f061c47cd402b5575ce222fcd3a6cbc49ae2b3f02201b5a56f2d5
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: 0
+    UV_FROZEN: "1"
+    UV_LINK_MODE: copy
+  before_script:
+    # openssh-client: ci_publish_github.sh (job publish-github and its tests) checks for ssh first.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl openssh-client
+
+history-denylist-tests:
+  extends: .history-denylist-base
+  script:
+    - uv run --frozen --extra dev pytest tests/unit/test_history_denylist.py tests/unit/test_publish_github.py -q
+
+history-denylist:
+  extends: .history-denylist-base
+  needs: [history-denylist-tests]
+  script:
+    - sh scripts/ci_history_denylist.sh
+  allow_failure: false
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|dev)$/'
+
+# The public GitHub repository receives `main` and the release tags reachable from it, from here only
+# (no push mirror: a mirror also pushed tags cut on dev). scripts/ci_publish_github.sh copies exactly
+# those refs into a scratch repository, scans them with the history deny-list (any hit stops it), and
+# pushes them with a repository-scoped GitHub deploy key over SSH with GitHub's host keys pinned, as a
+# plain push: a diverged or rewritten GitHub history is refused, never overwritten. The deploy key is
+# the protected File variable GITHUB_PUBLISH_DEPLOY_KEY (base64 of the private key, masked), so only
+# protected refs get it. On a tag pipeline a tag that is not on main publishes nothing and succeeds;
+# release tags are cut on dev and reach GitHub with the main pipeline that first contains them.
+publish-github:
+  extends: .history-denylist-base
+  stage: publish
+  needs: [history-denylist-tests, gitleaks]
+  variables:
+    GIT_DEPTH: 0
+    GITHUB_PUBLISH_REPO: git@github.com:Alien-Intelligence/mcp-gateway.git
+  script:
+    - sh scripts/ci_publish_github.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG =~ /^v/'

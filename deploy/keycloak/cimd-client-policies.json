@@ -1,0 +1,139 @@
+{
+  "clientProfiles": {
+    "profiles": [
+      {
+        "name": "pkce-s256",
+        "description": "Requires PKCE with S256 on every authorization request of the client",
+        "executors": [
+          {
+            "executor": "pkce-enforcer",
+            "configuration": {
+              "auto-configure": "true"
+            }
+          }
+        ]
+      },
+      {
+        "name": "code-flow-only",
+        "description": "Refuses a client that enables the implicit or hybrid flow or the resource owner password grant",
+        "executors": [
+          {
+            "executor": "reject-implicit-grant",
+            "configuration": {
+              "auto-configure": "false"
+            }
+          },
+          {
+            "executor": "reject-ropc-grant",
+            "configuration": {
+              "auto-configure": "false"
+            }
+          }
+        ]
+      },
+      {
+        "name": "refuse",
+        "description": "Refuses the request",
+        "executors": [
+          {
+            "executor": "reject-request",
+            "configuration": {}
+          }
+        ]
+      },
+      {
+        "name": "claude-cimd",
+        "description": "EXPERIMENTAL (Keycloak --features=cimd): Claude (claude.ai, Desktop, mobile, Cowork) and Claude Code identified by their Client ID Metadata Documents on claude.ai",
+        "executors": [
+          {
+            "executor": "client-id-metadata-document",
+            "configuration": {
+              "cimd-allow-http-scheme": "false",
+              "cimd-allow-permitted-domains": [
+                "claude.ai",
+                "localhost",
+                "127.0.0.1"
+              ],
+              "cimd-restrict-same-domain": "false",
+              "cimd-required-properties": [],
+              "only-allow-confidential-client": "false",
+              "accept-public-client-with-confidential-client-only-grant": "true"
+            }
+          },
+          {
+            "executor": "pkce-enforcer",
+            "configuration": {
+              "auto-configure": "true"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "clientPolicies": {
+    "policies": [
+      {
+        "name": "anonymous-registration",
+        "description": "Clients created by anonymous dynamic registration must use PKCE S256 and may not enable the implicit flow or the password grant",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-updater-context",
+            "configuration": {
+              "is-negative-logic": "false",
+              "update-client-source": [
+                "ByAnonymous"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "pkce-s256",
+          "code-flow-only"
+        ]
+      },
+      {
+        "name": "authorization-code-and-refresh-only",
+        "description": "The token endpoint of this realm grants authorization_code and refresh_token only, for every client",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "grant-type",
+            "configuration": {
+              "is-negative-logic": "true",
+              "grant_types": [
+                "authorization_code",
+                "refresh_token"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "refuse"
+        ]
+      },
+      {
+        "name": "claude-cimd",
+        "description": "EXPERIMENTAL: a client_id that is an https URL on claude.ai is a Client ID Metadata Document",
+        "enabled": true,
+        "conditions": [
+          {
+            "condition": "client-id-uri",
+            "configuration": {
+              "is-negative-logic": "false",
+              "client-id-uri-scheme": [
+                "https"
+              ],
+              "client-id-uri-allow-permitted-domains": [
+                "claude.ai"
+              ]
+            }
+          }
+        ],
+        "profiles": [
+          "claude-cimd"
+        ]
+      }
+    ]
+  }
+}

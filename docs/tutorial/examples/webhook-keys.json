@@ -1,0 +1,4 @@
+{
+  "alice@example.com": {"api_key_file": "alice.key", "upstream": null, "labels": {"client": "example-publisher"}, "ttl_seconds": 300},
+  "bob@example.com": {"api_key_file": "bob.key", "upstream": "main", "labels": {"client": "example-publisher"}, "ttl_seconds": null}
+}
