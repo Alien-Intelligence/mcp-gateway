@@ -1,6 +1,6 @@
 [project]
 name = "mcp-gateway"
-version = "0.7.1"
+version = "0.8.0"
 description = "Alien MCP Gateway: an OAuth resource server in front of Alien MCP servers that swaps the caller's identity for an Alien API key"
 readme = "README.md"
 license = "MIT"
