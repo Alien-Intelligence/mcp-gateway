@@ -234,7 +234,8 @@ gitleaks:
     UV_FROZEN: "1"
     UV_LINK_MODE: copy
   before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl
+    # openssh-client: ci_publish_github.sh (job publish-github and its tests) checks for ssh first.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl openssh-client
 
 history-denylist-tests:
   extends: .history-denylist-base
@@ -266,8 +267,6 @@ publish-github:
   variables:
     GIT_DEPTH: 0
     GITHUB_PUBLISH_REPO: git@github.com:Alien-Intelligence/mcp-gateway.git
-  before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git perl openssh-client
   script:
     - sh scripts/ci_publish_github.sh
   rules:
