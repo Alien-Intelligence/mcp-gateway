@@ -59,8 +59,9 @@ async def test_identity_from_userinfo_resolves_the_key_the_stub_sees(
     assert identity_claims_in_token(grant.claims) == [], IDENTITY_CLAIMS
 
     seen = echoed(await post(http, provider, grant.token, tool_call("echo")))
+    # The stub names the persona whose key it received and echoes that name in place of the key.
     assert seen["persona"] == who
-    assert seen["headers"]["authorization"] == f"Bearer {settings.read_key(who)}"
+    assert seen["headers"]["authorization"] == f"persona:{who}"
     assert grant.token not in str(seen["headers"])
     evidence.update(provider=provider.name, persona=seen["persona"])
 
