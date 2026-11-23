@@ -209,16 +209,19 @@ gitleaks:
     - gitleaks git . --config .gitleaks.toml --redact --no-banner --exit-code 1
 
 # The full history against a deny-list of customer names, internal hosts and personal names: `main` is
-# mirrored to a public repository, so a string anywhere in its history is published. The deny-list is
+# mirrored to a public repository, so a string anywhere in its history is published, and `dev` is
+# where that history is written. The deny-list is
 # itself sensitive and is not in the repository: it is the File-type, protected CI variable
 # HISTORY_DENYLIST_FILE (one Perl regex per line). The job fails when the variable is missing (a
 # check that is skipped is not a pass: on a merge request from an unprotected branch it is not
 # provided, so the job fails there too) and on any hit, printing the commit and the pattern, never the
 # matched line (scripts/ci_history_denylist.sh).
-# It is a blocking gate (allow_failure: false) that runs only on `main` and on merge requests that
-# target `main`, because that is where the rewritten history will be: the history of `dev` still holds
-# strings the rewrite will remove, so the job WOULD fail there today. Its own tests (a planted string
-# must be found) run in `history-denylist-tests` on every pipeline, so a change to the script is
+# It is a blocking gate (allow_failure: false) on the `dev` and `main` branches and on merge requests
+# into `main` (from dev or staging, protected): a string caught on dev never reaches main (the history
+# was rewritten clean on 2026-11-23). Merge requests into dev come from unprotected feature branches,
+# which do not get the protected deny-list: dev itself is scanned once they are merged. Its own
+# tests (a planted string must be found) run in `history-denylist-tests` on every pipeline, so a change
+# to the script is
 # tested where it is made; the generic unit-test image has no git, so they are skipped there.
 .history-denylist-base:
   stage: test
@@ -246,4 +249,5 @@ history-denylist:
   allow_failure: false
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH =~ /^(main|dev)$/'
+
