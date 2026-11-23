@@ -18,6 +18,8 @@ CONFIG_ENV_VAR = "MCP_GATEWAY_CONFIG"
 # The one schema version this gateway reads. A new version is a new number, never a silent change
 # of meaning under the same one (docs/protocol.md, docs/config.schema.v1.json).
 CONFIG_VERSION = 1
+# The largest userinfo document the gateway will buffer (1 MiB).
+MAX_USERINFO_RESPONSE_BYTES = 1_048_576
 
 # Asymmetric algorithms only: HS* would let anyone holding the public key forge tokens.
 ALLOWED_ALGORITHMS = frozenset(
@@ -84,6 +86,55 @@ class IdentityPathsConfig(_Model):
         return _require_dotted_path(value, what="identity claim path")
 
 
+class UserinfoConfig(_Model):
+    """The OIDC userinfo call (OIDC Core 5.3) for an IdP whose access tokens carry only ``sub``.
+
+    With it set, ``email``, ``email_verified``, ``organization`` and ``groups`` are read from the
+    userinfo document and nowhere else; the subject is still read from the verified token.
+    """
+
+    # The one URL that receives users' bearer tokens: named by the operator, never discovered.
+    url: str
+    # The request carries the user's bearer token, so the URL must be https. True lifts that for
+    # plain http and exists for dev and test stacks only: false in any real deployment.
+    allow_insecure_http: bool
+    # Per attempt, covering connect, send and read.
+    timeout_seconds: float = Field(gt=0)
+    max_attempts: int = Field(ge=1, le=10)
+    # Wall-clock ceiling for the whole lookup: every attempt and every backoff pause.
+    total_timeout_seconds: float = Field(gt=0)
+    backoff_base_seconds: float = Field(gt=0)
+    backoff_max_seconds: float = Field(gt=0)
+    # An entry lives this long, or until the token's own expiry when that comes first.
+    cache_ttl_seconds: float = Field(gt=0)
+    max_response_bytes: int = Field(ge=1, le=MAX_USERINFO_RESPONSE_BYTES)
+    # Required with ``state.type = memory``, null with ``redis`` (entries expire by TTL there).
+    max_entries: int | None = Field(ge=1)
+
+    @field_validator("url")
+    @classmethod
+    def _userinfo_url(cls, value: str) -> str:
+        _require_http_url(value, what="auth.userinfo.url")
+        parts = urlsplit(value)
+        if parts.username is not None or parts.password is not None:
+            raise ValueError("auth.userinfo.url must not carry credentials")
+        if parts.fragment:
+            raise ValueError("auth.userinfo.url must not carry a fragment")
+        return value
+
+    @model_validator(mode="after")
+    def _bounds_and_scheme(self) -> Self:
+        if urlsplit(self.url).scheme != "https" and not self.allow_insecure_http:
+            raise ValueError(
+                "auth.userinfo.url must be https (allow_insecure_http=true is for dev and test only)"
+            )
+        if self.total_timeout_seconds <= self.timeout_seconds:
+            raise ValueError("total_timeout_seconds must be > timeout_seconds")
+        if self.backoff_max_seconds < self.backoff_base_seconds:
+            raise ValueError("backoff_max_seconds must be >= backoff_base_seconds")
+        return self
+
+
 class AuthConfig(_Model):
     issuer: str
     jwks_uri: str
@@ -97,6 +148,20 @@ class AuthConfig(_Model):
     jwks_max_stale_seconds: float = Field(ge=0)
     jwks_fetch_timeout_seconds: float = Field(gt=0)
     identity: IdentityPathsConfig
+    # null reads every claim from the access token (the default behaviour).
+    userinfo: UserinfoConfig | None
+
+    @model_validator(mode="after")
+    def _userinfo_has_something_to_read(self) -> Self:
+        paths = self.identity
+        if self.userinfo is not None and (
+            paths.email is None and paths.organization is None and paths.groups is None
+        ):
+            raise ValueError(
+                "auth.userinfo is set but auth.identity.email, organization and groups are all "
+                "null: nothing would be read from it"
+            )
+        return self
 
     @field_validator("issuer")
     @classmethod
@@ -652,6 +717,8 @@ class GatewayConfig(_Model):
     def _bounds_match_the_state_backend(self) -> Self:
         """The in-process bounds belong to ``memory`` only; none is silently ignored."""
         bounds = {"sessions.max_entries": self.sessions.max_entries}
+        if self.auth.userinfo is not None:
+            bounds["auth.userinfo.max_entries"] = self.auth.userinfo.max_entries
         if self.resolver_cache is not None:
             bounds["resolver_cache.max_entries"] = self.resolver_cache.max_entries
         for name, value in bounds.items():

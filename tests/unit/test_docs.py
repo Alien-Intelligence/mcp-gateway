@@ -68,7 +68,7 @@ def test_the_protocol_contract_lists_every_gateway_code_with_its_constant() -> N
         if name.isupper() and isinstance(value, int) and -31999 <= value <= -31000
     }
     assert documented == defined
-    assert sorted(defined) == list(range(-31014, -31000))
+    assert sorted(defined) == list(range(-31015, -31000))
 
 
 ROOT = DOC.parents[1]

@@ -4,8 +4,10 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
 
 import anyio
 import httpx
@@ -23,11 +25,19 @@ from mcp_gateway.auth import (
     InvalidTokenError,
     JwksUnavailableError,
     TokenVerifier,
+    token_expiry,
 )
 from mcp_gateway.closing import close_all
-from mcp_gateway.config import GatewayConfig
+from mcp_gateway.config import ConfigError, GatewayConfig
 from mcp_gateway.detached import DetachedReads
-from mcp_gateway.identity import Identity, IdentityError, build_identity
+from mcp_gateway.identity import (
+    Identity,
+    IdentityError,
+    Profile,
+    assemble_identity,
+    build_identity,
+    read_subject,
+)
 from mcp_gateway.jsonrpc import (
     DENIED,
     DENY_CODES,
@@ -41,6 +51,7 @@ from mcp_gateway.jsonrpc import (
     RESOLVER_UNAVAILABLE,
     SESSION_NOT_FOUND,
     STATE_UNAVAILABLE,
+    USERINFO_UNAVAILABLE,
     BodyKind,
     RpcInfo,
     check_mcp_headers,
@@ -57,9 +68,12 @@ from mcp_gateway.proxy import (
     watching_disconnect,
 )
 from mcp_gateway.ratelimit import (
+    BucketSpec,
     RateLimiter,
     bucket_specs,
     build_rate_limiter,
+    organization_bucket,
+    subject_bucket,
 )
 from mcp_gateway.resolver import (
     CachingResolver,
@@ -81,6 +95,15 @@ from mcp_gateway.state import (
 )
 from mcp_gateway.telemetry import Telemetry, build_telemetry
 from mcp_gateway.tool_policy import EffectivePolicy, ToolPolicy
+from mcp_gateway.userinfo import (
+    UserinfoClaimsError,
+    UserinfoClient,
+    UserinfoRejectedError,
+    UserinfoResponseError,
+    UserinfoService,
+    UserinfoSubjectMismatchError,
+    UserinfoUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +130,9 @@ def _quoted(value: str) -> str:
 
 RESOLVER_UNAVAILABLE_MESSAGE = "Credentials are temporarily unavailable. Retry shortly."
 RESOLVER_RETRY_AFTER_SECONDS = 5
+USERINFO_UNAVAILABLE_MESSAGE = "The identity provider is temporarily unavailable. Retry shortly."
+USERINFO_RETRY_AFTER_SECONDS = 5
+USERINFO_INVALID_MESSAGE = "The gateway could not establish the identity of this user."
 STATE_UNAVAILABLE_MESSAGE = "The gateway's shared state is unavailable. Retry shortly."
 STATE_RETRY_AFTER_SECONDS = 5
 
@@ -186,6 +212,32 @@ def _bearer_token(request: Request) -> str | None:
     return token if scheme.lower() == "bearer" and token else None
 
 
+@dataclass(frozen=True)
+class Complete:
+    """A verified token that carries the whole identity (no userinfo call)."""
+
+    identity: Identity
+
+    @property
+    def subject(self) -> str:
+        return self.identity.subject
+
+
+@dataclass(frozen=True)
+class NeedsUserinfo:
+    """A verified token whose subject is known; the rest of the identity is at the userinfo URL."""
+
+    subject: str
+    # The literal ``sub`` and ``exp`` of the verified token, the token itself and its claims.
+    token_subject: str
+    expires_at: float
+    token: str
+    claims: Mapping[str, Any]
+
+
+type Authenticated = Complete | NeedsUserinfo
+
+
 class Gateway:
     def __init__(
         self,
@@ -196,8 +248,10 @@ class Gateway:
         sessions: SessionStore,
         telemetry: Telemetry,
         rate_limiter: RateLimiter | None,
+        userinfo: UserinfoService | None,
     ) -> None:
         self._config = config
+        self._userinfo_service = userinfo
         self._rate_limiter = rate_limiter
         self._telemetry = telemetry
         self._origins = OriginPolicy(config.policies.allowed_origins)
@@ -244,14 +298,16 @@ class Gateway:
             headers={"WWW-Authenticate": challenge},
         )
 
-    async def _authenticate(self, request: Request, audit: AuditRecord) -> Identity | Response:
+    async def _authenticate(self, request: Request, audit: AuditRecord) -> Authenticated | Response:
         token = _bearer_token(request)
         if token is None:
             audit.emit(status=401, outcome="unauthenticated")
             return self._unauthorized("missing bearer token", token_presented=False)
         try:
             claims = await self._verifier.verify(token)
-            return build_identity(claims, self._config.auth.identity)
+            if self._userinfo_service is None:
+                return Complete(build_identity(claims, self._config.auth.identity))
+            return self._needs_userinfo(token, claims)
         except InvalidTokenError as exc:
             audit.emit(status=401, outcome="unauthenticated")
             return self._unauthorized(exc.description, token_presented=True)
@@ -273,16 +329,25 @@ class Gateway:
                 headers={"Retry-After": str(JWKS_RETRY_AFTER_SECONDS)},
             )
 
+    def _needs_userinfo(self, token: str, claims: Mapping[str, Any]) -> NeedsUserinfo:
+        """What the userinfo call needs from a verified token: its literal ``sub`` (OIDC Core 5.3.4)."""
+        token_subject = claims.get("sub")
+        if not isinstance(token_subject, str) or not token_subject:
+            raise InvalidTokenError("token is missing a required claim")
+        return NeedsUserinfo(
+            subject=read_subject(claims, self._config.auth.identity),
+            token_subject=token_subject,
+            expires_at=token_expiry(claims),
+            token=token,
+            claims=claims,
+        )
+
     async def _rate_limit(
-        self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, *, subject_key: str
+        self, buckets: list[BucketSpec], rpc: RpcInfo, audit: AuditRecord
     ) -> Response | None:
-        """Take a token from every applicable bucket, or answer why not. Never calls the resolver."""
-        limits = self._config.policies.rate_limits
+        """Take a token from every one of ``buckets`` or answer why not. Never calls the resolver."""
         limiter = self._rate_limiter
-        if limits is None or limiter is None:
-            return None
-        buckets = bucket_specs(limits, subject_key=subject_key, organization=identity.organization)
-        if not buckets:
+        if limiter is None or not buckets:
             return None
         try:
             decision = await limiter.acquire(buckets)
@@ -295,6 +360,127 @@ class Gateway:
         response = _rate_limited_response(rpc, decision.retry_after_seconds)
         audit.emit(status=response.status_code, outcome="rate_limited")
         return response
+
+    async def _identify(
+        self,
+        auth: Authenticated,
+        rpc: RpcInfo,
+        audit: AuditRecord,
+        receive: Receive,
+        *,
+        subject_key: str,
+    ) -> Identity | Response:
+        """Rate limit and, with userinfo, complete the identity: the order is part of the contract.
+
+        Without userinfo the subject and organization buckets are taken in one atomic step. With it
+        the organization is unknown until the userinfo call, so the subject bucket comes first (a
+        flood from one token or subject never reaches the IdP), then the userinfo call, then the
+        organization bucket. A request the organization bucket refuses has spent its subject token.
+        """
+        limits = self._config.policies.rate_limits
+        if isinstance(auth, Complete):
+            buckets = (
+                []
+                if limits is None
+                else bucket_specs(
+                    limits, subject_key=subject_key, organization=auth.identity.organization
+                )
+            )
+            limited = await self._rate_limit(buckets, rpc, audit)
+            return auth.identity if limited is None else limited
+        subject_buckets = (
+            [] if limits is None else [subject_bucket(limits, subject_key=subject_key)]
+        )
+        limited = await self._rate_limit(subject_buckets, rpc, audit)
+        if limited is not None:
+            return limited
+        identity = await self._userinfo(auth, rpc, audit, receive)
+        if isinstance(identity, Response):
+            return identity
+        audit.organization = identity.organization
+        organization = (
+            None
+            if limits is None
+            else organization_bucket(limits, organization=identity.organization)
+        )
+        limited = await self._rate_limit([] if organization is None else [organization], rpc, audit)
+        return identity if limited is None else limited
+
+    async def _userinfo(
+        self, auth: NeedsUserinfo, rpc: RpcInfo, audit: AuditRecord, receive: Receive
+    ) -> Identity | Response:
+        service = self._userinfo_service
+        if service is None:
+            raise RuntimeError("a userinfo lookup was asked for without auth.userinfo")
+        reply_id = rpc.id if rpc.expects_reply else None
+        step = audit.observer.begin_userinfo()
+        cache: str = "none"
+
+        def remember(result: str) -> None:
+            nonlocal cache
+            cache = result
+
+        async def lookup() -> Profile:
+            return await service.profile(
+                auth.token, auth.token_subject, auth.expires_at, on_cache_result=remember
+            )
+
+        try:
+            # A client that leaves must not keep a (possibly slow) IdP call running.
+            profile, gone = await watching_disconnect(receive, lookup)
+        except UserinfoRejectedError:
+            step.finish(cache=cache, result="rejected")
+            logger.info("the identity provider rejected the access token at the userinfo URL")
+            return self._userinfo_refused(
+                audit, "userinfo_rejected", "token rejected by the identity provider"
+            )
+        except UserinfoSubjectMismatchError:
+            step.finish(cache=cache, result="subject_mismatch")
+            logger.warning("the userinfo subject is not the token subject")
+            return self._userinfo_refused(
+                audit, "userinfo_subject_mismatch", "userinfo does not match the token subject"
+            )
+        except UserinfoClaimsError as exc:
+            step.finish(cache=cache, result="claims_invalid")
+            logger.warning("%s", exc)
+            return self._userinfo_refused(
+                audit, "userinfo_claims", "token does not identify a user"
+            )
+        except UserinfoUnavailableError as exc:
+            step.finish(cache=cache, result="unavailable")
+            logger.error("identity provider userinfo unavailable: %s", exc)
+            audit.emit(status=503, outcome="userinfo_unavailable")
+            response = json_rpc_response(
+                503, USERINFO_UNAVAILABLE, USERINFO_UNAVAILABLE_MESSAGE, reply_id
+            )
+            response.headers["Retry-After"] = str(USERINFO_RETRY_AFTER_SECONDS)
+            return response
+        except UserinfoResponseError as exc:
+            step.finish(cache=cache, result="invalid")
+            logger.error("identity provider userinfo response unusable: %s", exc)
+            audit.reason = "userinfo_invalid"
+            audit.emit(status=500, outcome="gateway_error")
+            return json_rpc_response(500, GATEWAY_ERROR, USERINFO_INVALID_MESSAGE, reply_id)
+        except StateUnavailableError as exc:
+            step.finish(cache=cache, result="state_unavailable")
+            logger.error("userinfo cache unavailable: %s", exc)
+            return _state_unavailable(audit, reply_id)
+        except BaseException:
+            step.finish(cache=cache, result="aborted")
+            raise
+        if gone or profile is None:
+            step.finish(cache=cache, result="disconnected")
+            logger.info("client disconnected while the userinfo was being fetched")
+            audit.emit(status=499, outcome="client_disconnected")
+            return Response(status_code=499)
+        step.finish(cache=cache, result="profile")
+        return assemble_identity(auth.subject, profile, auth.claims)
+
+    def _userinfo_refused(self, audit: AuditRecord, reason: str, description: str) -> Response:
+        """The 401 for a token the identity provider will not vouch for."""
+        audit.reason = reason
+        audit.emit(status=401, outcome="unauthenticated")
+        return self._unauthorized(description, token_presented=True)
 
     async def _resolve(
         self, identity: Identity, rpc: RpcInfo, audit: AuditRecord, receive: Receive
@@ -377,11 +563,12 @@ class Gateway:
         if not self._origins.allows(request.headers.getlist("origin")):
             audit.emit(status=403, outcome="origin_refused")
             return json_rpc_response(403, ORIGIN_REFUSED, ORIGIN_REFUSED_MESSAGE, None)
-        identity = await self._authenticate(request, audit)
-        if isinstance(identity, Response):
-            return identity
-        audit.subject = identity.subject
-        audit.organization = identity.organization
+        auth = await self._authenticate(request, audit)
+        if isinstance(auth, Response):
+            return auth
+        audit.subject = auth.subject
+        if isinstance(auth, Complete):
+            audit.organization = auth.identity.organization
 
         try:
             with anyio.fail_after(self._config.limits.request_body_timeout_seconds):
@@ -419,12 +606,12 @@ class Gateway:
                 400, INVALID_REQUEST, f"The {repeated} header must appear once.", reply_id
             )
 
-        subject_key = f"{self._config.auth.issuer}\x1f{identity.subject}"
-        # After the identity is known and before any credential lookup, so a flood is refused
-        # without ever reaching the resolver backend.
-        limited = await self._rate_limit(identity, rpc, audit, subject_key=subject_key)
-        if limited is not None:
-            return limited
+        subject_key = f"{self._config.auth.issuer}\x1f{auth.subject}"
+        # After the subject is known and before any credential lookup, so a flood is refused
+        # without ever reaching the resolver backend (or, with userinfo, the identity provider).
+        identity = await self._identify(auth, rpc, audit, request.receive, subject_key=subject_key)
+        if isinstance(identity, Response):
+            return identity
 
         credential = await self._resolve(identity, rpc, audit, request.receive)
         if isinstance(credential, Response):
@@ -569,6 +756,22 @@ def create_app(
         timeout=config.auth.jwks_fetch_timeout_seconds,
         follow_redirects=False,
     )
+    userinfo_http: httpx.AsyncClient | None = None
+    userinfo: UserinfoService | None = None
+    userinfo_config = config.auth.userinfo
+    if userinfo_config is not None:
+        if state.userinfo is None:
+            raise ConfigError("the state has no userinfo store but auth.userinfo is set")
+        userinfo_http = httpx.AsyncClient(
+            transport=http_transport,
+            timeout=userinfo_config.timeout_seconds,
+            follow_redirects=False,
+        )
+        userinfo = UserinfoService(
+            UserinfoClient(userinfo_config, config.auth.identity, userinfo_http),
+            state.userinfo,
+            userinfo_config,
+        )
     clients = {name: build_client(up, http_transport) for name, up in config.upstreams.items()}
     sessions = state.sessions
     reads = DetachedReads(telemetry)
@@ -596,6 +799,7 @@ def create_app(
         sessions,
         telemetry,
         rate_limiter,
+        userinfo,
     )
 
     # RFC 9728 section 3.3: the document describes the resource it was fetched for, so only the
@@ -637,7 +841,9 @@ def create_app(
                 [
                     close_reads,
                     resolver.aclose,
+                    *(() if userinfo is None else (userinfo.aclose,)),
                     jwks_client.aclose,
+                    *(() if userinfo_http is None else (userinfo_http.aclose,)),
                     state.aclose,
                     *(c.aclose for c in clients.values()),
                     *telemetry.closers,

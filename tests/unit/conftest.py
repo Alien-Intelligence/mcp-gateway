@@ -47,6 +47,7 @@ def base_config_dict(mapping_file: str = "/unused/mapping.json") -> dict[str, An
                 "organization": "org",
                 "groups": "groups",
             },
+            "userinfo": None,
         },
         "resolver": {"type": "static", "mapping_file": mapping_file},
         "resolver_cache": None,

@@ -3,7 +3,14 @@ from typing import Any
 import pytest
 
 from mcp_gateway.config import IdentityPathsConfig
-from mcp_gateway.identity import IdentityError, build_identity
+from mcp_gateway.identity import (
+    IdentityError,
+    Profile,
+    assemble_identity,
+    build_identity,
+    read_profile,
+    read_subject,
+)
 
 KEYCLOAK = IdentityPathsConfig(
     subject="sub",
@@ -137,3 +144,65 @@ def test_email_is_never_trusted_when_the_verification_path_is_null() -> None:
     )
     identity = build_identity({"sub": "u", "email": "a@x.example", "email_verified": True}, paths)
     assert identity.email is None
+
+
+# --- the subject and the profile are read separately -----------------------------------------
+
+
+def test_the_subject_is_read_through_the_configured_path() -> None:
+    paths = IdentityPathsConfig(
+        subject="ext.uid", email=None, email_verified=None, organization=None, groups=None
+    )
+    assert read_subject({"sub": "ignored", "ext": {"uid": "u9"}}, paths) == "u9"
+
+
+@pytest.mark.parametrize("claims", [{}, {"sub": 5}, {"sub": ""}, {"sub": None}])
+def test_a_missing_or_non_string_subject_is_refused(claims: dict[str, Any]) -> None:
+    with pytest.raises(IdentityError, match="subject"):
+        read_subject(claims, KEYCLOAK)
+
+
+def test_the_profile_is_read_from_the_document_it_is_given_and_has_no_subject() -> None:
+    profile = read_profile(
+        {"email": "a@x.example", "email_verified": True, "org": "client-x", "groups": ["g"]},
+        KEYCLOAK,
+    )
+    assert profile == Profile(email="a@x.example", organization="client-x", groups=("g",))
+
+
+def test_a_profile_needs_no_subject_in_its_document() -> None:
+    assert read_profile({}, KEYCLOAK) == Profile(email=None, organization=None, groups=())
+
+
+@pytest.mark.parametrize(
+    "document", [{"org": 5}, {"org": ["a"]}, {"groups": "g"}, {"groups": [1]}, {"groups": {}}]
+)
+def test_a_profile_claim_of_the_wrong_type_is_refused(document: dict[str, Any]) -> None:
+    with pytest.raises(IdentityError):
+        read_profile(document, KEYCLOAK)
+
+
+def test_an_identity_is_assembled_from_a_subject_a_profile_and_the_token_claims() -> None:
+    identity = assemble_identity(
+        "u1", Profile("a@x.example", "client-x", ("g",)), {"sub": "u1", "scope": "mcp"}
+    )
+    assert (identity.subject, identity.email, identity.organization, identity.groups) == (
+        "u1",
+        "a@x.example",
+        "client-x",
+        ("g",),
+    )
+    assert identity.claims["scope"] == "mcp"
+
+
+def test_build_identity_is_the_subject_and_the_profile_of_the_same_claims() -> None:
+    claims = {
+        "sub": "u1",
+        "email": "a@x.example",
+        "email_verified": True,
+        "org": "client-x",
+        "groups": ["g"],
+    }
+    assert build_identity(claims, KEYCLOAK) == assemble_identity(
+        read_subject(claims, KEYCLOAK), read_profile(claims, KEYCLOAK), claims
+    )

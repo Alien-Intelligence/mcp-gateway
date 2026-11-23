@@ -147,7 +147,8 @@ Keycloak's own guide: <https://www.keycloak.org/securing-apps/mcp-authz-server>.
     "email_verified": "email_verified",
     "organization": "org",
     "groups": "groups"
-  }
+  },
+  "userinfo": null
 }
 ```
 

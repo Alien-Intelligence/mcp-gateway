@@ -44,6 +44,7 @@ from .test_app import (
     routed_transport,
 )
 from .test_app_ratelimit import Refusing
+from .userinfo_support import FakeUserinfo, userinfo_dict, userinfo_transport
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "mcp_gateway"
 TRACEPARENT = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
@@ -557,6 +558,15 @@ async def _duplicate_header(env: Env) -> None:
     )
 
 
+async def _userinfo_unavailable(env: Env) -> None:
+    userinfo = FakeUserinfo()
+    userinfo.responder = lambda _r: httpx.Response(503)
+    transport = userinfo_transport(env.idp, env.upstream, userinfo)
+    await env.post(
+        env.rebuild(transport=transport, auth__userinfo=userinfo_dict(max_attempts=1)),
+    )
+
+
 async def _resolver_unavailable(env: Env) -> None:
     await env.post(env.rebuild(resolver=FixedResolver(ResolverUnavailableError("down"))))
 
@@ -662,6 +672,7 @@ SCENARIOS: dict[str, Scenario] = {
     "unauthenticated": _unauthenticated,
     "insufficient_scope": _insufficient_scope,
     "idp_unavailable": _idp_unavailable,
+    "userinfo_unavailable": _userinfo_unavailable,
     "request_body_timeout": _request_body_timeout,
     "body_too_large": _body_too_large,
     "mcp_header_mismatch": _mcp_header_mismatch,

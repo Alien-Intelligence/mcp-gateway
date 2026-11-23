@@ -7,6 +7,7 @@ import pytest
 from mcp_gateway.config import CONFIG_ENV_VAR, ConfigError, load_config, parse_config
 
 from .conftest import PUBLIC_URL, config_from
+from .userinfo_support import USERINFO_URL, userinfo_dict
 
 
 def _parse(data: dict[str, Any]) -> None:
@@ -40,6 +41,7 @@ def test_optional_claim_path_may_be_explicit_null(config_dict: dict[str, Any]) -
         ("auth", "clock_skew_seconds"),
         ("auth", "identity", "email"),
         ("auth", "identity", "email_verified"),
+        ("auth", "userinfo"),
         ("auth", "jwks_max_stale_seconds"),
         ("resolver", "type"),
         ("upstreams", "main", "read_timeout_seconds"),
@@ -413,3 +415,155 @@ def test_detached_reads_below_the_pool_size_are_accepted(config_dict: dict[str, 
     config_dict["upstreams"]["main"]["max_connections"] = 10
     config_dict["upstreams"]["main"]["max_detached_reads"] = 9
     assert config_from(config_dict).upstreams["main"].max_detached_reads == 9
+
+
+# --- auth.userinfo ----------------------------------------------------------------------------
+
+
+def _with_userinfo(config_dict: dict[str, Any], **overrides: Any) -> dict[str, Any]:
+    config_dict["auth"]["userinfo"] = userinfo_dict(**overrides)
+    return config_dict
+
+
+def test_userinfo_null_is_accepted_and_reads_nothing_from_userinfo(
+    config_dict: dict[str, Any],
+) -> None:
+    assert config_dict["auth"]["userinfo"] is None
+    assert config_from(config_dict).auth.userinfo is None
+
+
+def test_a_valid_userinfo_object_is_accepted(config_dict: dict[str, Any]) -> None:
+    userinfo = config_from(_with_userinfo(config_dict)).auth.userinfo
+    assert userinfo is not None
+    assert userinfo.url == USERINFO_URL
+    assert (userinfo.max_attempts, userinfo.max_entries) == (3, 100)
+
+
+@pytest.mark.parametrize("key", sorted(userinfo_dict()))
+def test_every_userinfo_key_is_required(config_dict: dict[str, Any], key: str) -> None:
+    _with_userinfo(config_dict)
+    del config_dict["auth"]["userinfo"][key]
+    with pytest.raises(ConfigError, match=f"auth.userinfo.{key}"):
+        _parse(config_dict)
+
+
+def test_an_unknown_userinfo_key_is_refused(config_dict: dict[str, Any]) -> None:
+    _with_userinfo(config_dict, discovery=True)
+    with pytest.raises(ConfigError, match="auth.userinfo.discovery"):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("timeout_seconds", 0),
+        ("timeout_seconds", -1),
+        ("max_attempts", 0),
+        ("max_attempts", 11),
+        ("total_timeout_seconds", 0),
+        ("backoff_base_seconds", 0),
+        ("backoff_max_seconds", 0),
+        ("cache_ttl_seconds", 0),
+        ("cache_ttl_seconds", -5),
+        ("max_response_bytes", 0),
+        ("max_response_bytes", 1048577),
+        ("max_entries", 0),
+        ("max_entries", -1),
+        ("allow_insecure_http", "yes"),
+    ],
+)
+def test_userinfo_values_are_bounded(config_dict: dict[str, Any], key: str, bad: Any) -> None:
+    _with_userinfo(config_dict, **{key: bad})
+    with pytest.raises(ConfigError, match=f"auth.userinfo.{key}"):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize(
+    ("key", "good"),
+    [
+        ("max_attempts", 1),
+        ("max_attempts", 10),
+        ("max_response_bytes", 1),
+        ("max_response_bytes", 1048576),
+        ("max_entries", 1),
+    ],
+)
+def test_userinfo_bounds_are_inclusive(config_dict: dict[str, Any], key: str, good: Any) -> None:
+    _with_userinfo(config_dict, **{key: good})
+    _parse(config_dict)
+
+
+def test_the_total_timeout_must_exceed_the_attempt_timeout(config_dict: dict[str, Any]) -> None:
+    _with_userinfo(config_dict, timeout_seconds=3, total_timeout_seconds=3)
+    with pytest.raises(ConfigError, match="total_timeout_seconds must be > timeout_seconds"):
+        _parse(config_dict)
+
+
+def test_the_backoff_ceiling_must_not_be_below_the_base(config_dict: dict[str, Any]) -> None:
+    _with_userinfo(config_dict, backoff_base_seconds=1, backoff_max_seconds=0.5)
+    with pytest.raises(ConfigError, match="backoff_max_seconds must be >= backoff_base_seconds"):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "not a url",
+        "/relative/userinfo",
+        "ftp://idp.example.com/userinfo",
+        "https://",
+        "https://user:secret@idp.example.com/userinfo",
+        "https://user@idp.example.com/userinfo",
+        "https://idp.example.com/userinfo#fragment",
+    ],
+)
+def test_the_userinfo_url_must_be_a_plain_absolute_http_url(
+    config_dict: dict[str, Any], url: str
+) -> None:
+    _with_userinfo(config_dict, url=url)
+    with pytest.raises(ConfigError, match="auth.userinfo.url") as caught:
+        _parse(config_dict)
+    assert "secret" not in str(caught.value)
+
+
+def test_a_plain_http_userinfo_url_needs_the_insecure_switch(config_dict: dict[str, Any]) -> None:
+    _with_userinfo(config_dict, url="http://idp.example.com/userinfo")
+    with pytest.raises(ConfigError, match="must be https"):
+        _parse(config_dict)
+    _with_userinfo(config_dict, url="http://idp.example.com/userinfo", allow_insecure_http=True)
+    _parse(config_dict)
+
+
+def test_https_userinfo_url_needs_no_switch_and_may_carry_a_query(
+    config_dict: dict[str, Any],
+) -> None:
+    _with_userinfo(config_dict, url="https://idp.example.com/userinfo?tenant=a")
+    _parse(config_dict)
+
+
+def test_userinfo_that_nothing_reads_from_is_refused(config_dict: dict[str, Any]) -> None:
+    _with_userinfo(config_dict)
+    identity = config_dict["auth"]["identity"]
+    identity.update(email=None, email_verified=None, organization=None, groups=None)
+    with pytest.raises(ConfigError, match="nothing would be read from it"):
+        _parse(config_dict)
+
+
+@pytest.mark.parametrize("path", ["email", "organization", "groups"])
+def test_userinfo_with_any_one_profile_path_is_accepted(
+    config_dict: dict[str, Any], path: str
+) -> None:
+    _with_userinfo(config_dict)
+    identity = config_dict["auth"]["identity"]
+    identity.update(email=None, email_verified=None, organization=None, groups=None)
+    identity[path] = "some.path"
+    _parse(config_dict)
+
+
+def test_userinfo_without_a_profile_path_is_fine_when_it_is_null(
+    config_dict: dict[str, Any],
+) -> None:
+    config_dict["auth"]["identity"].update(
+        email=None, email_verified=None, organization=None, groups=None
+    )
+    assert config_from(config_dict).auth.userinfo is None

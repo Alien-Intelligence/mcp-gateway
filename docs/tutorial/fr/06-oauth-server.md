@@ -147,7 +147,8 @@ Guide propre à Keycloak : <https://www.keycloak.org/securing-apps/mcp-authz-ser
     "email_verified": "email_verified",
     "organization": "org",
     "groups": "groups"
-  }
+  },
+  "userinfo": null
 }
 ```
 

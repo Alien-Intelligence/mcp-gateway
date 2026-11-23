@@ -1,4 +1,10 @@
-"""Identity extraction from verified JWT claims using configurable claim paths."""
+"""Identity extraction using configurable claim paths.
+
+The subject is always read from the verified access token. The profile (verified email,
+organization, groups) is read from one document: the same token claims, or, when the gateway
+calls the OIDC userinfo endpoint, the userinfo document and nothing else. The two are never
+merged.
+"""
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -19,6 +25,15 @@ class Identity:
     organization: str | None
     groups: tuple[str, ...]
     claims: Mapping[str, Any] = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class Profile:
+    """What is read from one claims document besides the subject."""
+
+    email: str | None
+    organization: str | None
+    groups: tuple[str, ...]
 
 
 _MISSING = object()
@@ -65,14 +80,33 @@ def _optional_groups(claims: Mapping[str, Any], path: str | None) -> tuple[str, 
     return tuple(item for item in value if item)
 
 
-def build_identity(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> Identity:
+def read_subject(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> str:
     subject = _lookup(claims, mapping.subject)
     if not isinstance(subject, str) or not subject:
         raise IdentityError(f"claim '{mapping.subject}' (subject) is missing or not a string")
+    return subject
+
+
+def read_profile(document: Mapping[str, Any], mapping: IdentityPathsConfig) -> Profile:
+    """Email (only when verified), organization and groups from ``document``."""
+    return Profile(
+        email=_verified_email(document, mapping),
+        organization=_optional_string(document, mapping.organization, what="organization"),
+        groups=_optional_groups(document, mapping.groups),
+    )
+
+
+def assemble_identity(subject: str, profile: Profile, claims: Mapping[str, Any]) -> Identity:
+    """The identity of ``subject``; ``claims`` are the verified token claims."""
     return Identity(
         subject=subject,
-        email=_verified_email(claims, mapping),
-        organization=_optional_string(claims, mapping.organization, what="organization"),
-        groups=_optional_groups(claims, mapping.groups),
+        email=profile.email,
+        organization=profile.organization,
+        groups=profile.groups,
         claims=MappingProxyType(dict(claims)),
     )
+
+
+def build_identity(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> Identity:
+    """The identity of a token that carries every claim itself (no userinfo call)."""
+    return assemble_identity(read_subject(claims, mapping), read_profile(claims, mapping), claims)

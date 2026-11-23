@@ -8,9 +8,13 @@ from typing import Any
 import pytest
 
 from mcp_gateway.config import ConfigError, parse_config
+from mcp_gateway.state import build_state
 from mcp_gateway.state.redis_cache import load_encryption_key
+from mcp_gateway.state.redis_userinfo import RedisUserinfoStore
+from mcp_gateway.userinfo import MemoryUserinfoStore
 
 from .conftest import base_config_dict, config_from
+from .userinfo_support import userinfo_dict
 
 REDIS_STATE: dict[str, Any] = {
     "type": "redis",
@@ -171,3 +175,71 @@ def test_a_bad_key_file_is_refused_without_echoing_its_content(
 def test_a_missing_key_file_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="unreadable"):
         load_encryption_key(str(tmp_path / "absent"))
+
+
+# --- auth.userinfo.max_entries follows the state backend ------------------------------------------
+
+
+def _userinfo(max_entries: int | None) -> dict[str, Any]:
+    return userinfo_dict(max_entries=max_entries)
+
+
+def test_memory_requires_the_userinfo_bound() -> None:
+    data = base_config_dict()
+    data["auth"]["userinfo"] = _userinfo(None)
+    rejects(data, "auth.userinfo.max_entries is required when state.type is memory")
+
+
+def test_memory_accepts_the_userinfo_bound() -> None:
+    data = base_config_dict()
+    data["auth"]["userinfo"] = _userinfo(50)
+    assert config_from(data).auth.userinfo is not None
+
+
+def test_redis_refuses_a_userinfo_bound() -> None:
+    data = redis_config()
+    data["auth"]["userinfo"] = _userinfo(50)
+    rejects(data, "auth.userinfo.max_entries must be null when state.type is redis")
+
+
+def test_redis_accepts_a_null_userinfo_bound() -> None:
+    data = redis_config()
+    data["auth"]["userinfo"] = _userinfo(None)
+    assert config_from(data).auth.userinfo is not None
+
+
+def test_a_null_userinfo_has_no_bound_to_check_with_either_backend() -> None:
+    config_from(base_config_dict())
+    config_from(redis_config())
+
+
+def test_the_memory_state_carries_a_userinfo_store_only_when_userinfo_is_configured() -> None:
+    off = build_state(config_from(base_config_dict()))
+    assert off.userinfo is None
+    data = base_config_dict()
+    data["auth"]["userinfo"] = _userinfo(50)
+    assert isinstance(build_state(config_from(data)).userinfo, MemoryUserinfoStore)
+
+
+async def test_the_redis_state_carries_a_userinfo_store_only_when_userinfo_is_configured(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "url").write_text("redis://127.0.0.1:1/0\n")
+    (tmp_path / "key").write_text(base64.b64encode(bytes(range(32))).decode() + "\n")
+    state_config = {
+        **REDIS_STATE,
+        "url_file": str(tmp_path / "url"),
+        "encryption_key_file": str(tmp_path / "key"),
+    }
+    off = redis_config()
+    off["state"] = state_config
+    on = redis_config()
+    on["state"] = state_config
+    on["auth"]["userinfo"] = _userinfo(None)
+    off_state, on_state = build_state(config_from(off)), build_state(config_from(on))
+    try:
+        assert off_state.userinfo is None
+        assert isinstance(on_state.userinfo, RedisUserinfoStore)
+    finally:
+        await off_state.aclose()
+        await on_state.aclose()

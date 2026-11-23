@@ -49,6 +49,7 @@ def values(image_tag: str, upstream_url: str) -> dict[str, object]:
                 "organization": "org",
                 "groups": "groups",
             },
+            "userinfo": None,
         },
         "resolver": {"type": "static", "mapping_file": "/run/gateway/state/mapping.json"},
         "resolver_cache": {

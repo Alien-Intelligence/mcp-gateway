@@ -455,7 +455,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 
 Text values are clipped to 256 characters. The line never holds request or response content, arguments, tokens, API keys or session ids.
 
-`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`.
+`outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `userinfo_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`.
 
 Example:
 
@@ -541,7 +541,8 @@ Two upstreams, a static mapping with a webhook behind it, a cache, and OTLP over
       "email_verified": "email_verified",
       "organization": "ext.org",
       "groups": "groups"
-    }
+    },
+    "userinfo": null
   },
   "resolver": {
     "type": "chain",

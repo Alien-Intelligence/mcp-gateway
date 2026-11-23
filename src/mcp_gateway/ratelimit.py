@@ -4,6 +4,9 @@ A bucket holds at most ``burst`` tokens, starts full and refills ``per_minute / 
 second. Every authenticated request to the MCP endpoint takes one token from each applicable
 bucket. The take is atomic across the buckets of one request: a token leaves all of them or none,
 so an exhausted organization bucket never drains the tokens of the subject that was refused.
+With ``auth.userinfo`` the organization is unknown until the userinfo call, so the gateway takes the
+subject bucket first and the organization bucket afterwards: a request refused by the organization
+bucket has already spent its subject token.
 
 Two implementations share the algorithm. ``MemoryRateLimiter`` is exact for one replica;
 ``RedisRateLimiter`` keeps the buckets in Redis so several replicas share them.
@@ -70,26 +73,37 @@ class RateLimiter(Protocol):
     async def acquire(self, buckets: Sequence[BucketSpec]) -> Decision: ...
 
 
+def subject_bucket(limits: RateLimitsConfig, *, subject_key: str) -> BucketSpec:
+    """The subject bucket: always drawn."""
+    return BucketSpec(
+        "subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute
+    )
+
+
+def organization_bucket(limits: RateLimitsConfig, *, organization: str | None) -> BucketSpec | None:
+    """The organization bucket, or None when none is configured or the caller has no organization.
+
+    A subject whose identity carries no organization is charged to no organization bucket: there
+    is none to charge, and the subject bucket still limits it.
+    """
+    if limits.per_organization is None or organization is None:
+        return None
+    return BucketSpec(
+        "organization",
+        organization,
+        limits.per_organization.burst,
+        limits.per_organization.per_minute,
+    )
+
+
 def bucket_specs(
     limits: RateLimitsConfig, *, subject_key: str, organization: str | None
 ) -> list[BucketSpec]:
-    """The buckets one request draws from.
-
-    The subject bucket is always drawn. A subject whose token carries no organization is charged
-    to no organization bucket: there is none to charge, and the subject bucket still limits it.
-    """
-    specs = [
-        BucketSpec("subject", subject_key, limits.per_subject.burst, limits.per_subject.per_minute)
-    ]
-    if limits.per_organization is not None and organization is not None:
-        specs.append(
-            BucketSpec(
-                "organization",
-                organization,
-                limits.per_organization.burst,
-                limits.per_organization.per_minute,
-            )
-        )
+    """The buckets one request draws from when the organization is known up front."""
+    specs = [subject_bucket(limits, subject_key=subject_key)]
+    organization_spec = organization_bucket(limits, organization=organization)
+    if organization_spec is not None:
+        specs.append(organization_spec)
     return specs
 
 

@@ -19,7 +19,8 @@
       "email_verified": "email_verified",
       "organization": "org",
       "groups": "groups"
-    }
+    },
+    "userinfo": null
   },
   "resolver": {"type": "static", "mapping_file": "/run/gateway/secrets/mapping.json"},
   "resolver_cache": null,

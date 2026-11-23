@@ -12,6 +12,8 @@ from mcp_gateway.ratelimit import (
     RateLimitUnavailableError,
     RedisRateLimiter,
     bucket_specs,
+    organization_bucket,
+    subject_bucket,
 )
 from mcp_gateway.state import BoundedRedis
 from mcp_gateway.state.digest import KeyDigest
@@ -200,6 +202,18 @@ def test_a_subject_without_an_organization_is_still_limited_per_subject() -> Non
 def test_bucket_specs_skip_an_organization_scope_configured_null() -> None:
     specs = bucket_specs(_limits(False), subject_key="k", organization="o")
     assert [spec.scope for spec in specs] == ["subject"]
+
+
+def test_the_two_buckets_are_available_separately_for_the_two_step_take() -> None:
+    limits = _limits(True)
+    assert subject_bucket(limits, subject_key="iss\x1fu1") == BucketSpec(
+        "subject", "iss\x1fu1", 3, 6.0
+    )
+    assert organization_bucket(limits, organization="acme") == BucketSpec(
+        "organization", "acme", 9, 12.0
+    )
+    assert organization_bucket(limits, organization=None) is None
+    assert organization_bucket(_limits(False), organization="acme") is None
 
 
 async def test_the_memory_limiter_caps_an_enormous_wait(limiter: MemoryRateLimiter) -> None:

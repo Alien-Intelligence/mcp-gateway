@@ -60,6 +60,17 @@ def token_scopes(claims: Mapping[str, Any]) -> frozenset[str]:
     return frozenset(scopes)
 
 
+def token_expiry(claims: Mapping[str, Any]) -> float:
+    """The ``exp`` of a verified token as epoch seconds.
+
+    The verifier requires ``exp``, and PyJWT refuses a non-numeric one, so this only narrows the type.
+    """
+    expiry = claims.get("exp")
+    if isinstance(expiry, bool) or not isinstance(expiry, int | float):
+        raise InvalidTokenError("token is invalid")
+    return float(expiry)
+
+
 class TokenVerifier:
     def __init__(
         self,

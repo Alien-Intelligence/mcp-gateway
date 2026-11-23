@@ -56,7 +56,8 @@ Production start, behind a TLS reverse proxy: `bin/kc.sh start --hostname https:
     "email_verified": "email_verified",
     "organization": "org",
     "groups": "groups"
-  }
+  },
+  "userinfo": null
 }
 ```
 

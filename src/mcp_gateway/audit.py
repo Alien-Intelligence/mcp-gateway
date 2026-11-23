@@ -26,6 +26,7 @@ OUTCOMES = frozenset(
         "unauthenticated",
         "insufficient_scope",
         "idp_unavailable",
+        "userinfo_unavailable",
         "request_body_timeout",
         "body_too_large",
         "mcp_header_mismatch",

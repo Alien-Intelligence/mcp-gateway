@@ -66,6 +66,7 @@ INSTRUMENTATION_NAME = "mcp_gateway"
 DEFAULT_SERVICE_NAME = "mcp-gateway"
 REQUEST_SPAN = "mcp-gateway request"
 RESOLVE_SPAN = "mcp-gateway resolve_credential"
+USERINFO_SPAN = "mcp-gateway userinfo"
 UPSTREAM_SPAN = "mcp-gateway upstream"
 LABEL_ATTRIBUTE_PREFIX = "mcp_gateway.label."
 
@@ -259,6 +260,11 @@ class _Instruments:
             unit="{lookup}",
             description="Credential lookups, by resolver type, cache result and result.",
         )
+        self.userinfo_lookups = meter.create_counter(
+            "mcp_gateway.userinfo.lookups",
+            unit="{lookup}",
+            description="Userinfo lookups, by cache result and result.",
+        )
         self.upstream_detached = meter.create_counter(
             "mcp_gateway.upstream.detached",
             unit="{request}",
@@ -295,6 +301,33 @@ class ResolveStep:
                 "cache": cache,
                 "result": result,
             },
+        )
+
+
+# Userinfo results that are failures of the gateway's identity source, not of the caller.
+_USERINFO_FAILURES = frozenset({"unavailable", "invalid", "state_unavailable"})
+
+
+class UserinfoStep:
+    """The userinfo child span and its counter. Carries no token, subject or document content."""
+
+    def __init__(self, observer: "RequestObserver", span: Span) -> None:
+        self._observer = observer
+        self._span = span
+        self._finished = False
+
+    def finish(self, *, cache: str, result: str) -> None:
+        """``cache``: hit, miss or none. ``result``: profile, rejected, unavailable, ..."""
+        if self._finished:
+            return
+        self._finished = True
+        self._span.set_attribute("mcp_gateway.userinfo.cache", cache)
+        self._span.set_attribute("mcp_gateway.userinfo.result", result)
+        if result in _USERINFO_FAILURES:
+            self._span.set_status(StatusCode.ERROR)
+        self._span.end()
+        self._observer.telemetry.instruments.userinfo_lookups.add(
+            1, {"cache": cache, "result": result}
         )
 
 
@@ -351,6 +384,9 @@ class RequestObserver:
         span = self._child(RESOLVE_SPAN, SpanKind.INTERNAL)
         span.set_attribute("mcp_gateway.resolver.type", resolver_type)
         return ResolveStep(self, span, resolver_type)
+
+    def begin_userinfo(self) -> UserinfoStep:
+        return UserinfoStep(self, self._child(USERINFO_SPAN, SpanKind.INTERNAL))
 
     def begin_upstream(self, upstream: str) -> UpstreamStep:
         span = self._child(UPSTREAM_SPAN, SpanKind.CLIENT)

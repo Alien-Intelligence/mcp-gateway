@@ -697,6 +697,16 @@
           "minItems": 1,
           "title": "Scopes Advertised",
           "type": "array"
+        },
+        "userinfo": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UserinfoConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -710,7 +720,8 @@
         "jwks_cache_ttl_seconds",
         "jwks_max_stale_seconds",
         "jwks_fetch_timeout_seconds",
-        "identity"
+        "identity",
+        "userinfo"
       ],
       "title": "AuthConfig",
       "type": "object"
@@ -1559,6 +1570,83 @@
         "max_detached_reads"
       ],
       "title": "UpstreamConfig",
+      "type": "object"
+    },
+    "UserinfoConfig": {
+      "additionalProperties": false,
+      "description": "The OIDC userinfo call (OIDC Core 5.3) for an IdP whose access tokens carry only ``sub``.\n\nWith it set, ``email``, ``email_verified``, ``organization`` and ``groups`` are read from the\nuserinfo document and nowhere else; the subject is still read from the verified token.",
+      "properties": {
+        "allow_insecure_http": {
+          "title": "Allow Insecure Http",
+          "type": "boolean"
+        },
+        "backoff_base_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Backoff Base Seconds",
+          "type": "number"
+        },
+        "backoff_max_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Backoff Max Seconds",
+          "type": "number"
+        },
+        "cache_ttl_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Cache Ttl Seconds",
+          "type": "number"
+        },
+        "max_attempts": {
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "max_entries": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Max Entries"
+        },
+        "max_response_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "title": "Max Response Bytes",
+          "type": "integer"
+        },
+        "timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "total_timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Total Timeout Seconds",
+          "type": "number"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "allow_insecure_http",
+        "timeout_seconds",
+        "max_attempts",
+        "total_timeout_seconds",
+        "backoff_base_seconds",
+        "backoff_max_seconds",
+        "cache_ttl_seconds",
+        "max_response_bytes",
+        "max_entries"
+      ],
+      "title": "UserinfoConfig",
       "type": "object"
     },
     "WebhookResolverConfig": {

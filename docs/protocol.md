@@ -24,7 +24,7 @@ Gateway-made errors have the JSON-RPC shape `{"jsonrpc": "2.0", "id": <request i
 `id` is the id of the request when it has one and a reply can be correlated, otherwise `null`. `data` is present
 only where the table lists fields.
 
-The gateway family is `-31001` to `-31014`. It sits outside `-32768..-32000` on purpose: the MCP 2026-07-28
+The gateway family is `-31001` to `-31015`. It sits outside `-32768..-32000` on purpose: the MCP 2026-07-28
 specification says new implementation codes SHOULD be allocated outside that range, reserves `-32020..-32099`
 for itself and leaves `-32000..-32019` to implementations, where the Python SDK already uses `-32000`
 (connection closed) and `-32001` (request timeout). None of the spec's `schema.ts`, the TypeScript SDK `ProtocolErrorCode` or the Python SDK (`mcp_types.jsonrpc`,
@@ -46,6 +46,7 @@ for itself and leaves `-32000..-32019` to implementations, where the Python SDK 
 | `-31012` | `DENIED` | The resolver denied the user for any other reason. | `403` | none |
 | `-31013` | `STATE_UNAVAILABLE` | The shared state (Redis) failed or timed out; the gateway fails closed and forwards nothing. | `503`, header `Retry-After: 5` | none |
 | `-31014` | `RATE_LIMITED` | A rate limit bucket is empty, for any request that is not a `tools/call` with an id (see [Rate limit shapes](#rate-limit-shapes)). | `200` for a request with an id; `429` when no reply can be correlated (`id` null) | `{"retry_after_seconds": N}`, plus header `Retry-After: N` |
+| `-31015` | `USERINFO_UNAVAILABLE` | The identity provider's userinfo endpoint could not be reached or kept failing, after the configured retries. The request is not forwarded. | `503`, with `Retry-After: 5` | none |
 
 The audit line carries the outcome and, for denials, the reason; the client sees only the code.
 
