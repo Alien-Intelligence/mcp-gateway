@@ -20,7 +20,7 @@ set -eu
 
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-artifacts}"
 UP_TIMEOUT_SECONDS="${UP_TIMEOUT_SECONDS:-420}"
-RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-1500}"
+RUN_TIMEOUT_SECONDS="${RUN_TIMEOUT_SECONDS:-2700}"
 ENV_FILE=.env.cidev
 COMPOSE="docker compose -f compose.yaml -f compose.ci-dev.yaml --env-file $ENV_FILE"
 

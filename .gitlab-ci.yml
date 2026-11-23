@@ -108,8 +108,9 @@ e2e-stub:
 e2e-dev:
   extends: .dind
   variables:
-    RUN_TIMEOUT_SECONDS: "1500"
-  timeout: 40m
+    # The real-dev suite takes about 30 min (each billed call waits for its event in the feed).
+    RUN_TIMEOUT_SECONDS: "2700"
+  timeout: 55m
   resource_group: e2e-dev
   script:
     - sh scripts/ci_e2e_dev.sh
