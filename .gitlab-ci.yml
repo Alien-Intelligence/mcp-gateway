@@ -194,6 +194,38 @@ image-publish:
     - set -a && . ./build.env && set +a
     - sh scripts/ci_image_publish.sh
 
+# The public image: the scanned release digest copied, never rebuilt, from our registry to GHCR with
+# the tags X.Y.Z (written once), X.Y, X and latest (scripts/ci_image_ghcr.sh). Only on `main`, in the
+# pipelines that built the image (same `changes:` as the shared docker-build rule), and only when the
+# protected variables GHCR_USERNAME and GHCR_TOKEN exist (a classic token with write:packages: GHCR
+# takes no other kind); until then the job does not appear. GitHub creates the package private: it is
+# made public once by hand (docs/development.md, "Public image").
+ghcr-publish:
+  extends: docker-build
+  stage: publish
+  needs: [docker-build, image-scan, image-publish]
+  timeout: 15m
+  resource_group: ghcr-publish
+  variables:
+    GHCR_IMAGE: ghcr.io/alien-intelligence/mcp-gateway
+  script:
+    - set -a && . ./build.env && set +a
+    - sh scripts/ci_image_ghcr.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $GHCR_TOKEN && $GHCR_USERNAME'
+      changes:
+        - Dockerfile
+        - "**/*.py"
+        - "**/*.ts"
+        - "**/*.tsx"
+        - "**/*.js"
+        - "**/*.jsx"
+        - "**/pyproject.toml"
+        - "**/uv.lock"
+        - "**/package.json"
+        - "**/yarn.lock"
+        - .gitlab-ci.yml
+
 # The full history, not only the pushed commits, with the repository's gitleaks config: `main` is
 # mirrored to a public repository, so a secret anywhere in its history is published. GitLab's
 # Secret-Detection job above scans the pushed range with GitLab's ruleset; this one is the gate the

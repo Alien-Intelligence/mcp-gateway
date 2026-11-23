@@ -151,7 +151,9 @@ It needs the dev target up (`docker compose up -d --build --wait` with `.env`), 
 |---|---|---|
 | lint, type check, unit tests, SAST, secret detection | every pipeline | shared templates; `PYTEST_MARKER` keeps the stack-bound suites out |
 | `docker-build`, `image-scan`, `image-publish` | the release branch's release commit, and `staging` and `main` | `scripts/ci_image_build.sh` (buildx, both architectures, SBOM and provenance attestations, in a `docker:dind` service; pushed by digest, no tag), `scripts/ci_image_scan.sh` (trivy on that digest, CycloneDX SBOM per architecture as an artifact; fails on fixable HIGH or CRITICAL), then `scripts/ci_image_publish.sh` (only after a passing scan: the version tag and the moving tag are applied to the digest; an existing version tag that points elsewhere is never overwritten) |
-| `history-denylist` | `main` and merge requests that target `main` (the rewritten history will be there; `dev` still holds strings the rewrite removes) | `scripts/ci_history_denylist.sh`: every commit of every ref (identities, messages, changes, ref names) against the Perl regexes of the protected File variable `HISTORY_DENYLIST_FILE`, which is not in the repository. It fails when the variable is missing and prints the commit and pattern of a hit, never the matched line |
+| `history-denylist` | `dev`, `main` and merge requests that target `main` (merge requests into `dev` come from unprotected branches, which do not get the variable: `dev` is scanned once they are merged) | `scripts/ci_history_denylist.sh`: every commit of every ref (identities, messages, changes, ref names) against the Perl regexes of the protected File variable `HISTORY_DENYLIST_FILE`, which is not in the repository. It fails when the variable is missing and prints the commit and pattern of a hit, never the matched line. Its tests and those of the publish script run in `history-denylist-tests` on every pipeline |
+| `publish-github` | `main`, and `v*` tag pipelines | `scripts/ci_publish_github.sh`: see "Public repository and image" below |
+| `ghcr-publish` | `main`, in the pipelines that built the image, once `GHCR_USERNAME` and `GHCR_TOKEN` exist | `scripts/ci_image_ghcr.sh`: see "Public repository and image" below |
 | `e2e-stub` | merge requests and branches, when code, tests, scripts, `dev/`, compose files, Dockerfiles, `pyproject.toml`, `uv.lock` or `.gitlab-ci.yml` change | `scripts/ci_e2e_stub.sh` in a `docker:dind` service; fake keys only |
 | `e2e-dev` | merge requests and the default branch (never a push to `dev`), same path filter | `scripts/ci_e2e_dev.sh` in a `docker:dind` service against the real dev MCP server and Alien dev platform; one run at a time (`resource_group`) |
 
@@ -169,3 +171,22 @@ A branch push is skipped while the branch has an open merge request (its merge r
 | `E2E_DEV_EXISTING_JOB_ID` | value | A dev job id the personas do not own (the forged-header positive control) |
 
 The identity providers' and stores' secrets are generated per run. To reproduce the job locally, run `scripts/ci_e2e_dev.sh` in a `docker:dind` setup like the one above, with the variables set to file paths and values. The job's artifacts (evidence, JUnit, compose logs) are visible to developers only and expire after a week.
+
+## Public repository and image
+
+The canonical repository is on GitLab. Two jobs publish from `main`, and nothing else is ever published:
+
+- **Source** (`publish-github`): `main` and the `v*` tags whose commit is on `main` go to `github.com/Alien-Intelligence/mcp-gateway`. The job copies exactly those refs into a scratch repository, runs the history deny-list over it (any hit stops the job), and pushes with a GitHub deploy key of that repository only, over SSH with GitHub's published host keys pinned in the script, as a plain push: a GitHub history that is not an ancestor of ours is refused, never overwritten. There is no push mirror: a mirror also pushes the tags cut on `dev`. On a tag pipeline, a tag that is not on `main` publishes nothing and succeeds; release tags are cut on `dev` and reach GitHub with the first `main` pipeline that contains them.
+- **Image** (`ghcr-publish`): the release digest that `image-scan` passed is copied, not rebuilt, from our registry to `ghcr.io/alien-intelligence/mcp-gateway`, with the tags `X.Y.Z` (written once, never overwritten), `X.Y`, `X` and `latest`. The SBOM and provenance attestations travel with it.
+
+| Variable | Type | Flags | Content |
+|---|---|---|---|
+| `GITHUB_PUBLISH_DEPLOY_KEY` | file | protected, masked | base64 of the private key of the repository's deploy key "gitlab-ci main publisher" (write access) |
+| `HISTORY_DENYLIST_FILE` | file | protected | the deny-list (also used by `history-denylist`) |
+| `GHCR_USERNAME` | value | protected | the GitHub account that owns the token |
+| `GHCR_TOKEN` | value | protected, masked | a classic personal access token with `write:packages` only (GHCR accepts no other kind of token), created at `https://github.com/settings/tokens/new?scopes=write:packages` so that the broad `repo` scope is not selected; it expires, renew it before it does |
+
+GitHub creates a new container package as private and offers no API to change its visibility. After the first `ghcr-publish`, set the package public once in its settings (`https://github.com/orgs/Alien-Intelligence/packages/container/mcp-gateway/settings`). The image label `org.opencontainers.image.source` links the package to the repository.
+
+To rotate the deploy key: generate a new ed25519 key pair, add the public key to the GitHub repository (Settings, Deploy keys, write access), store the base64 of the private key in `GITHUB_PUBLISH_DEPLOY_KEY` (never on a command line), then delete the old deploy key.
+
