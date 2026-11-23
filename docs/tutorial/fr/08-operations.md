@@ -59,18 +59,19 @@ Champs : `ts`, `event` (toujours `mcp_request`), `request_id`, `trace_id`, `subj
 
 `request_id` est aussi renvoyé au client dans l'en-tête `x-request-id` de chaque réponse que la passerelle produit ou relaie : lorsqu'un utilisateur signale un problème, demandez-lui cet en-tête et cherchez la ligne d'audit. Un `x-request-id` envoyé par le client est ignoré.
 
-Le `outcome` est l'une des valeurs suivantes : `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`. `reason` contient la raison lisible par machine lorsqu'il y en a une : la raison de refus de votre resolver, la classe d'échec d'un flux interrompu, ou le seau (`subject` ou `organization`) qui a refusé une requête limitée en débit.
+Le `outcome` est l'une des valeurs suivantes : `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `userinfo_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`. `reason` contient la raison lisible par machine lorsqu'il y en a une : la raison de refus de votre resolver, la classe d'échec d'un flux interrompu, le seau (`subject` ou `organization`) qui a refusé une requête limitée en débit, ou, avec `auth.userinfo`, `userinfo_rejected`, `userinfo_subject_mismatch`, `userinfo_claims` ou `userinfo_invalid`.
 
 Les journaux du processus lui-même (démarrage, erreurs du resolver et du JWKS) sont aussi des lignes JSON sur la sortie standard, avec `ts`, `level`, `logger` et `message`.
 
 ### Traces et métriques
 
-`observability.otlp` exporte les traces et les métriques par OTLP. `{"otlp": null}` n'exporte rien. Chaque requête est une nouvelle trace racine comportant trois spans :
+`observability.otlp` exporte les traces et les métriques par OTLP. `{"otlp": null}` n'exporte rien. Chaque requête est une nouvelle trace racine comportant trois spans, et un quatrième avec `auth.userinfo` :
 
 | Span | Quoi |
 |---|---|
 | `mcp-gateway request` | La requête entière, jusqu'à la fin de la réponse |
 | `mcp-gateway resolve_credential` | L'étape du resolver ; attributs `mcp_gateway.resolver.type`, `mcp_gateway.resolver.cache` (`hit`, `miss`, `negative`, `none`) et `mcp_gateway.resolver.result` |
+| `mcp-gateway userinfo` | Avec `auth.userinfo` uniquement : la recherche userinfo ; attributs `mcp_gateway.userinfo.cache` (`hit`, `miss`, `none`) et `mcp_gateway.userinfo.result` (`profile`, `rejected`, `subject_mismatch`, `claims_invalid`, `unavailable`, `invalid`, `state_unavailable`, `disconnected`, `aborted`) |
 | `mcp-gateway upstream` | L'appel à Alien, jusqu'aux en-têtes de la réponse |
 
 Métriques :
@@ -81,6 +82,7 @@ Métriques :
 | `mcp_gateway.request.duration` | histogramme, secondes | Latence des requêtes, mêmes attributs |
 | `mcp_gateway.upstream.duration` | histogramme, secondes | Délai jusqu'aux en-têtes de la réponse d'Alien |
 | `mcp_gateway.resolver.lookups` | compteur | Appels au resolver par `resolver_type`, `cache`, `result`. Le taux de succès du cache et le taux d'échec de votre webhook |
+| `mcp_gateway.userinfo.lookups` | compteur | Avec `auth.userinfo` uniquement : recherches par `cache` et `result`. Le taux de succès du cache, et une hausse de `unavailable` ou `invalid` quand le fournisseur d'identité défaille |
 | `mcp_gateway.upstream.detached` | compteur | Requêtes qui se sont poursuivies après le départ de leur client, par `result` (section 8.5) |
 | `mcp_gateway.upstream.detached.active` | jauge | Celles qui sont en cours |
 | `mcp_gateway.sessions.bound` | jauge | Sessions dans ce processus (avec `state.type` valant `memory` uniquement) |
@@ -108,7 +110,7 @@ Des seaux à jetons par sujet et, facultativement, par organisation. Chaque requ
 
 `burst` est la taille du seau (et son niveau à la création) ; `per_minute` est le rythme de remplissage. Avec `{"burst": 30, "per_minute": 60}`, un nouveau sujet peut envoyer 30 requêtes d'un coup, puis une par seconde. `per_subject` est obligatoire lorsque la fonctionnalité est activée (`"rate_limits": null` la désactive). `per_organization` nécessite `auth.identity.organization`.
 
-Une requête refusée reçoit une réponse sous la forme que son émetteur peut lire, toujours avec `Retry-After` : un `tools/call` reçoit un HTTP `200` et un résultat avec `isError: true` et `_meta["alien.club/retryAfterSeconds"]` ; une autre requête portant un identifiant reçoit un HTTP `200` et `-31014` ; une requête à laquelle on ne peut pas répondre (une notification, `GET`, `DELETE`) reçoit un HTTP `429`. Le résultat d'audit est `rate_limited`, `reason` valant `subject` ou `organization`.
+Une requête refusée reçoit une réponse sous la forme que son émetteur peut lire, toujours avec `Retry-After` : un `tools/call` reçoit un HTTP `200` et un résultat avec `isError: true` et `_meta["alien.club/retryAfterSeconds"]` ; une autre requête portant un identifiant reçoit un HTTP `200` et `-31014` ; une requête à laquelle on ne peut pas répondre (une notification, `GET`, `DELETE`) reçoit un HTTP `429`. Le résultat d'audit est `rate_limited`, `reason` valant `subject` ou `organization`. Avec `auth.userinfo`, l'organisation n'est connue qu'après l'appel userinfo : le seau du sujet est donc prélevé en premier et celui de l'organisation ensuite, et une requête refusée pour `organization` a déjà dépensé son jeton de sujet.
 
 Avec `state.type` valant `memory`, chaque réplica conserve ses propres seaux : derrière un répartiteur de charge, la limite effective est la limite configurée multipliée par le nombre de réplicas qui voient le sujet. Avec `redis`, tous les réplicas partagent un seul ensemble de seaux.
 

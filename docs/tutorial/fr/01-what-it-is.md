@@ -58,7 +58,7 @@ Deux détails de l'étape (1) comptent pour tout ce qui suit :
 
 1. Le client appelle `https://mcp.example.com/mcp` sans jeton. La passerelle répond `401` avec `WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="mcp-gateway offline_access"`.
 2. Le client récupère ces métadonnées, y trouve `authorization_servers` (votre serveur OAuth, une seule entrée), lit les métadonnées propres à votre serveur, s'enregistre ou s'identifie, puis déroule le flux de code d'autorisation avec PKCE.
-3. Le client rappelle la passerelle avec le jeton d'accès. La passerelle le vérifie, interroge le resolver et transmet la requête avec la clé Alien de l'utilisateur.
+3. Le client rappelle la passerelle avec le jeton d'accès. La passerelle le vérifie, interroge le resolver et transmet la requête avec la clé Alien de l'utilisateur. Si `auth.userinfo` est défini, elle interroge aussi le point de terminaison userinfo de votre serveur OAuth pour obtenir les revendications de l'utilisateur avant d'interroger le resolver (chapitre 6.3).
 4. Alien impute l'appel à l'utilisateur propriétaire de la clé. Si l'organisation de cet utilisateur est parrainée, le flux du parrain montre également l'appel (chapitre 3).
 
 Suite : [2. Prérequis](02-prerequisites.md).

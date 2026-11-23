@@ -164,15 +164,92 @@ Get a token from your realm with any client you control, decode its payload, and
 
 ## 6.2 Other OAuth servers: a checklist
 
-The gateway works with any server that provides the prerequisites of chapter 2. This tutorial only tested **Keycloak 26.8.2** and **Ory Hydra v26.2** (both in the development stack, where the same end-to-end suite runs against each). It makes no claim about any other product. For Auth0, Microsoft Entra ID, Okta, authentik or another server, verify each point yourself with a real token and a real client before you rely on it:
+The gateway works with any server that provides the prerequisites of chapter 2. This tutorial only tested **Keycloak 26.8.2** and **Ory Hydra v26.2** (both in the development stack, where the same end-to-end suite runs against each). It makes no claim about any other product; [6.4](#64-which-servers-work) says what is expected of the others. For Auth0, Microsoft Entra ID, Okta, authentik or another server, verify each point yourself with a real token and a real client before you rely on it:
 
 - [ ] Metadata at an RFC 8414 or OpenID Connect discovery URL, listing `S256` in `code_challenge_methods_supported`, `authorization_endpoint`, `token_endpoint` and `jwks_uri`.
 - [ ] Access tokens are **JWTs** (not opaque strings) signed with an asymmetric algorithm from the list in chapter 2, with a `kid` that matches the JWKS.
 - [ ] Their `iss` is exactly the issuer you configure, and `aud` contains the gateway's `public_url` exactly. Some servers want the resource URL declared first (the Claude documentation notes that Microsoft Entra ID needs the MCP server URL registered as an Application ID URI, or the token request fails with `AADSTS9010010`).
 - [ ] The scopes you advertise exist and can be requested by an anonymous or pre-registered client, and the server accepts them in a registration request (Keycloak refuses `openid` there); the server does not answer `invalid_scope` when the client asks for exactly what you advertise.
 - [ ] Client registration: DCR without a pre-issued token, or CIMD with `client_id_metadata_document_supported: true` and `none` in `token_endpoint_auth_methods_supported`, or pre-registered clients with the redirect URIs of chapter 7. (Known: authentik 2026.8 DCR needs a pre-issued token and issues HS256 tokens; pre-register instead.)
-- [ ] The token carries a stable `sub` and the claims you map on (`email` with `email_verified`, `org`, `groups`), at the paths you configure.
+- [ ] The token carries a stable `sub` and the claims you map on (`email` with `email_verified`, `org`, `groups`), at the paths you configure. If the access token carries only `sub`, the userinfo endpoint must carry the others (6.3).
 - [ ] The token endpoint accepts `application/x-www-form-urlencoded` and answers discovery, registration and token requests well under 10 seconds (Claude's limit).
 - [ ] The server is reachable from the AI vendors' clouds (chapter 2).
+
+## 6.3 When the access token carries only the subject: userinfo
+
+Some identity providers put almost nothing about the user in a JWT access token: `sub`, `iss`, `aud`, `exp`, the scopes. The e-mail, the organization and the groups are in the ID token or at the provider's **userinfo endpoint** (OpenID Connect Core 5.3). This is common with Auth0, Okta and similar products. The gateway reads only the access token and never an ID token, so with such a provider it cannot see the claims the resolver needs, and every user is `no_mapping`.
+
+With `auth.userinfo` set, the gateway verifies the access token locally as usual, then calls the userinfo endpoint with that same token and reads the e-mail, `email_verified`, organization and groups from the answer. The subject still comes from the token. Use it only when the access token lacks the claims you map on: if it carries them (Keycloak with the template of 6.1, Hydra with the claims in `ext`), leave `"userinfo": null`, which is one network dependency less.
+
+How it behaves, in short (the reference is [`auth.userinfo`](../../configuration.md#authuserinfo)):
+
+- **One source per claim.** `auth.identity.subject` is read from the access token. `email`, `email_verified`, `organization` and `groups` are read from the userinfo document only, never merged with the token's claims. So write those four paths for the **userinfo document**, not for the token.
+- **The `sub` must match.** The `sub` of the userinfo answer must equal the `sub` of the token, or the request is a `401`.
+- **It is cached per token** for `cache_ttl_seconds`, or until the token expires if that comes first. A user whose e-mail or groups changed, or whose token was revoked at the provider, is served from the cache until the entry expires: choose the staleness you accept. `max_entries` bounds the cache with `state.type` `memory` and must be `null` with `redis`.
+- **A failing provider fails closed.** If the endpoint times out, answers `429` or a `5xx` after the retries, the client gets `503` with `-31015` and `Retry-After: 5`, and its token stays valid. A `401` or `403` from the provider is a `401` to the client.
+- **The URL is yours.** It is the one address that receives your users' access tokens, so it must be `https` (`allow_insecure_http` is for a development stack) and is written by you, not discovered.
+
+Configuration for an Auth0 or Okta style provider whose access tokens are JWTs for the gateway's audience (placeholders: replace the host and check each value against your provider; this has not been tested against those products):
+
+<!-- config-fragment: auth -->
+```json
+{
+  "issuer": "https://idp.example.com/",
+  "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+  "audiences": ["https://mcp.example.com/mcp"],
+  "algorithms": ["RS256"],
+  "required_scopes": [],
+  "scopes_advertised": ["openid", "email"],
+  "clock_skew_seconds": 5,
+  "jwks_cache_ttl_seconds": 300,
+  "jwks_max_stale_seconds": 3600,
+  "jwks_fetch_timeout_seconds": 5,
+  "identity": {
+    "subject": "sub",
+    "email": "email",
+    "email_verified": "email_verified",
+    "organization": "org",
+    "groups": "groups"
+  },
+  "userinfo": {
+    "url": "https://idp.example.com/userinfo",
+    "allow_insecure_http": false,
+    "timeout_seconds": 3,
+    "max_attempts": 3,
+    "total_timeout_seconds": 8,
+    "backoff_base_seconds": 0.2,
+    "backoff_max_seconds": 2,
+    "cache_ttl_seconds": 300,
+    "max_response_bytes": 65536,
+    "max_entries": 10000
+  }
+}
+```
+
+Points to check with your provider:
+
+- **`openid` in `scopes_advertised`.** A userinfo endpoint belongs to OpenID Connect and refuses an access token that was not issued with the `openid` scope. Keycloak answers `403` with `Missing openid scope` (a `401` to your client, `token rejected by the identity provider`). The clients ask for the scopes the gateway advertises, so `openid` must be in `auth.scopes_advertised`, and the claims you read (`email`, a groups or organization claim) must be released for the scopes requested: the `email` scope for the e-mail in the example. The provider must also let your clients request them. With Keycloak, do not use userinfo: put the claims in the access token, as the template realm of 6.1 does. Userinfo would need `openid` advertised, and Keycloak refuses a registration whose `scope` contains `openid` (6.1), which breaks clients that send the challenge's scopes at registration (VS Code).
+- **The provider must accept this token at the userinfo endpoint.** Some providers accept only access tokens issued for their userinfo audience there. Try it by hand with a real access token:
+
+```bash
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" https://idp.example.com/userinfo
+```
+
+  The answer must be `Content-Type: application/json` and carry a `sub` equal to the token's. Signed or encrypted userinfo (`application/jwt`) is not supported: leave `userinfo_signed_response_alg` and `userinfo_encrypted_response_alg` unset for the clients (and the provider's defaults) so that the answer stays JSON.
+- **Claim paths are split at every dot.** A claim whose own name contains a dot (a namespaced claim such as a URL) cannot be addressed: have the provider release it under a name without dots.
+- **Opaque access tokens do not work, with or without userinfo.** The gateway verifies a JWT first and `auth.userinfo` does not change that: a provider that issues opaque access tokens (Google is the main example) cannot be used directly. Put an identity provider that issues JWT access tokens in front of it, for example Keycloak with Google configured as an external identity provider, and point the gateway at Keycloak.
+
+## 6.4 Which servers work
+
+"Proven" means the end-to-end suite of this repository runs against it, including the userinfo path where the table says so. Everything else is a statement about what should work, not a test result: verify it with a real token and a real client (6.2) before you rely on it.
+
+| Server | Status | Notes |
+|---|---|---|
+| Keycloak 26.8 | Proven, with and without userinfo | The template realm of 6.1. With userinfo the token needs the `openid` scope (6.3). |
+| Ory Hydra v26.2 | Proven, with and without userinfo | The access token can carry the claims in `ext` or only `sub`; the userinfo endpoint serves the claims the consent step put in the ID token. |
+| Microsoft Entra ID | Expected to work, untested | JWT access tokens. Entra issues tokens whose `aud` is either the Application ID URI or the application's GUID (the v2 form): list both in `auth.audiences`, next to `public_url`. Clients cannot register themselves (no DCR): pre-register each AI client (chapter 7). Claims come from the token (optional claims): `"userinfo": null`. |
+| Auth0, Okta | Expected to work with userinfo when the access tokens are JWTs for the gateway's audience, untested | The case of 6.3. Their access tokens often hold only `sub`. |
+| authentik | Only with a pre-registered client that signs with RS256 | Clients created by dynamic registration get HS256 tokens, which a key set cannot verify (chapter 2). |
+| Google | Not directly | Its access tokens are opaque, and the gateway verifies a JWT first. Federate it into a JWT-issuing server such as Keycloak (6.3). |
 
 Continue with [7. Connecting clients](07-clients.md).

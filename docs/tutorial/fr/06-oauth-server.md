@@ -164,15 +164,92 @@ Obtenez un jeton de votre realm avec n'importe quel client que vous maîtrisez, 
 
 ## 6.2 Autres serveurs OAuth : une liste de contrôle
 
-La passerelle fonctionne avec tout serveur qui fournit les prérequis du chapitre 2. Ce tutoriel n'a testé que **Keycloak 26.8.2** et **Ory Hydra v26.2** (tous deux dans la pile de développement, où la même suite de bout en bout s'exécute contre chacun). Il n'affirme rien au sujet d'un autre produit. Pour Auth0, Microsoft Entra ID, Okta, authentik ou un autre serveur, vérifiez vous-même chaque point avec un vrai jeton et un vrai client avant de vous y fier :
+La passerelle fonctionne avec tout serveur qui fournit les prérequis du chapitre 2. Ce tutoriel n'a testé que **Keycloak 26.8.2** et **Ory Hydra v26.2** (tous deux dans la pile de développement, où la même suite de bout en bout s'exécute contre chacun). Il n'affirme rien au sujet d'un autre produit ; [6.4](#64-quels-serveurs-fonctionnent) dit ce qu'on attend des autres. Pour Auth0, Microsoft Entra ID, Okta, authentik ou un autre serveur, vérifiez vous-même chaque point avec un vrai jeton et un vrai client avant de vous y fier :
 
 - [ ] Des métadonnées à une URL de découverte RFC 8414 ou OpenID Connect, listant `S256` dans `code_challenge_methods_supported`, ainsi que `authorization_endpoint`, `token_endpoint` et `jwks_uri`.
 - [ ] Les jetons d'accès sont des **JWT** (et non des chaînes opaques) signés avec un algorithme asymétrique de la liste du chapitre 2, avec un `kid` qui correspond au JWKS.
 - [ ] Leur `iss` est exactement l'émetteur que vous configurez, et `aud` contient exactement le `public_url` de la passerelle. Certains serveurs veulent que l'URL de la ressource soit déclarée d'abord (la documentation de Claude note que Microsoft Entra ID exige que l'URL du serveur MCP soit enregistrée comme Application ID URI, faute de quoi la demande de jeton échoue avec `AADSTS9010010`).
 - [ ] Les portées que vous annoncez existent et peuvent être demandées par un client anonyme ou préenregistré, et le serveur les accepte dans une requête d'enregistrement (Keycloak y refuse `openid`) ; le serveur ne répond pas `invalid_scope` lorsque le client demande exactement ce que vous annoncez.
 - [ ] Enregistrement des clients : DCR sans jeton préémis, ou CIMD avec `client_id_metadata_document_supported: true` et `none` dans `token_endpoint_auth_methods_supported`, ou clients préenregistrés avec les URI de redirection du chapitre 7. (Connu : le DCR d'authentik 2026.8 exige un jeton préémis et émet des jetons HS256 ; préenregistrez plutôt.)
-- [ ] Le jeton porte un `sub` stable et les revendications sur lesquelles vous faites la correspondance (`email` avec `email_verified`, `org`, `groups`), aux chemins que vous configurez.
+- [ ] Le jeton porte un `sub` stable et les revendications sur lesquelles vous faites la correspondance (`email` avec `email_verified`, `org`, `groups`), aux chemins que vous configurez. Si le jeton d'accès ne porte que `sub`, le point de terminaison userinfo doit porter les autres (6.3).
 - [ ] Le point de terminaison de jeton accepte `application/x-www-form-urlencoded` et répond aux requêtes de découverte, d'enregistrement et de jeton bien en dessous de 10 secondes (la limite de Claude).
 - [ ] Le serveur est joignable depuis les clouds des éditeurs d'IA (chapitre 2).
+
+## 6.3 Quand le jeton d'accès ne porte que le sujet : userinfo
+
+Certains fournisseurs d'identité ne mettent presque rien sur l'utilisateur dans un jeton d'accès JWT : `sub`, `iss`, `aud`, `exp`, les portées. L'adresse e-mail, l'organisation et les groupes se trouvent dans le jeton d'identité ou au **point de terminaison userinfo** du fournisseur (OpenID Connect Core 5.3). C'est fréquent avec Auth0, Okta et des produits similaires. La passerelle ne lit que le jeton d'accès et jamais un jeton d'identité : avec un tel fournisseur, elle ne voit pas les revendications dont le resolver a besoin, et tout utilisateur est `no_mapping`.
+
+Avec `auth.userinfo` défini, la passerelle vérifie le jeton d'accès localement comme d'habitude, puis appelle le point de terminaison userinfo avec ce même jeton et lit l'adresse e-mail, `email_verified`, l'organisation et les groupes dans la réponse. Le sujet vient toujours du jeton. Ne l'utilisez que si le jeton d'accès ne porte pas les revendications sur lesquelles vous faites la correspondance : s'il les porte (Keycloak avec le modèle de 6.1, Hydra avec les revendications dans `ext`), laissez `"userinfo": null`, ce qui fait une dépendance réseau de moins.
+
+Son comportement, en bref (la référence est [`auth.userinfo`](../../configuration.md#authuserinfo)) :
+
+- **Une seule source par revendication.** `auth.identity.subject` est lu dans le jeton d'accès. `email`, `email_verified`, `organization` et `groups` sont lus dans le document userinfo uniquement, jamais fusionnés avec les revendications du jeton. Écrivez donc ces quatre chemins pour le **document userinfo**, pas pour le jeton.
+- **Le `sub` doit correspondre.** Le `sub` de la réponse userinfo doit être égal au `sub` du jeton, sinon la requête reçoit un `401`.
+- **Il est mis en cache par jeton** pendant `cache_ttl_seconds`, ou jusqu'à l'expiration du jeton si elle vient avant. Un utilisateur dont l'adresse e-mail ou les groupes ont changé, ou dont le jeton a été révoqué chez le fournisseur, est servi depuis le cache jusqu'à l'expiration de l'entrée : choisissez le retard que vous acceptez. `max_entries` borne le cache avec `state.type` `memory` et doit valoir `null` avec `redis`.
+- **Un fournisseur défaillant échoue en mode fermé.** Si le point de terminaison dépasse le délai, ou répond `429` ou un `5xx` après les nouvelles tentatives, le client reçoit `503` avec `-31015` et `Retry-After: 5`, et son jeton reste valide. Un `401` ou `403` du fournisseur devient un `401` pour le client.
+- **L'URL est la vôtre.** C'est la seule adresse qui reçoit les jetons d'accès de vos utilisateurs : elle doit donc être en `https` (`allow_insecure_http` est réservé à une pile de développement) et c'est vous qui l'écrivez, elle n'est pas découverte.
+
+Configuration pour un fournisseur de type Auth0 ou Okta dont les jetons d'accès sont des JWT destinés à l'audience de la passerelle (valeurs d'exemple : remplacez l'hôte et vérifiez chaque valeur auprès de votre fournisseur ; cela n'a pas été testé avec ces produits) :
+
+<!-- config-fragment: auth -->
+```json
+{
+  "issuer": "https://idp.example.com/",
+  "jwks_uri": "https://idp.example.com/.well-known/jwks.json",
+  "audiences": ["https://mcp.example.com/mcp"],
+  "algorithms": ["RS256"],
+  "required_scopes": [],
+  "scopes_advertised": ["openid", "email"],
+  "clock_skew_seconds": 5,
+  "jwks_cache_ttl_seconds": 300,
+  "jwks_max_stale_seconds": 3600,
+  "jwks_fetch_timeout_seconds": 5,
+  "identity": {
+    "subject": "sub",
+    "email": "email",
+    "email_verified": "email_verified",
+    "organization": "org",
+    "groups": "groups"
+  },
+  "userinfo": {
+    "url": "https://idp.example.com/userinfo",
+    "allow_insecure_http": false,
+    "timeout_seconds": 3,
+    "max_attempts": 3,
+    "total_timeout_seconds": 8,
+    "backoff_base_seconds": 0.2,
+    "backoff_max_seconds": 2,
+    "cache_ttl_seconds": 300,
+    "max_response_bytes": 65536,
+    "max_entries": 10000
+  }
+}
+```
+
+Points à vérifier avec votre fournisseur :
+
+- **`openid` dans `scopes_advertised`.** Un point de terminaison userinfo relève d'OpenID Connect et refuse un jeton d'accès qui n'a pas été émis avec la portée `openid`. Keycloak répond `403` avec `Missing openid scope` (un `401` pour votre client, `token rejected by the identity provider`). Les clients demandent les portées que la passerelle annonce : `openid` doit donc figurer dans `auth.scopes_advertised`, et les revendications que vous lisez (`email`, une revendication de groupes ou d'organisation) doivent être libérées pour les portées demandées : la portée `email` pour l'adresse e-mail de l'exemple. Le fournisseur doit aussi permettre à vos clients de les demander. Avec Keycloak, n'utilisez pas userinfo : placez les revendications dans le jeton d'accès, comme le fait le realm du modèle de 6.1. Userinfo exigerait d'annoncer `openid`, et Keycloak refuse un enregistrement dont le `scope` contient `openid` (6.1), ce qui casse les clients qui envoient les portées du challenge à l'enregistrement (VS Code).
+- **Le fournisseur doit accepter ce jeton au point de terminaison userinfo.** Certains fournisseurs n'y acceptent que des jetons d'accès émis pour leur audience userinfo. Essayez à la main avec un vrai jeton d'accès :
+
+```bash
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" https://idp.example.com/userinfo
+```
+
+  La réponse doit avoir `Content-Type: application/json` et porter un `sub` égal à celui du jeton. L'userinfo signé ou chiffré (`application/jwt`) n'est pas pris en charge : laissez `userinfo_signed_response_alg` et `userinfo_encrypted_response_alg` non définis pour les clients (et dans les valeurs par défaut du fournisseur) afin que la réponse reste du JSON.
+- **Les chemins de revendications sont découpés à chaque point.** Une revendication dont le nom contient lui-même un point (une revendication à espace de noms, comme une URL) ne peut pas être adressée : demandez au fournisseur de la libérer sous un nom sans point.
+- **Les jetons d'accès opaques ne fonctionnent pas, avec ou sans userinfo.** La passerelle vérifie d'abord un JWT et `auth.userinfo` n'y change rien : un fournisseur qui émet des jetons d'accès opaques (Google en est le principal exemple) ne peut pas être utilisé directement. Placez devant lui un fournisseur d'identité qui émet des jetons d'accès JWT, par exemple Keycloak avec Google configuré comme fournisseur d'identité externe, et faites pointer la passerelle vers Keycloak.
+
+## 6.4 Quels serveurs fonctionnent
+
+« Éprouvé » signifie que la suite de bout en bout de ce dépôt s'exécute contre lui, y compris le chemin userinfo lorsque le tableau l'indique. Tout le reste est une affirmation sur ce qui devrait fonctionner, pas un résultat de test : vérifiez avec un vrai jeton et un vrai client (6.2) avant de vous y fier.
+
+| Serveur | Statut | Remarques |
+|---|---|---|
+| Keycloak 26.8 | Éprouvé, avec et sans userinfo | Le realm modèle de 6.1. Avec userinfo, le jeton a besoin de la portée `openid` (6.3). |
+| Ory Hydra v26.2 | Éprouvé, avec et sans userinfo | Le jeton d'accès peut porter les revendications dans `ext` ou seulement `sub` ; le point de terminaison userinfo sert les revendications que l'étape de consentement a mises dans le jeton d'identité. |
+| Microsoft Entra ID | Devrait fonctionner, non testé | Jetons d'accès JWT. Entra émet des jetons dont l'`aud` est soit l'Application ID URI, soit le GUID de l'application (la forme v2) : listez les deux dans `auth.audiences`, à côté de `public_url`. Les clients ne peuvent pas s'enregistrer eux-mêmes (pas de DCR) : préenregistrez chaque client d'IA (chapitre 7). Les revendications viennent du jeton (revendications facultatives) : `"userinfo": null`. |
+| Auth0, Okta | Devrait fonctionner avec userinfo lorsque les jetons d'accès sont des JWT destinés à l'audience de la passerelle, non testé | Le cas de 6.3. Leurs jetons d'accès ne portent souvent que `sub`. |
+| authentik | Uniquement avec un client préenregistré qui signe en RS256 | Les clients créés par enregistrement dynamique reçoivent des jetons HS256, qu'un ensemble de clés ne peut pas vérifier (chapitre 2). |
+| Google | Pas directement | Ses jetons d'accès sont opaques, et la passerelle vérifie d'abord un JWT. Fédérez-le dans un serveur qui émet des JWT, comme Keycloak (6.3). |
 
 Suite : [7. Connecter les clients](07-clients.md).

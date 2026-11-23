@@ -59,18 +59,19 @@ Fields: `ts`, `event` (always `mcp_request`), `request_id`, `trace_id`, `subject
 
 `request_id` is also returned to the client as the `x-request-id` header of every response the gateway produces or relays: when a user reports a problem, ask for that header and search the audit line. A client-sent `x-request-id` is ignored.
 
-The `outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`. `reason` holds the machine reason where there is one: your resolver's denial reason, the failure class of a broken stream, or the bucket (`subject` or `organization`) that refused a rate-limited request.
+The `outcome` is one of: `origin_refused`, `unauthenticated`, `insufficient_scope`, `idp_unavailable`, `userinfo_unavailable`, `request_body_timeout`, `body_too_large`, `mcp_header_mismatch`, `duplicate_header`, `resolver_unavailable`, `state_unavailable`, `gateway_error`, `denied`, `rate_limited`, `session_not_found`, `upstream_error`, `upstream_auth_rejected`, `upstream_stream_failed`, `tool_denied`, `batch_refused`, `unparsable_request`, `invalid_request`, `tool_policy_failed`, `forwarded`, `client_disconnected`, `internal_error`. `reason` holds the machine reason where there is one: your resolver's denial reason, the failure class of a broken stream, the bucket (`subject` or `organization`) that refused a rate-limited request, or, with `auth.userinfo`, `userinfo_rejected`, `userinfo_subject_mismatch`, `userinfo_claims` or `userinfo_invalid`.
 
 The logs of the process itself (startup, resolver and JWKS errors) are JSON lines on stdout as well, with `ts`, `level`, `logger` and `message`.
 
 ### Traces and metrics
 
-`observability.otlp` exports traces and metrics over OTLP. `{"otlp": null}` exports nothing. Each request is a new root trace with three spans:
+`observability.otlp` exports traces and metrics over OTLP. `{"otlp": null}` exports nothing. Each request is a new root trace with three spans, and a fourth with `auth.userinfo`:
 
 | Span | What |
 |---|---|
 | `mcp-gateway request` | The whole request, until the response ends |
 | `mcp-gateway resolve_credential` | The resolver step; attributes `mcp_gateway.resolver.type`, `mcp_gateway.resolver.cache` (`hit`, `miss`, `negative`, `none`) and `mcp_gateway.resolver.result` |
+| `mcp-gateway userinfo` | With `auth.userinfo` only: the userinfo lookup; attributes `mcp_gateway.userinfo.cache` (`hit`, `miss`, `none`) and `mcp_gateway.userinfo.result` (`profile`, `rejected`, `subject_mismatch`, `claims_invalid`, `unavailable`, `invalid`, `state_unavailable`, `disconnected`, `aborted`) |
 | `mcp-gateway upstream` | The call to Alien, until the response headers |
 
 Metrics:
@@ -81,6 +82,7 @@ Metrics:
 | `mcp_gateway.request.duration` | histogram, seconds | Request latency, same attributes |
 | `mcp_gateway.upstream.duration` | histogram, seconds | Time to the response headers from Alien |
 | `mcp_gateway.resolver.lookups` | counter | Resolver calls by `resolver_type`, `cache`, `result`. The cache hit rate and the failure rate of your webhook |
+| `mcp_gateway.userinfo.lookups` | counter | With `auth.userinfo` only: lookups by `cache` and `result`. The cache hit rate, and a rising `unavailable` or `invalid` when the identity provider fails |
 | `mcp_gateway.upstream.detached` | counter | Requests that ran on after their client left, by `result` (section 8.5) |
 | `mcp_gateway.upstream.detached.active` | gauge | Those running now |
 | `mcp_gateway.sessions.bound` | gauge | Sessions in this process (with `state.type` `memory` only) |
@@ -108,7 +110,7 @@ Token buckets per subject and, optionally, per organization. Every authenticated
 
 `burst` is the bucket's size (and its level when created); `per_minute` is the refill rate. With `{"burst": 30, "per_minute": 60}` a new subject can send 30 requests at once, then one per second. `per_subject` is required when the feature is on (`"rate_limits": null` turns it off). `per_organization` needs `auth.identity.organization`.
 
-A refused request is answered in the form its sender can read, always with `Retry-After`: a `tools/call` gets HTTP `200` and a result with `isError: true` and `_meta["alien.club/retryAfterSeconds"]`; another request with an id gets HTTP `200` and `-31014`; a request that cannot be answered (a notification, `GET`, `DELETE`) gets HTTP `429`. The audit outcome is `rate_limited`, `reason` `subject` or `organization`.
+A refused request is answered in the form its sender can read, always with `Retry-After`: a `tools/call` gets HTTP `200` and a result with `isError: true` and `_meta["alien.club/retryAfterSeconds"]`; another request with an id gets HTTP `200` and `-31014`; a request that cannot be answered (a notification, `GET`, `DELETE`) gets HTTP `429`. The audit outcome is `rate_limited`, `reason` `subject` or `organization`. With `auth.userinfo` the organization is known only after the userinfo call, so the subject bucket is taken first and the organization bucket after: a request refused for `organization` has already spent its subject token.
 
 With `state.type` `memory` each replica keeps its own buckets: behind a load balancer the effective limit is the configured one times the number of replicas that see the subject. With `redis` all replicas share one set of buckets.
 

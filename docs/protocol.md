@@ -36,7 +36,7 @@ for itself and leaves `-32000..-32019` to implementations, where the Python SDK 
 | `-31002` | `UPSTREAM_PAYMENT_REQUIRED` | The upstream answered `402`. Same handling as `-31001`. | `200` with an id, otherwise `502` | `{"upstream_status": 402}` |
 | `-31003` | `UPSTREAM_UNREACHABLE` | Connection to the upstream failed (transport error). | `502` | none |
 | `-31004` | `UPSTREAM_TIMEOUT` | Connect, write, read or pool timeout towards the upstream, including a buffered `tools/list` body that did not arrive in time. | `504` | none |
-| `-31005` | `GATEWAY_ERROR` | The gateway could not do its job: the credential lookup failed, the resolver named an unknown upstream, an unexpected internal error, the tool policy could not be applied to a reply (it could not be parsed as strict UTF-8 JSON, it is nested deeper than 128 levels, it is too large, and so on), or the upstream answered a non-2xx to `tools/list`. | `500` for the first three; `200` when the tool policy could not be applied (as a JSON body, or as the SSE event that replaces the offending event); the upstream's own status for a non-2xx `tools/list` (with its `Retry-After` if any) | none |
+| `-31005` | `GATEWAY_ERROR` | The gateway could not do its job: the credential lookup failed, the resolver named an unknown upstream, an unexpected internal error, with `auth.userinfo` an answer of the userinfo endpoint the gateway cannot use (an unexpected status, a body that is not a JSON object with a string `sub`, too large, signed or encrypted `application/jwt`), the tool policy could not be applied to a reply (it could not be parsed as strict UTF-8 JSON, it is nested deeper than 128 levels, it is too large, and so on), or the upstream answered a non-2xx to `tools/list`. | `500` for the credential, upstream-name, internal and userinfo cases; `200` when the tool policy could not be applied (as a JSON body, or as the SSE event that replaces the offending event); the upstream's own status for a non-2xx `tools/list` (with its `Retry-After` if any) | none |
 | `-31006` | `UPSTREAM_STREAM_FAILED` | The upstream stream broke before the reply to the request was relayed. Sent as one final SSE event (`event: message`) on the already-open stream; any other mid-stream failure aborts the connection instead. | the status of the stream (normally `200`) | none |
 | `-31007` | `SESSION_NOT_FOUND` | `Mcp-Session-Id` is unknown here, expired, or bound to another user. Not forwarded. The client starts a new session. | `404` | none |
 | `-31008` | `ORIGIN_REFUSED` | An `Origin` header is present and not in `policies.allowed_origins`. Answered before authentication. `id` is `null`. | `403` | none |
@@ -44,9 +44,9 @@ for itself and leaves `-32000..-32019` to implementations, where the Python SDK 
 | `-31010` | `NO_MAPPING` | The signed-in user has no Alien account mapping (resolver reason `no_mapping`). No OAuth challenge. | `403` | none |
 | `-31011` | `AMBIGUOUS_MAPPING` | The user matches more than one mapping (reason `ambiguous_mapping`). | `403` | none |
 | `-31012` | `DENIED` | The resolver denied the user for any other reason. | `403` | none |
-| `-31013` | `STATE_UNAVAILABLE` | The shared state (Redis) failed or timed out; the gateway fails closed and forwards nothing. | `503`, header `Retry-After: 5` | none |
+| `-31013` | `STATE_UNAVAILABLE` | The shared state (Redis) failed or timed out (session bindings, resolver cache, userinfo cache, rate limit buckets); the gateway fails closed and forwards nothing. | `503`, header `Retry-After: 5` | none |
 | `-31014` | `RATE_LIMITED` | A rate limit bucket is empty, for any request that is not a `tools/call` with an id (see [Rate limit shapes](#rate-limit-shapes)). | `200` for a request with an id; `429` when no reply can be correlated (`id` null) | `{"retry_after_seconds": N}`, plus header `Retry-After: N` |
-| `-31015` | `USERINFO_UNAVAILABLE` | The identity provider's userinfo endpoint could not be reached or kept failing, after the configured retries. The request is not forwarded. | `503`, with `Retry-After: 5` | none |
+| `-31015` | `USERINFO_UNAVAILABLE` | Only with `auth.userinfo`. The gateway could not get the identity of a verified token from the identity provider's userinfo endpoint: a timeout, a transport error, status `429` or a `5xx`, still failing after `max_attempts` attempts or after `total_timeout_seconds`. The token is not at fault and the request is not forwarded: the client keeps its token and retries after `Retry-After`. `id` is the request id when the request expects a reply, otherwise `null`. Always the HTTP status `503` (not `200`), also for a request with an id. A provider that answers `401` or `403` is not this code: that is a `401` (below). Audit outcome `userinfo_unavailable`. | `503`, with `Retry-After: 5` | none |
 
 The audit line carries the outcome and, for denials, the reason; the client sees only the code.
 
@@ -80,17 +80,22 @@ A refused request is answered in the form its sender can read, always with `Retr
 | any other single request with an id | HTTP `200`, JSON-RPC error `-31014`, `data.retry_after_seconds: N`. |
 | no reply possible (notification, client response, `GET`, `DELETE`, a body that is not a JSON-RPC request, which includes a body nested deeper than 128 levels that no tool policy refused) | HTTP `429`, JSON-RPC error `-31014` with `id` null, `data.retry_after_seconds: N`. |
 
+With `auth.userinfo` the subject bucket is taken before the userinfo call and the organization bucket after it, so a request refused for `organization` has already spent its subject token (see [`policies.rate_limits`](configuration.md#policiesrate_limits)). The shapes are the same.
+
 ## HTTP statuses and challenge shapes before any JSON-RPC
 
-Authentication happens before the body is read. These answers are OAuth JSON, not JSON-RPC.
+Authentication happens before the body is read. These answers are OAuth JSON, not JSON-RPC. The one exception is `auth.userinfo`: the `401` answers that come from the identity provider's userinfo endpoint (the `401` row that names `auth.userinfo` in the table below) are issued after the body is read, the `Mcp-*` headers are checked and the subject rate limit is taken, so a request that is refused earlier (`413`, `408`, `400`, a rate limit) never causes a userinfo call and never gets them.
 
 | Status | Body | Header | When |
 |---|---|---|---|
 | `401` | `{"error": "invalid_token", "error_description": "<text>"}` | `WWW-Authenticate: Bearer resource_metadata="<PRM url>", scope="<scopes_advertised, space separated>"` | No bearer token. |
-| `401` | same | `WWW-Authenticate: Bearer resource_metadata="...", scope="...", error="invalid_token", error_description="<text>"` | Token invalid, expired, wrong audience or issuer, or its claims do not identify a user. |
+| `401` | same | `WWW-Authenticate: Bearer resource_metadata="...", scope="...", error="invalid_token", error_description="<text>"` | Token invalid, expired, wrong audience or issuer, or its claims do not identify a user (with `auth.userinfo`, also a token without a string `sub`: `token is missing a required claim`). |
+| `401` | same | same, with `error="invalid_token"` and the `error_description` below | Only with `auth.userinfo`, once the token is verified: `token rejected by the identity provider` (the userinfo endpoint answered `401` or `403`), `userinfo does not match the token subject` (the `sub` of the userinfo document is not the token's) or `token does not identify a user` (a claim of the userinfo document has the wrong type). Same shape and challenge as every other invalid token. |
 | `403` | `{"error": "insufficient_scope", "error_description": "<text>"}` | `WWW-Authenticate: Bearer resource_metadata="...", scope="<required_scopes>", error="insufficient_scope", error_description="<text>"` | Token valid, a required scope is missing. |
 | `503` | `{"error": "temporarily_unavailable", "error_description": "identity provider keys are unavailable"}` | `Retry-After: 5` | The identity provider's signing keys cannot be fetched. |
 | `499` | empty | none | The client left before the answer; nothing is written to anyone (the status is only logged and audited). |
+
+With `auth.userinfo` the two other userinfo failures are JSON-RPC errors, not OAuth JSON: `503` with `-31015` and `Retry-After: 5` when the provider is unavailable, `500` with `-31005` when its answer is unusable (they are in the table above). Neither carries a challenge: the client's token is not at fault, so it must not re-authenticate.
 
 A `401` from the upstream is never turned into one of these: it becomes `-31001` so that the client does not
 loop on OAuth re-authentication.

@@ -58,7 +58,7 @@ Two details of step (1) matter for everything that follows:
 
 1. The client calls `https://mcp.example.com/mcp` without a token. The gateway answers `401` with `WWW-Authenticate: Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource/mcp", scope="mcp-gateway offline_access"`.
 2. The client fetches that metadata, finds `authorization_servers` (your OAuth server, one entry), reads your server's own metadata, registers or identifies itself, and runs the authorization code flow with PKCE.
-3. The client calls the gateway again with the access token. The gateway verifies it, asks the resolver, and forwards the request with the user's Alien key.
+3. The client calls the gateway again with the access token. The gateway verifies it, asks the resolver, and forwards the request with the user's Alien key. If `auth.userinfo` is set, it also asks your OAuth server's userinfo endpoint for the user's claims before it asks the resolver (chapter 6.3).
 4. Alien meters the call to the user that owns the key. If that user's organization is sponsored, the sponsor's feed shows the call too (chapter 3).
 
 Continue with [2. Prerequisites](02-prerequisites.md).

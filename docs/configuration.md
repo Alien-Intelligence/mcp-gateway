@@ -25,7 +25,7 @@ In the tables, "required" means the key must be present. Durations are in second
 | `audit` | object | The audit log. |
 | `observability` | object | Traces and metrics export. |
 | `sessions` | object | Binding of upstream session ids to subjects. |
-| `state` | object | Where session bindings and cached credentials live: in this process or in a Redis shared by every replica. |
+| `state` | object | Where session bindings, cached credentials, cached userinfo profiles and rate limit buckets live: in this process or in a Redis shared by every replica. |
 | `policies` | object | Origin policy, tool policy and rate limits. |
 
 `GET /healthz` answers `{"status":"ok"}` without authentication: it is the liveness probe and never looks at the state backend. `GET /readyz` is the readiness probe (see [`state`](#state)).
@@ -39,7 +39,7 @@ In the tables, "required" means the key must be present. Durations are in second
 
 ## `auth`
 
-Tokens are JWTs verified against the identity provider's key set. Only asymmetric algorithms are accepted.
+Tokens are JWTs verified against the identity provider's key set. Only asymmetric algorithms are accepted. The identity claims are read from the verified token, or, when [`userinfo`](#authuserinfo) is set, partly from the identity provider's userinfo endpoint.
 
 | Key | Type | Bounds | Meaning |
 |---|---|---|---|
@@ -54,22 +54,112 @@ Tokens are JWTs verified against the identity provider's key set. Only asymmetri
 | `jwks_max_stale_seconds` | number | >= 0 | How long past the TTL the cached key set is still served when a refresh fails. Past it, requests get `503` with `Retry-After`. |
 | `jwks_fetch_timeout_seconds` | number | gt 0 | Timeout of one key-set fetch. |
 | `identity` | object | | Where the identity sits in the claims. |
+| `userinfo` | object or `null` | required | The OIDC userinfo call, for an identity provider whose access tokens carry only `sub`. `null` reads every claim from the access token and never calls the provider. See [`auth.userinfo`](#authuserinfo). |
 
-Authentication failures never reach the resolver or an upstream. `401` carries `WWW-Authenticate: Bearer resource_metadata="...", scope="..."` (plus `error` and `error_description` when a token was presented). A token whose claims give no subject is `401`.
+Authentication failures never reach the resolver or an upstream. `401` carries `WWW-Authenticate: Bearer resource_metadata="...", scope="..."` (plus `error` and `error_description` when a token was presented). A token whose claims give no subject is `401`. With `auth.userinfo`, the `401` answers that come from the identity provider's userinfo endpoint are issued later, after the request body is read and the subject rate limit is taken (see [`auth.userinfo`](#authuserinfo)).
 
 ### `auth.identity`
 
-Each value is a dotted path into the verified claims: `ext.org` is `claims["ext"]["org"]`.
+Each value is a dotted path into a claims document: `ext.org` is `claims["ext"]["org"]`. Which document depends on `auth.userinfo`:
+
+- `null`: every path is read from the verified access token.
+- set: `subject` is read from the verified access token, and `email`, `email_verified`, `organization` and `groups` are read from the userinfo document and from nowhere else. Claims of the token and of the document are never merged (see [`auth.userinfo`](#authuserinfo)).
 
 | Key | Type | Meaning |
 |---|---|---|
-| `subject` | string, non-empty dotted path | Stable user id. Required in the token and a string. |
+| `subject` | string, non-empty dotted path | Stable user id. Required in the access token (also with `auth.userinfo`) and a string. |
 | `email` | dotted path or `null` | The e-mail. |
-| `email_verified` | dotted path or `null` | A claim that must be the boolean `true` before `email` is trusted. `null` means an e-mail is never trusted: the identity has no e-mail and a static mapping with an `email` matcher is refused at start. |
+| `email_verified` | dotted path or `null` | A claim, in the same document as `email`, that must be the boolean `true` before `email` is trusted. `null` means an e-mail is never trusted: the identity has no e-mail and a static mapping with an `email` matcher is refused at start. |
 | `organization` | dotted path or `null` | The organization claim, a string. |
 | `groups` | dotted path or `null` | A list of strings. |
 
 A claim of the wrong type is a `401`. A missing optional claim is an absent value.
+
+### `auth.userinfo`
+
+For an identity provider whose JWT access tokens carry only `sub`, which is common with Auth0, Okta and similar products. After the token is verified locally (signature, `iss`, `aud`, expiry), the gateway sends the same token to the provider's userinfo endpoint ([OIDC Core 5.3](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)) and reads the identity from the answer. `null` is the default behaviour: nothing is called and every claim comes from the access token. The key is required; write `"userinfo": null` to leave it off.
+
+```json
+"userinfo": {
+  "url": "https://idp.example.com/userinfo",
+  "allow_insecure_http": false,
+  "timeout_seconds": 3,
+  "max_attempts": 3,
+  "total_timeout_seconds": 8,
+  "backoff_base_seconds": 0.2,
+  "backoff_max_seconds": 2,
+  "cache_ttl_seconds": 300,
+  "max_response_bytes": 65536,
+  "max_entries": 10000
+}
+```
+
+When it is an object, every key is required:
+
+| Key | Type | Bounds | Meaning |
+|---|---|---|---|
+| `url` | string, absolute http(s) URL | no credentials, no fragment; `https` unless `allow_insecure_http` | The userinfo endpoint. Written by you, never discovered (like `jwks_uri`): it is the one address that receives your users' access tokens, and the gateway does not follow the provider's metadata to find it. |
+| `allow_insecure_http` | boolean | | Allows a plain `http` URL. The request carries the user's bearer token, so this is for dev and test stacks only. |
+| `timeout_seconds` | number | gt 0 | One attempt: connect, send and read the whole answer. |
+| `max_attempts` | integer | 1 to 10 | Attempts for a retryable failure. |
+| `total_timeout_seconds` | number | gt 0, and > `timeout_seconds` | Wall-clock ceiling for the whole lookup: every attempt, every pause and the reading of the answer. |
+| `backoff_base_seconds` | number | gt 0 | First pause between attempts; doubles each time, with jitter. |
+| `backoff_max_seconds` | number | gt 0, >= `backoff_base_seconds` | Cap of one pause. |
+| `cache_ttl_seconds` | number | gt 0 | How long a lookup is kept, per access token; shortened to the token's own remaining life (see below). |
+| `max_response_bytes` | integer | 1 to 1048576 | The largest userinfo document the gateway reads. A larger one is refused. |
+| `max_entries` | integer or `null` | >= 1 | Cache size, least recently used evicted first. Required with `state.type` `memory`, `null` with `redis` (entries expire by their TTL only). The config is refused otherwise. |
+
+Startup is refused when `auth.userinfo` is set while `auth.identity.email`, `organization` and `groups` are all `null`: nothing would be read from it. An `http` URL without `allow_insecure_http: true` is refused with `auth.userinfo.url must be https (allow_insecure_http=true is for dev and test only)`.
+
+**Where each claim is read from.** One rule, no merge. With `auth.userinfo` set:
+
+- `auth.identity.subject` is read from the **verified access token**, as without userinfo. The subject is therefore known before the call, which is why the subject rate limit and the audit line need no userinfo.
+- `auth.identity.email`, `email_verified`, `organization` and `groups` are read from the **userinfo document only**. A claim of the access token under those paths is ignored, even when the document lacks it. The `email` and `email_verified` pair always comes from one document.
+
+**The `sub` check** ([OIDC Core 5.3.4](https://openid.net/specs/openid-connect-core-1_0.html#UserInfoResponse)). The literal `sub` of the userinfo document must equal the literal `sub` claim of the verified token, whatever `auth.identity.subject` says. A token without a string `sub` is `401` `token is missing a required claim`. A document whose `sub` differs is `401` `userinfo does not match the token subject`. A document without a string `sub` is an unusable answer (`500`, below).
+
+**The flow**, in the order the gateway does it for each request:
+
+1. Verify the access token locally. Nothing is ever sent to the userinfo endpoint for a token that failed this.
+2. Read the request body, check the `Mcp-*` headers.
+3. Take a token from the subject rate limit bucket (see [`policies.rate_limits`](#policiesrate_limits)).
+4. Userinfo: the cache, then (on a miss) one call, then the cache write.
+5. Take a token from the organization rate limit bucket, with the organization the document gave.
+6. The credential lookup (the resolver), as without userinfo.
+
+The call is `GET <url>` with `Authorization: Bearer <the access token>` and `Accept: application/json`, from an HTTP client of its own that does not follow redirects.
+
+**What is accepted.** Only a `200` with a `Content-Type` whose media type is `application/json` (parameters are allowed; a `charset` other than `utf-8` is refused), a body of at most `max_response_bytes` that is strict UTF-8 JSON (nested at most 128 levels, as for request bodies) and a JSON object with a non-empty string `sub`. Anything else is refused as set out below.
+
+**Signed or encrypted userinfo is not supported.** A provider may answer `Content-Type: application/jwt` (a signed or encrypted userinfo response, OIDC Core 5.3.2), for example when the client is registered with `userinfo_signed_response_alg`. The gateway refuses it (`500`, `userinfo_invalid`; the log line says signed or encrypted userinfo responses are not supported). To keep an identity provider on plain JSON, do not register a signed or encrypted userinfo response for the clients that use the gateway: leave `userinfo_signed_response_alg` and `userinfo_encrypted_response_alg` unset in their registration (and in the provider's defaults, where it has any) so that the answer stays `application/json`.
+
+**Cache.** One entry per access token, never per subject: another token of the same user is a separate lookup, and a token that is revoked or expires is not answered from another token's entry. The key is a digest of the token, never the token itself. What is kept is the profile the gateway read from the document (the verified e-mail, the organization and the groups), not the document.
+
+- The entry lives `min(cache_ttl_seconds, exp - now)`, where `exp` is the token's own expiry, in seconds. A token with no time left is not cached.
+- Revocation is not looked up while an entry lives. A token revoked at the provider, or a user whose e-mail, organization or groups changed, is served from the cache until the entry expires, at most `cache_ttl_seconds` and never past the token's own expiry. Choose `cache_ttl_seconds` as the staleness you accept.
+- With `state.type` `memory`: in this process, at most `max_entries` entries, keyed by the SHA-256 of the token, expiry on a monotonic clock. With `redis`: shared by every replica under `{p}u:{h("userinfo", token)}` (see [`state`](#state)), encrypted with AES-256-GCM exactly like the resolver cache: the stored values are unreadable without `encryption_key_file`, and Redis expires them by TTL.
+- **Errors are never cached**: not a rejection, a mismatch, a wrong-type claim, an unavailable provider nor an unusable answer. The next request with that token asks again, after the subject rate limit.
+- A cache store that fails (Redis down) is not worked around: the gateway never asks the provider while it cannot read or write its cache. The request gets `503`, `-31013`, outcome `state_unavailable`.
+
+**Single flight.** Concurrent requests that miss the cache with the same token share one call to the provider, per process. The call runs in a task of its own and is cancelled only when every request waiting on it has gone (a client that leaves does not keep a slow provider call running). An error reaches every waiter and is not cached. Replicas do not coordinate: two replicas missing at once each call the provider. A request that joins a call in flight counts as a miss in the metric.
+
+**Retries and the total timeout.** A timeout, a transport error (connection refused, reset, TLS failure, DNS), status `429` and any `5xx` are retried, up to `max_attempts` attempts, each bounded by `timeout_seconds`. The pause before attempt *n+1* is half of `min(backoff_max_seconds, backoff_base_seconds * 2^(n-1))` plus a random amount of up to the same half (equal jitter). `total_timeout_seconds` bounds the whole lookup; when it runs out the lookup fails as unavailable. Every failed attempt logs a WARNING (`auth.userinfo attempt N/M failed (<class>)`) with no URL or content. Never retried: `401`, `403` and every unusable answer.
+
+**Every failure and its answer.** `401` answers have the same OAuth JSON body and `WWW-Authenticate` challenge as every other invalid token (see [protocol](protocol.md#http-statuses-and-challenge-shapes-before-any-json-rpc)). JSON-RPC answers use the request id when a reply is expected, as the resolver does.
+
+| What happened | Client sees | Audit |
+|---|---|---|
+| The provider answered `401` or `403` (token revoked, or, with Keycloak, the token lacks the `openid` scope: `403` `Missing openid scope`) | `401`, `error_description` `token rejected by the identity provider` | `unauthenticated`, reason `userinfo_rejected` |
+| The document's `sub` differs from the token's | `401`, `userinfo does not match the token subject` | `unauthenticated`, reason `userinfo_subject_mismatch` |
+| A claim at a configured path has the wrong type (for example `groups` is not a list of strings) | `401`, `token does not identify a user` | `unauthenticated`, reason `userinfo_claims` |
+| The token has no string `sub` (userinfo set) | `401`, `token is missing a required claim` | `unauthenticated` |
+| Timeout, transport error, `429` or `5xx`, still failing after the attempts, or past `total_timeout_seconds` | `503`, JSON-RPC `-31015`, `Retry-After: 5` | `userinfo_unavailable` |
+| Any other status (`3xx`, other `4xx`, a `2xx` that is not `200`), no `Content-Type`, not `application/json`, `application/jwt`, a charset other than utf-8, a body over `max_response_bytes`, not UTF-8, not JSON, not an object, no string `sub` | `500`, JSON-RPC `-31005` "The gateway could not establish the identity of this user." | `gateway_error`, reason `userinfo_invalid` |
+| The cache store failed | `503`, JSON-RPC `-31013`, `Retry-After: 5` | `state_unavailable` |
+| The client left during the lookup | none (`499` is only audited) | `client_disconnected` |
+
+Messages and logs name the setting (`auth.userinfo`) and the class of failure, never the URL, the token or any content of the document. The `httpx` and `httpcore` loggers are held at WARNING, so the HTTP client does not write the request lines (which carry the URLs of the key set, the userinfo endpoint, the webhook and the upstreams) to the log.
+
 
 ## `resolver`
 
@@ -287,11 +377,11 @@ An upstream `Mcp-Session-Id` is bound to the subject it was issued to, in the ba
 
 ## `state`
 
-State that must agree between replicas lives here: the session bindings (`sessions`), the resolver cache (`resolver_cache`) and the rate limit buckets (`policies.rate_limits`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
+State that must agree between replicas lives here: the session bindings (`sessions`), the resolver cache (`resolver_cache`), the userinfo cache (`auth.userinfo`) and the rate limit buckets (`policies.rate_limits`). Choose `memory` for a single replica or `redis` for several; the gateway never picks for you and never falls back from one to the other.
 
 ### `memory`
 
-`{"type": "memory"}`. Bindings and cache entries live in the process. This is correct for exactly one replica: behind a load balancer with two replicas, a session bound on one would be unknown to the other (`404`), and an upstream `401` that drops a cached credential on one replica would not reach the other. `sessions.max_entries` and (when the cache is on) `resolver_cache.max_entries` are required.
+`{"type": "memory"}`. Bindings and cache entries live in the process. This is correct for exactly one replica: behind a load balancer with two replicas, a session bound on one would be unknown to the other (`404`), and an upstream `401` that drops a cached credential on one replica would not reach the other. `sessions.max_entries`, `resolver_cache.max_entries` (when the cache is on) and `auth.userinfo.max_entries` (when `auth.userinfo` is set) are required.
 
 ### `redis`
 
@@ -315,9 +405,9 @@ State that must agree between replicas lives here: the session bindings (`sessio
 | `connect_timeout_seconds` | number | gt 0 | Socket connect timeout. |
 | `operation_timeout_seconds` | number | gt 0 | Ceiling for every Redis operation, a script and the readiness ping included. There are no retries. |
 | `max_connections` | integer | >= 1 | Connection pool size. When every connection is busy a command waits for one instead of failing; that wait consumes the same `operation_timeout_seconds` as the command itself, so a saturated pool surfaces as a timeout (`503`), never as an immediate refusal. |
-| `encryption_key_file` | string | non-empty | File holding the base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials. Generate it with `head -c 32 /dev/urandom \| base64`. A missing, empty, non-base64 or wrongly sized file stops the process at start; the message never echoes the content. |
+| `encryption_key_file` | string | non-empty | File holding the base64 of exactly 32 random bytes: the AES-256-GCM key of cached credentials and cached userinfo profiles. Generate it with `head -c 32 /dev/urandom \| base64`. A missing, empty, non-base64 or wrongly sized file stops the process at start; the message never echoes the content. |
 
-With `redis`, `sessions.max_entries` and `resolver_cache.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
+With `redis`, `sessions.max_entries`, `resolver_cache.max_entries` and `auth.userinfo.max_entries` must be `null`: the config is refused otherwise (nothing is silently ignored). Entries are bounded by their TTLs and by `sessions.max_entries_per_subject`.
 
 Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an issuer, an e-mail or an API key in clear: key names hold keyed digests and values hold digests or ciphertext. `h(...)` below is HMAC-SHA256 under a key derived (HKDF-SHA256, `info` `mcp-gateway key names`) from the key in `encryption_key_file`, so a key name cannot be recomputed from a guessed subject or session id without that key. The consequence: every replica sharing a Redis must share the key file, and changing the key renames every key (see the rotation note below).
 
@@ -327,10 +417,11 @@ Keys (`p` is `key_prefix`). Nothing below carries a session id, a subject, an is
 | `{p}ss:{h(subject key)}` | Sorted set of that subject's binding digests, scored by last use. It enforces `max_entries_per_subject` by evicting the subject's own oldest binding. | `sessions.idle_ttl_seconds`, refreshed on use. |
 | `{p}c:{h(identity)}` | The cached credential or denial, AES-256-GCM encrypted, after a 4-byte key id (random 12-byte nonce; `{p}` and the entry digest as associated data, so a value copied to another entry or another gateway's prefix is refused). The absolute expiry is sealed inside the value. | The entry's TTL. |
 | `{p}cg:{h(identity)}` | Invalidation generation of that identity. | One day, refreshed on each invalidation. |
+| `{p}u:{h("userinfo", token)}` | The userinfo profile of one access token (verified e-mail, organization, groups), sealed like `{p}c:` (same format, `{p}` and the entry digest as associated data, absolute expiry sealed inside). Only with `auth.userinfo`. The key is a digest of the access token, never the token. | `min(auth.userinfo.cache_ttl_seconds, token exp - now)`. |
 
 Binding, checking and dropping a session are each one Lua script, so replicas cannot race a binding or the per-subject cap. The scripts derive the per-subject key from a stored digest: use one Redis (a primary with replicas is fine), not a sharded Redis Cluster. A value past its sealed expiry is a miss even if Redis still holds it (for example one replayed without its TTL); the expiry is the writing replica's wall clock (`time.time()`), so replicas whose clocks disagree by more than a cache TTL see entries expire early or late: keep them on NTP. A cached value that is malformed, or that carries this replica's key id but fails authentication (tampering, truncation), is deleted and counted as a miss, with a warning that carries no content.
 
-**Rotating `encryption_key_file`.** Every cached value starts with a 4-byte key id derived from the key (HKDF-SHA256, `info` `mcp-gateway key id`). A value with another key id is counted as a miss and left alone (DEBUG log at most): it belongs to a replica still on the other key. Because key names derive from the same key, a replica on the new key also looks under different names, so during a rolling update the two generations simply do not see each other's entries: the cache of the new generation starts empty (the credential backend is asked once per identity) and entries of the old key expire by their TTL. Session bindings and rate limit buckets are keyed the same way, so a session opened on an old-key replica is unknown (`404`) to a new-key replica and rate limit buckets restart full. Rotate in a quiet window, or accept those effects; there is no outage, and no replica fails requests because of the other generation.
+**Rotating `encryption_key_file`.** Every cached value starts with a 4-byte key id derived from the key (HKDF-SHA256, `info` `mcp-gateway key id`). A value with another key id is counted as a miss and left alone (DEBUG log at most): it belongs to a replica still on the other key. Because key names derive from the same key, a replica on the new key also looks under different names, so during a rolling update the two generations simply do not see each other's entries: the cache of the new generation starts empty (the credential backend is asked once per identity, the identity provider's userinfo endpoint once per token) and entries of the old key expire by their TTL. Session bindings and rate limit buckets are keyed the same way, so a session opened on an old-key replica is unknown (`404`) to a new-key replica and rate limit buckets restart full. Rotate in a quiet window, or accept those effects; there is no outage, and no replica fails requests because of the other generation.
 
 An upstream `401` or `402` deletes the cached entry and bumps its generation. A lookup writes its answer only if the generation is unchanged since before it asked the backend, so a lookup still running on replica B cannot put back a credential that replica A just invalidated.
 
@@ -407,7 +498,14 @@ What a token is: every authenticated request to the MCP endpoint (any method: `P
 
 Burst against rate, worked example with `{"burst": 30, "per_minute": 60}`: a new subject can send 30 requests at once, then one per second. After 30 s of silence it has 30 tokens back. A subject sending steadily 1.5 requests per second drains the bucket at 0.5 tokens per second and is refused after about 60 s, then gets through one request per second. `burst` sets how large a spike is tolerated; `per_minute` sets the sustained rate.
 
-Subject and organization: with both set, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (the claim is absent) is charged to its subject bucket only. A `policies.tools` rule matching on `organization` is likewise refused when `auth.identity.organization` is `null`: it could never match.
+Subject and organization: with both set and without `auth.userinfo`, a request takes a token from both buckets, atomically. A token leaves both or neither, so an exhausted organization bucket does not drain the tokens of the subject that was refused. The retry delay is the wait until every bucket the request needs has a token. A subject whose token carries no organization (the claim is absent) is charged to its subject bucket only. A `policies.tools` rule matching on `organization` is likewise refused when `auth.identity.organization` is `null`: it could never match.
+
+With `auth.userinfo` set, the organization is not known until the userinfo call has answered, so the request takes its tokens in two steps and the order is part of the contract: the **subject** bucket first, then the userinfo call (cache and single flight included), then the **organization** bucket, then the credential lookup. Two consequences:
+
+- A request refused by the organization bucket has already spent its subject token, and may have caused a userinfo call. Without userinfo a refusal by either bucket leaves both untouched; with it, only the refusal by the subject bucket does.
+- A flood from one token or one subject (a token the identity provider rejects, a cache that misses, an identity provider outage where every request would retry) is refused by the subject bucket before it reaches the identity provider. The token is taken once per request, not once per userinfo attempt.
+
+A subject whose userinfo document carries no organization, or a `per_organization` of `null`, takes no second token. `rate_limits: null` takes none at all. The two takes are two calls to the state backend; with `redis`, either one failing is the same fail-closed `503` as below.
 
 The refusal has three shapes, chosen so that the sender can read it:
 
@@ -438,7 +536,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `request_id` | string | UUID4 generated by the gateway, returned to the client as `x-request-id` on every response the gateway produces or relays. An inbound `x-request-id` is ignored and never forwarded. |
 | `trace_id` | string or null | 32 hex characters of the request's trace; `null` when tracing is off. |
 | `subject` | string or null | Verified subject; `null` before authentication succeeds. |
-| `organization` | string or null | Verified organization claim. |
+| `organization` | string or null | Verified organization claim. With `auth.userinfo` it is set once the userinfo answered, so a request refused before that (by the subject bucket, or because the lookup failed) has `null`. |
 | `labels` | object or null | The resolver's labels; `null` before a credential was resolved. |
 | `http_method` | string | `POST`, `GET` or `DELETE`. |
 | `rpc_method` | string or null | JSON-RPC `method` of the body; `null` for a body that is not a JSON-RPC request. |
@@ -446,7 +544,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `tool` | string or null | `params.name` of a `tools/call`. |
 | `status` | integer | HTTP status the gateway answered (the upstream's for a relayed response, `499` when the client left). |
 | `outcome` | string | See below. |
-| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a reply or stream event the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name, or `upstream_status` for a failed `tools/list` whose body was replaced, or the bucket that refused a `rate_limited` request (`subject` or `organization`). |
+| `reason` | string or null | Machine reason: a resolver denial reason, the failure class of a broken stream, or of a reply or stream event the gateway could not filter, or `invalid_params` for a `tools/call` without a readable tool name, or `upstream_status` for a failed `tools/list` whose body was replaced, or the bucket that refused a `rate_limited` request (`subject` or `organization`), or, with `auth.userinfo`, `userinfo_rejected`, `userinfo_subject_mismatch`, `userinfo_claims` (all `unauthenticated`) or `userinfo_invalid` (`gateway_error`). |
 | `upstream` | string or null | Upstream name, once one was chosen. |
 | `latency_ms` | number | From receipt to the end of the response (the end of the stream for SSE). |
 | `upstream_status` | integer or null | Status the upstream answered. |
@@ -494,6 +592,7 @@ Each request is a new root trace; an inbound `traceparent` is never its parent. 
 |---|---|---|
 | `mcp-gateway request` | server | `http.request.method`, `http.response.status_code`, `mcp.method.name`, `mcp.tool.name`, `mcp_gateway.outcome`, `mcp_gateway.request_id`, `mcp_gateway.session.present` (an `Mcp-Session-Id` was sent), `mcp_gateway.upstream`, `mcp_gateway.upstream.status_code`, `mcp_gateway.reason`, `mcp_gateway.label.<key>` for each resolver label. Lasts until the response ends. |
 | `mcp-gateway resolve_credential` | internal | `mcp_gateway.resolver.type` (`static`, `webhook`, `store_sql`, `store_redis`, `chain`), `mcp_gateway.resolver.cache` (`hit`, `miss`, `negative`, `none` when the cache is off), `mcp_gateway.resolver.result` (`credential`, `denied`, `unavailable`, `error`, `disconnected`, `aborted`). |
+| `mcp-gateway userinfo` | internal | `mcp_gateway.userinfo.cache` (`hit`, `miss`, or `none` when the lookup ended before the cache answered), `mcp_gateway.userinfo.result` (`profile`, `rejected`, `subject_mismatch`, `claims_invalid`, `unavailable`, `invalid`, `state_unavailable`, `disconnected`, `aborted`). Only with `auth.userinfo`. Error status for `unavailable`, `invalid` and `state_unavailable`. |
 | `mcp-gateway upstream` | client | `mcp_gateway.upstream`, `http.response.status_code`, `mcp_gateway.upstream.error` (`timeout`, `unreachable`, `aborted`). Ends at the response headers. |
 
 Error status is set on the request span for `status >= 500`, `upstream_stream_failed`, `tool_policy_failed` and `internal_error`, with no message and no recorded exception. Spans never carry the subject, e-mail, organization, a token, a key, a session id, arguments or content.
@@ -506,6 +605,7 @@ Error status is set on the request span for `status >= 500`, `upstream_stream_fa
 | `mcp_gateway.request.duration` | histogram | `s` | same as `mcp_gateway.requests` |
 | `mcp_gateway.upstream.duration` | histogram | `s` | `upstream`, `status_class` (`error` when no response came). Time to the response headers. |
 | `mcp_gateway.resolver.lookups` | counter | `{lookup}` | `resolver_type`, `cache`, `result` (values as in the resolver span) |
+| `mcp_gateway.userinfo.lookups` | counter | `{lookup}` | `cache`, `result` (values as in the userinfo span). Only with `auth.userinfo`; no identity, token or document content. |
 | `mcp_gateway.upstream.detached` | counter | `{request}` | `upstream`, `result` (`completed`, `timeout`, `failed`, `shed`, `shutdown`). Upstream requests that ran on after their client left. |
 | `mcp_gateway.upstream.detached.active` | observable gauge | `{request}` | none |
 | `mcp_gateway.sessions.bound` | observable gauge | `{session}` | none |
