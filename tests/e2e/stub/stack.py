@@ -27,6 +27,7 @@ STUB_URL = "http://127.0.0.1:14000"
 WEBHOOK_URL = "http://127.0.0.1:18090"
 KEYCLOAK_ISSUER = "http://localhost:18080/realms/alien-gateway-dev"
 HYDRA_ISSUER = "http://localhost:14444"
+USERINFO_KEYCLOAK_ISSUER = "http://localhost:18080/realms/alien-gateway-userinfo"
 REQUIRED_ENV = (
     "E2E_USER_PASSWORD",
     "E2E_RUN_DIR",
@@ -58,6 +59,31 @@ UNREACHABLE = Provider(
     owns_state=True,
 )
 STATIC_PROVIDERS = (KEYCLOAK, HYDRA)
+# The gateways that read the identity from the identity provider's userinfo endpoint: their access
+# tokens carry only the subject. Keycloak (realm alien-gateway-userinfo, which exports telemetry),
+# Hydra (/userinfo answers from the ID token), and Keycloak with a userinfo URL on a closed port.
+USERINFO_KEYCLOAK = Provider(
+    name="userinfo-keycloak",
+    gateway_url="http://localhost:18008/mcp",
+    issuer=USERINFO_KEYCLOAK_ISSUER,
+    wrong_audience={"scope": "openid"},
+    owns_state=True,
+)
+USERINFO_HYDRA = Provider(
+    name="userinfo-hydra",
+    gateway_url="http://localhost:18010/mcp",
+    issuer=HYDRA_ISSUER,
+    wrong_audience={"resource": "http://localhost:18999/mcp"},
+    owns_state=True,
+)
+USERINFO_DOWN = Provider(
+    name="userinfo-down",
+    gateway_url="http://localhost:18011/mcp",
+    issuer=USERINFO_KEYCLOAK_ISSUER,
+    wrong_audience={"scope": "openid"},
+    owns_state=True,
+)
+USERINFO_PROVIDERS = (USERINFO_KEYCLOAK, USERINFO_HYDRA)
 # The replica pair behind its load balancer (Keycloak). Tokens are issued for this address, which
 # is the public URL of both replicas.
 HA = Provider(
@@ -87,6 +113,9 @@ ADVERTISED_SCOPE = {
     "unreachable": "openid mcp-gateway",
     "ha": "openid mcp-gateway",
     "noredis": "openid mcp-gateway",
+    "userinfo-keycloak": "openid mcp-gateway",
+    "userinfo-hydra": "openid",
+    "userinfo-down": "openid mcp-gateway",
 }
 # Test-only browser origin allowed on every gateway, and one that is not.
 ALLOWED_ORIGIN = "http://localhost:6274"
@@ -288,6 +317,7 @@ UPSTREAM_UNAUTHORIZED = -31001
 SESSION_NOT_FOUND = -31007
 STATE_UNAVAILABLE = -31013
 RATE_LIMITED = -31014
+USERINFO_UNAVAILABLE = -31015
 RETRY_AFTER_META_KEY = "alien.club/retryAfterSeconds"
 
 # compose.yaml: `state.key_prefix` of the pair, and the key pattern of its resolver store.

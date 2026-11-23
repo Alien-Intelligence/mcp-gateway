@@ -77,6 +77,19 @@ services:
       upstream-stub:
         condition: service_healthy
 
+  gateway-userinfo-keycloak:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-userinfo-hydra:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+  gateway-userinfo-down:
+    depends_on:
+      upstream-stub:
+        condition: service_healthy
+
   # The deployable realm template (deploy/keycloak), rendered by render.sh and imported at start
   # as its README tells a customer to; tests/e2e/stub/test_keycloak_template.py attacks it. No
   # gateway uses it: the audience below only has to match the harness's E2E_KC_TEMPLATE_AUDIENCE.

@@ -45,6 +45,13 @@ ALLOWED_RESOURCES = frozenset(
 )
 if not ALLOWED_RESOURCES:
     raise RuntimeError("ALLOWED_RESOURCES must list at least one resource")
+# Resources whose access tokens carry no identity claims: the gateway reads them from /userinfo,
+# which Hydra answers from the ID token.
+USERINFO_ONLY_RESOURCES = frozenset(
+    item.strip() for item in _require_env("USERINFO_ONLY_RESOURCES").split(",") if item.strip()
+)
+if not USERINFO_ONLY_RESOURCES <= ALLOWED_RESOURCES:
+    raise RuntimeError("USERINFO_ONLY_RESOURCES must be a subset of ALLOWED_RESOURCES")
 USERS: dict[str, dict[str, Any]] = json.loads(
     (Path(__file__).with_name("users.json")).read_text(encoding="utf-8")
 )
@@ -185,6 +192,33 @@ def granted_audience(request_url: str, requested_audience: list[str]) -> list[st
     return granted
 
 
+def consent_session(user: Mapping[str, Any], audience: list[str]) -> dict[str, Any]:
+    """The claims Hydra puts in the access token and in the ID token (which it serves at /userinfo).
+
+    A userinfo-only audience gets an access token with no identity claims and an ID token with
+    all of them; any other audience keeps the identity in the access token.
+    """
+    if USERINFO_ONLY_RESOURCES.intersection(audience):
+        return {
+            "access_token": {},
+            "id_token": {
+                "email": user["email"],
+                "email_verified": True,
+                "org": user["org"],
+                "groups": user["groups"],
+            },
+        }
+    return {
+        "access_token": {
+            "email": user["email"],
+            "email_verified": True,
+            "org": user["org"],
+            "groups": user["groups"],
+        },
+        "id_token": {"email": user["email"], "email_verified": True},
+    }
+
+
 async def consent_get(request: Request) -> Response:
     challenge = request.query_params.get("consent_challenge")
     if not challenge:
@@ -197,6 +231,9 @@ async def consent_get(request: Request) -> Response:
             user = next((u for u in USERS.values() if u["subject"] == consent.get("subject")), None)
             if user is None:
                 raise HydraError("consent request for an unknown subject")
+            audience = granted_audience(
+                consent["request_url"], consent.get("requested_access_token_audience") or []
+            )
             # First-party identity provider: consent is implicit, there is no consent UI.
             accepted = await _hydra(
                 client,
@@ -206,19 +243,9 @@ async def consent_get(request: Request) -> Response:
                 challenge,
                 {
                     "grant_scope": consent["requested_scope"],
-                    "grant_access_token_audience": granted_audience(
-                        consent["request_url"], consent.get("requested_access_token_audience") or []
-                    ),
+                    "grant_access_token_audience": audience,
                     "remember": False,
-                    "session": {
-                        "access_token": {
-                            "email": user["email"],
-                            "email_verified": True,
-                            "org": user["org"],
-                            "groups": user["groups"],
-                        },
-                        "id_token": {"email": user["email"], "email_verified": True},
-                    },
+                    "session": consent_session(user, audience),
                 },
             )
         except (HydraError, KeyError) as exc:

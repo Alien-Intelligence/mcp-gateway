@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -31,6 +31,7 @@ from dev_fixture import (
     sponsor_predicate,
     write_atomic,
 )
+from gen_userinfo_realm import MISMATCH_SCOPE
 from mcp import Client, MCPError
 from mcp.client.streamable_http import streamable_http_client
 
@@ -47,6 +48,11 @@ TOOL_ACTION = "get-dataset"
 CLOCK_SKEW_SECONDS = 5
 EXPIRY_MARGIN_SECONDS = 3
 FEED_DEADLINE_SECONDS = 90.0
+# The platform stamps an event with the time the call reached it; the host's clock and the
+# platform's agree within about a second. An event stamped earlier than this before the baseline
+# cannot be the call under test: it is another client's call of the shared fixture whose metering
+# showed up in the feed late.
+CALL_CLOCK_TOLERANCE = timedelta(seconds=5)
 REVOCATION_DEADLINE_SECONDS = 60.0
 PASSWORD_VARIABLE = "E2E_USER_PASSWORD"
 REQUIRED_ENV = (
@@ -237,6 +243,34 @@ REPLICAS = provider_at(
     "http://localhost:18080/realms/alien-gateway-dev",
     {"scope": "openid"},
 )
+# The gateways that read the user's identity from the identity provider's userinfo endpoint
+# (auth.userinfo): their access tokens carry only the subject. Keycloak is the realm
+# alien-gateway-userinfo, Hydra serves /userinfo from the ID token.
+USERINFO_KEYCLOAK = provider_at(
+    "userinfo_keycloak",
+    "http://localhost:18008/mcp",
+    "http://localhost:18080/realms/alien-gateway-userinfo",
+    {"scope": "openid"},
+)
+USERINFO_HYDRA = provider_at(
+    "userinfo_hydra",
+    "http://localhost:18010/mcp",
+    "http://localhost:14444",
+    {"resource": "http://localhost:18999/mcp"},
+)
+USERINFO_PROVIDERS = (USERINFO_KEYCLOAK, USERINFO_HYDRA)
+# The Keycloak userinfo realm, userinfo URL on a closed port: every request is a 503.
+USERINFO_DOWN = provider_at(
+    "userinfo_down",
+    "http://localhost:18011/mcp",
+    "http://localhost:18080/realms/alien-gateway-userinfo",
+    {"scope": "openid"},
+)
+# Scope of the grant whose userinfo document answers another subject than the token's: what the
+# challenge advertises, plus the realm's optional mismatch scope.
+USERINFO_MISMATCH_SCOPE = f"openid mcp-gateway {MISMATCH_SCOPE}"
+# Identity claims the userinfo gateways must find nowhere but in the userinfo document.
+IDENTITY_CLAIMS = ("email", "email_verified", "org", "groups")
 # Which store of the chain resolves each persona (see scripts/state_layout.py).
 CHAIN_STORE = {"alice": "redis", "bob": "postgres", "carol": "webhook"}
 
@@ -467,11 +501,19 @@ def _known_ids(api: FixtureApi, org_id: int, since: datetime) -> frozenset[str]:
     return frozenset(str(e["id"]) for e in events)
 
 
-def _tool_event_of(user_id: int, org_id: int, known: frozenset[str]) -> Callable[..., bool]:
+def _called_after_baseline(event: dict[str, Any], since: datetime) -> bool:
+    called_at = datetime.fromisoformat(event["calledAt"])
+    return called_at >= since - CALL_CLOCK_TOLERANCE
+
+
+def _tool_event_of(
+    user_id: int, org_id: int, known: frozenset[str], since: datetime
+) -> Callable[..., bool]:
     def match(event: dict[str, Any]) -> bool:
         user = event.get("user") or {}
         return (
             str(event["id"]) not in known
+            and _called_after_baseline(event, since)
             and user.get("id") == user_id
             and event.get("organizationId") == org_id
             and event.get("action") == TOOL_ACTION
@@ -511,7 +553,12 @@ async def read_consumer_event(
             return find_consumption_events(
                 api,
                 persona.org_id or 0,
-                _tool_event_of(persona.user_id or 0, persona.org_id or 0, baseline.consumer_known),
+                _tool_event_of(
+                    persona.user_id or 0,
+                    persona.org_id or 0,
+                    baseline.consumer_known,
+                    baseline.since,
+                ),
                 since=baseline.since,
                 deadline_s=FEED_DEADLINE_SECONDS,
             )
@@ -537,6 +584,7 @@ def _persona_events_since(
         e
         for e in events
         if str(e["id"]) not in baseline.consumer_known
+        and _called_after_baseline(e, baseline.since)
         and (e.get("user") or {}).get("id") == persona.user_id
     ]
 
@@ -662,6 +710,13 @@ async def sdk_handshake_error_codes(url: str, token: str) -> list[int]:
             raise
         return sdk_error_codes(group)
     raise AssertionError("the handshake was expected to be refused")
+
+
+def identity_claims_in_token(claims: dict[str, Any]) -> list[str]:
+    """The identity claims an access token carries, at the top level or under Hydra's ``ext``."""
+    ext = claims.get("ext")
+    nested = ext if isinstance(ext, dict) else {}
+    return [name for name in IDENTITY_CLAIMS if name in claims or name in nested]
 
 
 def audiences(claims: dict[str, Any]) -> list[str]:
