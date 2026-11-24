@@ -67,6 +67,7 @@ class AuditRecord:
     started: float = field(default_factory=perf_counter)
     subject: str | None = None
     organization: str | None = None
+    client_id: str | None = None
     labels: dict[str, str] | None = None
     rpc_method: str | None = None
     rpc_id: str | int | None = None
@@ -128,6 +129,7 @@ class AuditRecord:
             "trace_id": self.observer.trace_id,
             "subject": _clip(self.subject),
             "organization": _clip(self.organization),
+            "client_id": _clip(self.client_id),
             "labels": self.labels,
             "http_method": self.http_method,
             "rpc_method": _clip(self.rpc_method),

@@ -114,7 +114,7 @@ Les clients s'enregistrent par **enregistrement dynamique de client** (anonyme) 
   | `claude.ai` | Claude (web, Desktop, mobile) |
   | `localhost`, `127.0.0.1` | Claude Code, VS Code, Cursor desktop (boucle locale) |
   | `chatgpt.com` | ChatGPT |
-  | `global.consent.azure-apim.net` | Microsoft Copilot Studio (vérifiez l'URL de rappel qu'il vous montre ; si son hôte diffère, ajoutez-le) |
+  | `global.consent.azure-apim.net`, `*.consent.azure-apim.net` | Microsoft Copilot Studio (son enregistrement porte aussi `authorization-manager.consent.azure-apim.net` : le joker est nécessaire) |
   | `vscode.dev`, `insiders.vscode.dev`, `code.visualstudio.com` | VS Code |
   | `www.cursor.com`, `anysphere.cursor-mcp` | Cursor web et agents cloud, Cursor desktop |
 

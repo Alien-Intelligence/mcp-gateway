@@ -41,7 +41,8 @@ All of them use the authorization code flow with PKCE. Your server must let each
   - **Manual**: you register a client at your server and enter its client id, client secret, authorization URL, token URL template, refresh URL and (optional) scopes.
 - When a callback URL is shown, copy it into the redirect URIs of your server's client (or into your server's trusted hosts for DCR).
 - Copilot Studio supports the Streamable HTTP transport only (the gateway proxies the transport unchanged).
-- **Unconfirmed, needs a Copilot Studio tenant to test**: whether Copilot Studio sends PKCE `S256` in manual mode, whether it sends the `resource` parameter (so that your `aud` is right without the audience mapper) and whether it supports CIMD. The vendor page does not say. Use the audience mapper (so `aud` is correct regardless), and test with a tenant before you promise Copilot Studio to anyone. The exact redirect URL (a `global.consent.azure-apim.net/redirect/...` address, per project research) is generated per connector: use the one the wizard shows.
+- **Confirmed live (2026-11-24)**: **Dynamic discovery** (DCR) works end to end against Keycloak: Copilot Studio registered, signed the user in and made billed tool calls. The realm must trust `*.consent.azure-apim.net`: the registration carries `https://authorization-manager.consent.azure-apim.net` in addition to the redirect under `https://global.consent.azure-apim.net/redirect/...`, and Keycloak refuses it otherwise (`Policy 'Trusted Hosts' rejected request... URL doesn't match any trusted host`). The redirect URL is generated per connector.
+- **Unconfirmed, not tested**: whether Copilot Studio sends PKCE `S256` in manual mode, whether it sends the `resource` parameter (so that your `aud` is right without the audience mapper) and whether it supports CIMD. Use the audience mapper, so `aud` is correct regardless.
 
 ## VS Code
 
