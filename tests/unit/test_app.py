@@ -757,6 +757,7 @@ async def test_audit_line_for_a_forwarded_tool_call(
         "trace_id",
         "subject",
         "organization",
+        "client_id",
         "labels",
         "http_method",
         "rpc_method",
@@ -775,6 +776,7 @@ async def test_audit_line_for_a_forwarded_tool_call(
     assert line["event"] == "mcp_request"
     assert line["subject"] == "user-1"
     assert line["organization"] == "client-x"
+    assert line["client_id"] is None
     assert line["labels"] == {"client": "client-x"}
     assert line["http_method"] == "POST"
     assert line["rpc_method"] == "tools/call"
@@ -785,6 +787,41 @@ async def test_audit_line_for_a_forwarded_tool_call(
     assert line["upstream"] == "main"
     assert line["upstream_status"] == 200
     assert line["latency_ms"] >= 0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"azp": "claude-code"}, "claude-code"),
+        ({"client_id": "copilot"}, "copilot"),
+        ({"azp": "claude-code", "client_id": "copilot"}, "claude-code"),
+        ({"azp": 7}, None),
+    ],
+)
+async def test_audit_line_records_the_token_client(
+    client: httpx.AsyncClient,
+    rsa_key: rsa.RSAPrivateKey,
+    caplog: pytest.LogCaptureFixture,
+    overrides: dict[str, Any],
+    expected: str | None,
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        await client.post("/mcp", json=RPC_BODY, headers=bearer(mint(rsa_key, overrides=overrides)))
+    (line,) = audit_lines(caplog)
+    assert line["client_id"] == expected
+
+
+async def test_audit_client_id_is_never_read_from_a_header(
+    client: httpx.AsyncClient, token: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger="mcp_gateway.audit"):
+        await client.post(
+            "/mcp",
+            json=RPC_BODY,
+            headers={**bearer(token), "x-client-id": "spoofed", "azp": "spoofed"},
+        )
+    (line,) = audit_lines(caplog)
+    assert line["client_id"] is None
 
 
 async def test_audit_outcomes_for_failures(

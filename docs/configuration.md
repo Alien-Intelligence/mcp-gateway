@@ -537,6 +537,7 @@ One line per request, whatever way it ends, written by the same call that ends t
 | `trace_id` | string or null | 32 hex characters of the request's trace; `null` when tracing is off. |
 | `subject` | string or null | Verified subject; `null` before authentication succeeds. |
 | `organization` | string or null | Verified organization claim. With `auth.userinfo` it is set once the userinfo answered, so a request refused before that (by the subject bucket, or because the lookup failed) has `null`. |
+| `client_id` | string or null | OAuth client of the verified token: its `azp` claim, else `client_id`; `null` before authentication succeeds or when the token carries neither. Never read from a header. |
 | `labels` | object or null | The resolver's labels; `null` before a credential was resolved. |
 | `http_method` | string | `POST`, `GET` or `DELETE`. |
 | `rpc_method` | string or null | JSON-RPC `method` of the body; `null` for a body that is not a JSON-RPC request. |
@@ -558,7 +559,7 @@ Text values are clipped to 256 characters. The line never holds request or respo
 Example:
 
 ```json
-{"ts":"2026-11-20T09:14:03.512+00:00","event":"mcp_request","request_id":"6f1c2b0e-5a47-4d8e-9d52-3b0a4c9e7f10","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","subject":"user-1","organization":"example-org","labels":{"client":"example"},"http_method":"POST","rpc_method":"tools/call","rpc_id":7,"tool":"search","status":200,"outcome":"forwarded","reason":null,"upstream":"main","latency_ms":182.4,"upstream_status":200,"upstream_request_id":"req-81c4","upstream_session":false}
+{"ts":"2026-11-20T09:14:03.512+00:00","event":"mcp_request","request_id":"6f1c2b0e-5a47-4d8e-9d52-3b0a4c9e7f10","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","subject":"user-1","organization":"example-org","client_id":"claude-code","labels":{"client":"example"},"http_method":"POST","rpc_method":"tools/call","rpc_id":7,"tool":"search","status":200,"outcome":"forwarded","reason":null,"upstream":"main","latency_ms":182.4,"upstream_status":200,"upstream_request_id":"req-81c4","upstream_session":false}
 ```
 
 ## `observability`

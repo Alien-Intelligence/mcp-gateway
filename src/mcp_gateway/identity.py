@@ -80,6 +80,15 @@ def _optional_groups(claims: Mapping[str, Any], path: str | None) -> tuple[str, 
     return tuple(item for item in value if item)
 
 
+def read_client_id(claims: Mapping[str, Any]) -> str | None:
+    """The OAuth client of a verified token: ``azp``, else ``client_id``; None when neither is set."""
+    for name in ("azp", "client_id"):
+        value = claims.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def read_subject(claims: Mapping[str, Any], mapping: IdentityPathsConfig) -> str:
     subject = _lookup(claims, mapping.subject)
     if not isinstance(subject, str) or not subject:

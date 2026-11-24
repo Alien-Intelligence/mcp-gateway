@@ -52,10 +52,10 @@ With `audit.enabled`, every request writes one JSON line to stdout, whatever way
 
 <!-- not-config -->
 ```json
-{"ts":"2026-11-20T09:14:03.512+00:00","event":"mcp_request","request_id":"6f1c2b0e-5a47-4d8e-9d52-3b0a4c9e7f10","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","subject":"user-1","organization":"example-org","labels":{"client":"example"},"http_method":"POST","rpc_method":"tools/call","rpc_id":7,"tool":"search","status":200,"outcome":"forwarded","reason":null,"upstream":"main","latency_ms":182.4,"upstream_status":200,"upstream_request_id":"req-81c4","upstream_session":false}
+{"ts":"2026-11-20T09:14:03.512+00:00","event":"mcp_request","request_id":"6f1c2b0e-5a47-4d8e-9d52-3b0a4c9e7f10","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","subject":"user-1","organization":"example-org","client_id":"claude-code","labels":{"client":"example"},"http_method":"POST","rpc_method":"tools/call","rpc_id":7,"tool":"search","status":200,"outcome":"forwarded","reason":null,"upstream":"main","latency_ms":182.4,"upstream_status":200,"upstream_request_id":"req-81c4","upstream_session":false}
 ```
 
-Fields: `ts`, `event` (always `mcp_request`), `request_id`, `trace_id`, `subject`, `organization`, `labels`, `http_method`, `rpc_method`, `rpc_id`, `tool`, `status`, `outcome`, `reason`, `upstream`, `latency_ms`, `upstream_status`, `upstream_request_id`, `upstream_session`. Text values are clipped to 256 characters.
+Fields: `ts`, `event` (always `mcp_request`), `request_id`, `trace_id`, `subject`, `organization`, `client_id`, `labels`, `http_method`, `rpc_method`, `rpc_id`, `tool`, `status`, `outcome`, `reason`, `upstream`, `latency_ms`, `upstream_status`, `upstream_request_id`, `upstream_session`. Text values are clipped to 256 characters.
 
 `request_id` is also returned to the client as the `x-request-id` header of every response the gateway produces or relays: when a user reports a problem, ask for that header and search the audit line. A client-sent `x-request-id` is ignored.
 
