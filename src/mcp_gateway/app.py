@@ -36,6 +36,7 @@ from mcp_gateway.identity import (
     Profile,
     assemble_identity,
     build_identity,
+    read_client_id,
     read_subject,
 )
 from mcp_gateway.jsonrpc import (
@@ -217,6 +218,10 @@ class Complete:
     """A verified token that carries the whole identity (no userinfo call)."""
 
     identity: Identity
+
+    @property
+    def claims(self) -> Mapping[str, Any]:
+        return self.identity.claims
 
     @property
     def subject(self) -> str:
@@ -567,6 +572,7 @@ class Gateway:
         if isinstance(auth, Response):
             return auth
         audit.subject = auth.subject
+        audit.client_id = read_client_id(auth.claims)
         if isinstance(auth, Complete):
             audit.organization = auth.identity.organization
 

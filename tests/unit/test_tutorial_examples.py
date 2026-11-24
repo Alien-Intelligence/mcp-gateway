@@ -18,7 +18,12 @@ import asyncio
 import copy
 import importlib.util
 import json
+import os
 import re
+import signal
+import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -318,3 +323,50 @@ def test_the_probe_exits_nonzero_for_a_refused_signature(
     status = probe.main(["--url", example_url, "--secret-file", str(secret), "--email", "a@b.c"])
     assert status == 1
     assert "HTTP 401" in capsys.readouterr().out
+
+
+def _free_port() -> int:
+    with socket.socket() as probe_socket:
+        probe_socket.bind(("127.0.0.1", 0))
+        return int(probe_socket.getsockname()[1])
+
+
+def _ignore_sigterm() -> None:
+    """Run in the child before exec: what the kernel does for a PID 1 without a handler."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def test_the_webhook_example_exits_promptly_on_sigterm_as_pid_one(tmp_path: Path) -> None:
+    secret = tmp_path / "hmac"
+    secret.write_text(SECRET)
+    port = _free_port()
+    env = {
+        **os.environ,
+        "WEBHOOK_HMAC_SECRET_FILE": str(secret),
+        "WEBHOOK_KEYS_FILE": str(EXAMPLES / "webhook-keys.json"),
+        "WEBHOOK_TIMESTAMP_WINDOW_SECONDS": "30",
+        "WEBHOOK_HOST": "127.0.0.1",
+        "WEBHOOK_PORT": str(port),
+    }
+    process = subprocess.Popen(
+        [sys.executable, str(EXAMPLES / "webhook_resolver.py")],
+        env=env,
+        stderr=subprocess.DEVNULL,
+        preexec_fn=_ignore_sigterm,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                assert process.poll() is None, "the example exited before it listened"
+                assert time.monotonic() < deadline, "the example never listened"
+                time.sleep(0.05)
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=5) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()

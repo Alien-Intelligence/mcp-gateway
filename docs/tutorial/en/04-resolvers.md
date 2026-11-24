@@ -161,6 +161,8 @@ export WEBHOOK_TLS_CERT_FILE=./tls.crt WEBHOOK_TLS_KEY_FILE=./tls.key
 python webhook_resolver.py
 ```
 
+On `SIGTERM` (or `SIGINT`) the example stops accepting, finishes the requests in flight and exits. A container runs it as PID 1, where the kernel ignores `SIGTERM` unless the process installs a handler, so an example without one would keep answering for the whole grace period after you scale the webhook to zero. If you replace the example, keep that behaviour, or run it under an init such as `tini`.
+
 Test it before you point the gateway at it, with [`examples/resolve_probe.py`](../examples/resolve_probe.py), which signs a request exactly as the gateway does and prints the answer with the key hidden:
 
 ```bash
