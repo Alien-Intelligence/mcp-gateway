@@ -161,6 +161,8 @@ export WEBHOOK_TLS_CERT_FILE=./tls.crt WEBHOOK_TLS_KEY_FILE=./tls.key
 python webhook_resolver.py
 ```
 
+Sur `SIGTERM` (ou `SIGINT`), l'exemple cesse d'accepter, termine les requêtes en cours et s'arrête. Un conteneur l'exécute comme PID 1, où le noyau ignore `SIGTERM` tant que le processus n'installe pas de gestionnaire : un exemple sans gestionnaire continuerait donc à répondre pendant tout le délai de grâce après la mise à zéro du webhook. Si vous remplacez l'exemple, gardez ce comportement, ou lancez-le sous un init tel que `tini`.
+
 Testez-le avant d'y pointer la passerelle, avec [`examples/resolve_probe.py`](../examples/resolve_probe.py), qui signe une requête exactement comme le fait la passerelle et affiche la réponse avec la clé masquée :
 
 ```bash

@@ -160,7 +160,7 @@ Cette section s'adresse à un **opérateur sponsor**, par exemple un éditeur qu
 | Suspension du groupe sponsorisé | Alien (`/groups/{id}/suspension`) | Toutes les lectures sponsorisées des organisations rattachées au groupe. Alien la vérifie à **chaque requête** : rien n'est facturé |
 | Suspension d'un utilisateur géré par le client | Alien (`/organizations/{org}/users/{user}`) | Les lectures faites avec les clés de cet utilisateur. Alien la vérifie à chaque requête |
 | Révocation d'une clé | Alien (`/tokens/{identifier}`) | Une clé. La passerelle répond `-31001` tant que le resolver n'en donne pas une autre |
-| L'authentification unique du client | Le fournisseur d'identité du client | Les nouvelles connexions de ses personnes. La passerelle ne la consulte plus une fois la requête authentifiée |
+| L'authentification unique du client | Le fournisseur d'identité du client | Désactiver l'utilisateur **et mettre fin à ses sessions** refuse aussitôt son renouvellement et ses nouvelles connexions. Un jeton déjà émis continue de fonctionner jusqu'à son expiration, au plus la durée de vie du jeton d'accès (300 s dans le modèle), car la passerelle vérifie les JWT localement. Éprouvé en direct sur Keycloak. Désactiver seul est réversible : après réactivation, le jeton de renouvellement émis avant fonctionnait de nouveau |
 | La passerelle | aucun des leviers ci-dessus | La passerelle ne détient aucun état de suspension |
 
 La passerelle **n'a pas besoin que son cache soit invalidé pour une suspension** : la requête d'un appelant suspendu va quand même en amont, Alien la refuse, et la passerelle relaie ce refus tel quel. Seules une suspension permanente d'utilisateur et une clé révoquée font répondre `401` à Alien ; la passerelle supprime alors elle-même l'identifiant en cache (chapitre 8.1).
@@ -333,7 +333,7 @@ Ce qu'il faut faire aujourd'hui pour couper tout accès et toute dépense d'un c
 1. **Suspendez définitivement son groupe sponsorisé** (8.7.2). C'est final.
 2. **Suspendez définitivement chacun de ses utilisateurs** (8.7.3). Leurs clés sont supprimées.
 3. **Révoquez toute clé que vous détenez encore** (8.7.4) et retirez les entrées du client de votre resolver, pour que plus personne ne soit associé à un identifiant.
-4. **Demandez au client de désactiver la connexion** de ses personnes dans son propre fournisseur d'identité, ce qui arrête les nouvelles connexions.
+4. **Demandez au client de désactiver la connexion de ses personnes et de mettre fin à leurs sessions** dans son propre fournisseur d'identité (Keycloak : Users, l'utilisateur, Sessions, sign out ; ou la déconnexion par l'API d'administration ; voir le [chapitre 6](06-oauth-server.md)). Désactiver seul est réversible : réactiver l'utilisateur ressuscite son ancien jeton de renouvellement. Mettre fin aux sessions refuse aussitôt tout renouvellement et toute nouvelle connexion, mais un jeton déjà émis continue de fonctionner jusqu'à son expiration, au plus la durée de vie du jeton d'accès (300 s dans le modèle), car la passerelle vérifie les JWT localement.
 
 Conservez les organisations et leur historique de consommation : c'est votre trace de facturation.
 

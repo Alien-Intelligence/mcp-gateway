@@ -160,7 +160,7 @@ This section is for a **sponsor operator**, for example a publisher that sells a
 | Suspension of the sponsored group | Alien (`/groups/{id}/suspension`) | Every sponsored read of the organizations attached to the group. Alien checks it on **every request**: nothing is billed |
 | Suspension of one client-managed user | Alien (`/organizations/{org}/users/{user}`) | The reads made with that user's keys. Alien checks it on every request |
 | Revocation of a key | Alien (`/tokens/{identifier}`) | One key. The gateway answers `-31001` until the resolver gives it another |
-| The customer's single sign-on | The customer's identity provider | New sign-ins of its people. The gateway does not look at it again once a request is authenticated |
+| The customer's single sign-on | The customer's identity provider | Disabling the user **and ending its sessions** refuses its refresh and its new sign-ins at once. A token already issued keeps working until it expires, at most the access-token lifespan (300 s in the template), because the gateway verifies JWTs locally. Proven live on Keycloak. Disabling alone is reversible: after re-enabling, the refresh token from before worked again |
 | The gateway | none of the above | The gateway holds no suspension state of its own |
 
 The gateway **does not need its cache invalidated for a suspension**: a suspended caller's request still goes upstream, Alien refuses it, and the gateway relays that refusal unchanged. Only a permanent user suspension and a revoked key make Alien answer `401`; the gateway then drops the cached credential by itself (chapter 8.1).
@@ -351,7 +351,7 @@ What to do today, to stop all access and all spending of a client:
 1. **Suspend its sponsored group permanently** (8.7.2). This is final.
 2. **Suspend each of its users permanently** (8.7.3). Their keys are deleted.
 3. **Revoke any key you still hold** (8.7.4) and remove the client's entries from your resolver, so that no one is mapped to a credential any more.
-4. **Ask the customer to disable the sign-in** of its people in its own identity provider, which stops new logins.
+4. **Ask the customer to disable the sign-in of its people and end their sessions** in its own identity provider (Keycloak: Users, the user, Sessions, sign out; or the admin API logout; see [chapter 6](06-oauth-server.md)). Disabling alone is reversible: re-enabling the user revives its earlier refresh token. Ending the sessions refuses every refresh and new login at once, but a token already issued keeps working until it expires, at most the access-token lifespan (300 s in the template), because the gateway verifies JWTs locally.
 
 Keep the organizations and their consumption history: they are your billing record.
 
