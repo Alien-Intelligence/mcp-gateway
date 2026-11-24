@@ -24,6 +24,8 @@ Configuration comes from the environment and has no defaults:
                                         answer carries the API key.
 
 Run:  python webhook_resolver.py
+
+On SIGTERM (or SIGINT) it stops accepting, finishes the requests in flight and exits.
 """
 
 import hashlib
@@ -32,6 +34,7 @@ import json
 import logging
 import os
 import re
+import signal
 import ssl
 import threading
 import time
@@ -255,6 +258,8 @@ def make_handler(settings: Settings, ledger: NonceLedger) -> type[BaseHTTPReques
 def make_server(settings: Settings, ledger: NonceLedger | None = None) -> ThreadingHTTPServer:
     nonces = ledger or NonceLedger(settings.timestamp_window_seconds, MAX_TRACKED_NONCES)
     server = ThreadingHTTPServer((settings.host, settings.port), make_handler(settings, nonces))
+    # Request threads are not daemons, so ``server_close`` waits for the requests in flight.
+    server.daemon_threads = False
     if settings.tls_cert_file is not None and settings.tls_key_file is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(settings.tls_cert_file, settings.tls_key_file)
@@ -262,10 +267,30 @@ def make_server(settings: Settings, ledger: NonceLedger | None = None) -> Thread
     return server
 
 
+def serve_until_terminated(server: ThreadingHTTPServer) -> None:
+    """Serve until SIGTERM or SIGINT, then stop accepting and finish the requests in flight.
+
+    A container runs this as PID 1, and the kernel ignores a signal that PID 1 has no handler
+    for: without this, the pod keeps answering for the whole grace period after it is told to
+    stop. ``shutdown`` must not run in the thread that is inside ``serve_forever`` (it would wait
+    for itself), so the handler hands it to a helper thread.
+    """
+
+    def stop(signum: int, _frame: object) -> None:
+        logger.info("received %s, shutting down", signal.Signals(signum).name)
+        threading.Thread(target=server.shutdown, name="shutdown").start()
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    server = make_server(load_settings(os.environ))
-    server.serve_forever()
+    serve_until_terminated(make_server(load_settings(os.environ)))
 
 
 if __name__ == "__main__":
