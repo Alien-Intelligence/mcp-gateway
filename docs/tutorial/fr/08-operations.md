@@ -149,4 +149,192 @@ Sur le plan opérationnel : Alien peut facturer un travail qu'aucun client n'a a
 - **Versions mixtes sur un même Redis : non vérifié.** Pendant une mise à niveau progressive, deux versions de la passerelle s'exécutent contre le même Redis. La structure de l'état est documentée (clés, expiration, formats de valeurs), mais ce projet n'a **pas** testé deux versions différentes de la passerelle contre un même Redis : il ne peut donc pas promettre qu'elles sont compatibles. Tant qu'une version n'indique pas que la structure de l'état n'a pas changé, considérez une mise à niveau qui franchit des versions comme une opération pouvant réinitialiser les sessions et les identifiants en cache. Si vous avez besoin d'en être sûr, donnez à la nouvelle version son propre `state.key_prefix` (un nouvel espace de clés : sessions et cache démarrent vides, les seaux démarrent pleins, rien n'est mal lu), et supprimez les anciennes clés par leur expiration.
 - **Retour arrière.** `helm rollback` revient à la révision précédente. La même réserve s'applique à l'état partagé avec la version que vous quittez.
 
+## 8.7 Suspension et fin de contrat
+
+Cette section s'adresse à un **opérateur sponsor**, par exemple un éditeur qui vend l'accès à ses clients au moyen des groupes du chapitre 3. Tout ce qui suit a été exécuté sur un déploiement réel de la passerelle devant une vraie plateforme Alien ; chaque réponse est celle que ce déploiement a renvoyée. Les appels suivent les conventions du [chapitre 3](03-alien-side.md#conventions-utilisées-dans-les-exemples) (`sponsor.hdr`, `$ALIEN_API`, `$SPONSOR_ORG`) et les identifiants `GROUP_ID`, `ORG_ID`, `USER_ID` et `TOKEN_IDENTIFIER` de ses étapes.
+
+### Qui coupe quoi
+
+| Levier | Où | Ce qu'il arrête |
+|---|---|---|
+| Suspension du groupe sponsorisé | Alien (`/groups/{id}/suspension`) | Toutes les lectures sponsorisées des organisations rattachées au groupe. Alien la vérifie à **chaque requête** : rien n'est facturé |
+| Suspension d'un utilisateur géré par le client | Alien (`/organizations/{org}/users/{user}`) | Les lectures faites avec les clés de cet utilisateur. Alien la vérifie à chaque requête |
+| Révocation d'une clé | Alien (`/tokens/{identifier}`) | Une clé. La passerelle répond `-31001` tant que le resolver n'en donne pas une autre |
+| L'authentification unique du client | Le fournisseur d'identité du client | Les nouvelles connexions de ses personnes. La passerelle ne la consulte plus une fois la requête authentifiée |
+| La passerelle | aucun des leviers ci-dessus | La passerelle ne détient aucun état de suspension |
+
+La passerelle **n'a pas besoin que son cache soit invalidé pour une suspension** : la requête d'un appelant suspendu va quand même en amont, Alien la refuse, et la passerelle relaie ce refus tel quel. Seules une suspension permanente d'utilisateur et une clé révoquée font répondre `401` à Alien ; la passerelle supprime alors elle-même l'identifiant en cache (chapitre 8.1).
+
+Une suspension vaut pour un groupe. Pour suspendre un client sans les autres, ce client doit avoir son propre groupe sponsorisé.
+
+### 8.7.1 Suspendre un client temporairement
+
+Suspendez l'accès sponsorisé du groupe, avec le message que liront les personnes du client :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "temporary", "message": "Access is paused while we settle your account. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+Attendu : `200`, et le groupe avec `suspensionKind` à `temporary`, `suspendedAt` et votre `suspensionMessage` :
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"id": 454, "isSponsored": true, "suspendedAt": "2026-11-24T12:06:41.755+01:00", "suspensionKind": "temporary", "suspensionMessage": "Access is paused while we settle your account. Contact support@example-publisher.test.", "...": "..."}}
+```
+**Ce que voit le client IA.** Le `tools/call` suivant, à travers la passerelle, reçoit HTTP `200`, et non une erreur HTTP, et un résultat d'outil marqué `isError` dont le texte est votre message dans l'enveloppe d'erreur du serveur d'outils. La passerelle le relaie tel quel (résultat d'audit `forwarded`) :
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Error calling tool 'datacluster_get_dataset': {\n  \"success\": false,\n  \"error\": \"Access is paused while we settle your account. Contact support@example-publisher.test.\"\n}"}], "isError": true}}
+```
+`tools/list` et les autres méthodes ne sont pas touchés. Le client IA affiche le texte à la personne : c'est pourquoi le message doit dire qui contacter. **Rien n'est facturé** pour un appel refusé, et il n'apparaît ni dans le flux de consommation du client ni dans celui du sponsor.
+
+Pour lever la suspension :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+L'appel suivant est de nouveau servi. Rien n'est à changer sur la passerelle.
+
+### 8.7.2 Suspendre un client définitivement
+
+La requête est la même avec `"kind": "permanent"` :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "permanent", "message": "Your contract has ended. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+Le client IA voit exactement ce qu'il voit pour une suspension temporaire, avec le message définitif. Une suspension permanente est **finale** : la lever, ou la repasser en temporaire, répond `409` :
+
+<!-- not-config -->
+```json
+{"success": false, "message": "A permanent suspension cannot be lifted.", "error": {"status": 409, "name": "GROUP_SUSPENSION_PERMANENT", "message": "This group's sponsored access is permanently suspended.", "data": null, "origin": "client"}}
+```
+Considérez-la comme irréversible. Utilisez-la pour un client qui part, pas pour mettre un client en pause.
+
+### 8.7.3 Suspendre ou réactiver un utilisateur
+
+Un utilisateur géré par le client se suspend par la route de l'utilisateur. Envoyez toujours `kind` : omis, il vaut par défaut une suspension permanente. `message` est ce que lit la personne, et `reason` n'est conservé que pour votre piste d'audit.
+
+**Temporaire :**
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"kind": "temporary", "reason": "invoice 2026-11 unpaid", "message": "Your access is paused. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+```
+Attendu : `200` et l'utilisateur avec `isLocked` à `true`, `suspensionKind` à `temporary` :
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"id": 1016, "userType": "client-managed", "isLocked": true, "suspensionKind": "temporary", "lockMessage": "Your access is paused. Contact support@example-publisher.test.", "...": "..."}}
+```
+**Ce que voit le client IA.** HTTP `200` et une erreur d'outil dont le texte est votre message **seul**, sans enveloppe. `tools/list` fonctionne toujours. La passerelle transmet la requête et conserve son identifiant en cache :
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Your access is paused. Contact support@example-publisher.test."}], "isError": true}}
+```
+Les appels refusés ne sont ni facturés ni listés. Réactivez avec :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X PATCH -H @sponsor.hdr \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+```
+La clé de l'utilisateur refonctionne aussitôt : rien n'a été révoqué, donc le resolver et la passerelle ne sont pas touchés.
+
+**Permanente** (même requête avec `"kind": "permanent"`) :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"kind": "permanent", "reason": "contract ended", "message": "Your access has ended."}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+curl -sS --max-time 30 -H @sponsor.hdr "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens"
+```
+Les clés de l'utilisateur sont **supprimées** : la liste des jetons est maintenant vide.
+
+<!-- not-config -->
+```json
+{"success": true, "data": []}
+```
+La passerelle détient encore l'ancienne clé dans son resolver, Alien lui répond `401`, et le client IA reçoit HTTP `200` avec le `-31001` de la passerelle. La passerelle supprime son identifiant en cache dès ce premier refus :
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "error": {"code": -31001, "message": "The credential configured for this account was rejected by the service. Contact your administrator.", "data": {"upstream_status": 401}}}
+```
+Le même `PATCH` que ci-dessus réactive l'utilisateur, mais les clés supprimées ne reviennent pas : émettez-en une nouvelle (8.7.4) et mettez le resolver à jour.
+
+### 8.7.4 Révoquer une clé et la remplacer
+
+Révoquez la clé par son identifiant, puis émettez-en une nouvelle pour le même utilisateur. Conservez le nouveau `data.token` et `data.identifier` comme à l'[étape 3.6](03-alien-side.md#36-émettre-la-clé-dapi) :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens/$TOKEN_IDENTIFIER"
+curl -sS --max-time 30 -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"name": "mcp-gateway", "scope": "api-key"}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens"
+```
+Placez la nouvelle clé là où votre resolver la lit : le fichier de clé d'une entrée `static`, ou ce que renvoie votre webhook. **La passerelle n'est pas redémarrée.** Sur le déploiement réel, l'appel suivant avec la nouvelle clé a fonctionné environ 5 secondes après la mise à jour du fichier ; une fois, le Secret monté a mis 55 secondes à atteindre les pods (la synchronisation propre du kubelet), et tous les appels de cette fenêtre ont reçu `-31001`. Un `resolver_cache` ajoute son TTL (8.1). Pour éviter tout creux, suivez l'ordre du 8.1 : émettre, mettre à jour, attendre, révoquer.
+
+**Ce que voit le client IA** entre la révocation et la mise à jour est le `-31001` montré plus haut, en HTTP `200`.
+
+### 8.7.5 Quota mensuel
+
+Un sponsor fixe un plafond mensuel, en euros, sur un groupe, avec le message affiché une fois atteint :
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X PATCH -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"monthlyQuota": 100, "quotaMessage": "The monthly allowance is used up. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID"
+```
+Lisez le groupe (`GET`, ci-dessous) pour suivre le mois : `currentMonth` porte `amount`, `currency` et `percentage` du quota.
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" "$ALIEN_API/groups/$GROUP_ID"
+```
+- **Jusqu'à environ 80 % : rien.** Sur le déploiement réel, les appels à 67 % et 75 % ne portaient aucun avis.
+- **À partir de 80 % : un avis.** La lecture qui amène la dépense du mois à 80 % ou plus le porte déjà. Le premier mesuré est venu à **83 %**, puis 91 % et 100 %. Il voyage dans le résultat que reçoit le client IA, sous forme d'une liste `notices` dans le JSON (ou d'un bloc final `**Notice:**`, selon l'outil), et le serveur d'outils demande au modèle de le relayer à la personne :
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"...": "..."}, "notices": ["<client organization>'s <sponsor organization> access has used 83 % of its monthly quota. Contact <sponsor organization> to raise it."]}
+```
+- **À 100 % : un refus.** Les appels suivants reçoivent HTTP `200`, `isError` à `true`, avec votre `quotaMessage` dans la même enveloppe qu'une suspension de groupe :
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Error calling tool 'datacluster_get_dataset': {\n  \"success\": false,\n  \"error\": \"The monthly allowance is used up. Contact support@example-publisher.test.\"\n}"}], "isError": true}}
+```
+**Les refus ne sont pas comptés.** La dépense est restée à son plafond, rien n'a été facturé au client, et les appels refusés ne figurent dans aucun flux. Pour lever le plafond, faites un `PATCH` du groupe avec un `monthlyQuota` plus élevé ou `null`.
+
+### 8.7.6 Clore un client à la fin du contrat
+
+**Pas encore disponible, en attente de correctifs de la plateforme.** Il n'existe pas encore de moyen pris en charge pour clore le compte d'un client côté plateforme, et ce tutoriel n'en documente pas.
+
+Ce qu'il faut faire aujourd'hui pour couper tout accès et toute dépense d'un client :
+
+1. **Suspendez définitivement son groupe sponsorisé** (8.7.2). C'est final.
+2. **Suspendez définitivement chacun de ses utilisateurs** (8.7.3). Leurs clés sont supprimées.
+3. **Révoquez toute clé que vous détenez encore** (8.7.4) et retirez les entrées du client de votre resolver, pour que plus personne ne soit associé à un identifiant.
+4. **Demandez au client de désactiver la connexion** de ses personnes dans son propre fournisseur d'identité, ce qui arrête les nouvelles connexions.
+
+Conservez les organisations et leur historique de consommation : c'est votre trace de facturation.
+
 Suite : [9. Dépannage](09-troubleshooting.md).

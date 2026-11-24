@@ -149,4 +149,210 @@ Operationally: Alien may bill work that no client waited for, `mcp_gateway.upstr
 - **Mixed versions on one Redis: not verified.** During a rolling upgrade, two versions of the gateway run against the same Redis. The state layout is documented (keys, their expiry, the value formats), but this project has **not** tested two different gateway versions against one Redis, so it cannot promise they are compatible. Until a release states that the state layout did not change, treat an upgrade that crosses versions as one that may reset sessions and cached credentials. If you need to be sure, give the new version its own `state.key_prefix` (a new keyspace: sessions and cache start empty, buckets start full, nothing is misread), and remove the old keys by their expiry.
 - **Rollback.** `helm rollback` returns to the previous revision. The same caveat applies to the state shared with the version you leave.
 
+## 8.7 Suspension and end of contract
+
+This section is for a **sponsor operator**, for example a publisher that sells access to its clients through the groups of chapter 3. Everything below was run against a live deployment of the gateway in front of a real Alien platform; each answer is what that deployment returned. The calls use the conventions of [chapter 3](03-alien-side.md#conventions-used-in-the-examples) (`sponsor.hdr`, `$ALIEN_API`, `$SPONSOR_ORG`) and the ids `GROUP_ID`, `ORG_ID`, `USER_ID` and `TOKEN_IDENTIFIER` of its steps.
+
+### Who cuts what
+
+| Lever | Where | What it stops |
+|---|---|---|
+| Suspension of the sponsored group | Alien (`/groups/{id}/suspension`) | Every sponsored read of the organizations attached to the group. Alien checks it on **every request**: nothing is billed |
+| Suspension of one client-managed user | Alien (`/organizations/{org}/users/{user}`) | The reads made with that user's keys. Alien checks it on every request |
+| Revocation of a key | Alien (`/tokens/{identifier}`) | One key. The gateway answers `-31001` until the resolver gives it another |
+| The customer's single sign-on | The customer's identity provider | New sign-ins of its people. The gateway does not look at it again once a request is authenticated |
+| The gateway | none of the above | The gateway holds no suspension state of its own |
+
+The gateway **does not need its cache invalidated for a suspension**: a suspended caller's request still goes upstream, Alien refuses it, and the gateway relays that refusal unchanged. Only a permanent user suspension and a revoked key make Alien answer `401`; the gateway then drops the cached credential by itself (chapter 8.1).
+
+A suspension is per group. If one client must be suspended without the others, that client needs its own sponsored group.
+
+### 8.7.1 Suspend a client temporarily
+
+Suspend the group's sponsored access, with the message the client's people will read:
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "temporary", "message": "Access is paused while we settle your account. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+
+Expected: `200`, and the group with `suspensionKind` `temporary`, `suspendedAt` and your `suspensionMessage`:
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"id": 454, "isSponsored": true, "suspendedAt": "2026-11-24T12:06:41.755+01:00", "suspensionKind": "temporary", "suspensionMessage": "Access is paused while we settle your account. Contact support@example-publisher.test.", "...": "..."}}
+```
+
+**What the AI client sees.** The next `tools/call` through the gateway gets HTTP `200`, not an HTTP error, and a tool result flagged `isError` whose text is your message inside the tool server's error envelope. The gateway relays it unchanged (audit outcome `forwarded`):
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Error calling tool 'datacluster_get_dataset': {\n  \"success\": false,\n  \"error\": \"Access is paused while we settle your account. Contact support@example-publisher.test.\"\n}"}], "isError": true}}
+```
+
+`tools/list` and the other methods are not affected. The AI client shows the text to the person, which is why the message should say who to contact. **Nothing is billed** for a refused call, and it appears in neither the client's nor the sponsor's consumption feed.
+
+Lift it:
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+
+The next call is served again. No change is needed on the gateway.
+
+### 8.7.2 Suspend a client permanently
+
+The request is the same with `"kind": "permanent"`:
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "permanent", "message": "Your contract has ended. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID/suspension"
+```
+
+The AI client sees exactly what it sees for a temporary suspension, with the permanent message. A permanent suspension is **final**: lifting it, or switching it back to temporary, answers `409`:
+
+<!-- not-config -->
+```json
+{"success": false, "message": "A permanent suspension cannot be lifted.", "error": {"status": 409, "name": "GROUP_SUSPENSION_PERMANENT", "message": "This group's sponsored access is permanently suspended.", "data": null, "origin": "client"}}
+```
+
+Treat it as irreversible. Use it for a client that is leaving, not to pause one.
+
+### 8.7.3 Suspend or reactivate one user
+
+A client-managed user is suspended through the user's route. Always send `kind`: left out, it defaults to a permanent suspension. `message` is what the person reads, and `reason` is kept for your audit trail only.
+
+**Temporary:**
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"kind": "temporary", "reason": "invoice 2026-11 unpaid", "message": "Your access is paused. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+```
+
+Expected: `200` and the user with `isLocked` `true`, `suspensionKind` `temporary`:
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"id": 1016, "userType": "client-managed", "isLocked": true, "suspensionKind": "temporary", "lockMessage": "Your access is paused. Contact support@example-publisher.test.", "...": "..."}}
+```
+
+**What the AI client sees.** HTTP `200` and a tool error whose text is your message **alone**, without an envelope. `tools/list` still works. The gateway forwards the request and keeps its cached credential:
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Your access is paused. Contact support@example-publisher.test."}], "isError": true}}
+```
+
+Refused calls are not billed and not listed. Reactivate with:
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X PATCH -H @sponsor.hdr \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+```
+
+The user's key then works again at once: nothing was revoked, so the resolver and the gateway are untouched.
+
+**Permanent** (same request with `"kind": "permanent"`):
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"kind": "permanent", "reason": "contract ended", "message": "Your access has ended."}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID"
+curl -sS --max-time 30 -H @sponsor.hdr "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens"
+```
+
+The user's keys are **deleted**: the token list is now empty.
+
+<!-- not-config -->
+```json
+{"success": true, "data": []}
+```
+
+The gateway still holds the old key in its resolver, Alien answers `401` to it, and the AI client gets HTTP `200` with the gateway's `-31001`. The gateway drops its cached credential on that first refusal:
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "error": {"code": -31001, "message": "The credential configured for this account was rejected by the service. Contact your administrator.", "data": {"upstream_status": 401}}}
+```
+
+The same `PATCH` as above reactivates the user, but the deleted keys do not come back: mint a new one (8.7.4) and update the resolver.
+
+### 8.7.4 Revoke one key and replace it
+
+Revoke the key by its identifier, then mint a new one for the same user. Keep the new `data.token` and `data.identifier` as in [step 3.6](03-alien-side.md#36-mint-the-api-key):
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X DELETE -H @sponsor.hdr \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens/$TOKEN_IDENTIFIER"
+curl -sS --max-time 30 -H @sponsor.hdr -H 'Content-Type: application/json' \
+  -d '{"name": "mcp-gateway", "scope": "api-key"}' \
+  "$ALIEN_API/organizations/$ORG_ID/users/$USER_ID/tokens"
+```
+
+Put the new key where your resolver reads it: the key file of a `static` entry, or what your webhook returns. **The gateway is not restarted.** On the live deployment the next call with the new key worked about 5 seconds after the file was updated; once, the mounted Secret took 55 seconds to reach the pods (the kubelet's own sync), and every call in that window got `-31001`. A `resolver_cache` adds its TTL (8.1). To avoid the gap altogether, rotate in the order of 8.1: mint, update, wait, revoke.
+
+**What the AI client sees** between the revocation and the update is the `-31001` shown above, HTTP `200`.
+
+### 8.7.5 Monthly quota
+
+A sponsor sets a monthly cap, in euros, on a group, with the message shown once it is reached:
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -X PATCH -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" \
+  -H 'Content-Type: application/json' \
+  -d '{"monthlyQuota": 100, "quotaMessage": "The monthly allowance is used up. Contact support@example-publisher.test."}' \
+  "$ALIEN_API/groups/$GROUP_ID"
+```
+
+Read the group (`GET`, below) to follow the month: `currentMonth` carries `amount`, `currency` and `percentage` of the quota.
+
+<!-- not-config -->
+```bash
+curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" "$ALIEN_API/groups/$GROUP_ID"
+```
+
+- **Up to about 80 %: nothing.** On the live deployment, calls at 67 % and 75 % carried no notice.
+- **From 80 %: a notice.** The read that brings the month's spend to 80 % or more already carries it. The first one measured came at **83 %**, then 91 % and 100 %. It rides in the result the AI client receives, as a `notices` list in the JSON (or a final `**Notice:**` block, depending on the tool), and the tool server asks the model to relay it to the person:
+
+<!-- not-config -->
+```json
+{"success": true, "data": {"...": "..."}, "notices": ["<client organization>'s <sponsor organization> access has used 83 % of its monthly quota. Contact <sponsor organization> to raise it."]}
+```
+
+- **At 100 %: a refusal.** The next calls get HTTP `200`, `isError` `true`, with your `quotaMessage` in the same envelope as a group suspension:
+
+<!-- not-config -->
+```json
+{"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": "Error calling tool 'datacluster_get_dataset': {\n  \"success\": false,\n  \"error\": \"The monthly allowance is used up. Contact support@example-publisher.test.\"\n}"}], "isError": true}}
+```
+
+**Refusals are not counted.** The spend stayed at its cap, nothing was billed to the client, and the refused calls are in no feed. To lift the cap, `PATCH` the group with a higher `monthlyQuota` or `null`.
+
+### 8.7.6 Closing a client at the end of the contract
+
+**Not yet available, pending platform fixes.** There is no supported way yet to close a client's account from the platform side, and this tutorial does not document one.
+
+What to do today, to stop all access and all spending of a client:
+
+1. **Suspend its sponsored group permanently** (8.7.2). This is final.
+2. **Suspend each of its users permanently** (8.7.3). Their keys are deleted.
+3. **Revoke any key you still hold** (8.7.4) and remove the client's entries from your resolver, so that no one is mapped to a credential any more.
+4. **Ask the customer to disable the sign-in** of its people in its own identity provider, which stops new logins.
+
+Keep the organizations and their consumption history: they are your billing record.
+
 Continue with [9. Troubleshooting](09-troubleshooting.md).
