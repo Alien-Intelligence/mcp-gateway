@@ -122,10 +122,11 @@ e2e-dev:
       - artifacts/
     reports:
       junit: artifacts/junit.xml
+  # Only on the way into dev: promotions to staging and main carry code that already passed here.
   rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "dev"'
       changes: *e2e-changes
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "dev"'
       changes: *e2e-changes
 
 # The image. The shared `docker-build` job (ci-scripts docker.gitlab-ci.yml) builds with Kaniko, which
