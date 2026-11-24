@@ -612,6 +612,7 @@
             "claude.ai",
             "chatgpt.com",
             "global.consent.azure-apim.net",
+            "*.consent.azure-apim.net",
             "vscode.dev",
             "insiders.vscode.dev",
             "code.visualstudio.com",

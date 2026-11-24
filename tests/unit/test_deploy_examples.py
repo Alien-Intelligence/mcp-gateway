@@ -215,7 +215,8 @@ def test_anonymous_registration_checks_redirect_hosts_not_the_sender() -> None:
     assert config["client-uris-must-match"] == ["true"]
     hosts = config["trusted-hosts"]
     assert len(hosts) == len(set(hosts))
-    assert not any(h.startswith("*") for h in hosts), "a wildcard trusts every subdomain"
+    # A wildcard trusts every subdomain: the only one allowed is the one Copilot Studio needs.
+    assert [h for h in hosts if h.startswith("*")] == ["*.consent.azure-apim.net"]
 
 
 def _client_policy(realm: dict[str, Any], name: str) -> dict[str, Any]:

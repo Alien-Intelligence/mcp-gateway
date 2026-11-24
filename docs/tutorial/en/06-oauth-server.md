@@ -114,7 +114,7 @@ Clients register through **Dynamic Client Registration** (anonymous) or identify
   | `claude.ai` | Claude (web, Desktop, mobile) |
   | `localhost`, `127.0.0.1` | Claude Code, VS Code, Cursor desktop (loopback) |
   | `chatgpt.com` | ChatGPT |
-  | `global.consent.azure-apim.net` | Microsoft Copilot Studio (check the callback URL it shows you; if its host differs, add it) |
+  | `global.consent.azure-apim.net`, `*.consent.azure-apim.net` | Microsoft Copilot Studio (its registration also carries `authorization-manager.consent.azure-apim.net`, so the wildcard is needed) |
   | `vscode.dev`, `insiders.vscode.dev`, `code.visualstudio.com` | VS Code |
   | `www.cursor.com`, `anysphere.cursor-mcp` | Cursor web and cloud agents, Cursor desktop |
 
