@@ -241,12 +241,11 @@ Read from the backend's source as of 2026-11-20. Nothing here was run against a 
 
 **Can a key be shown again?** No. The raw key is in the answer of the minting call only (`data.token`); listing a user's keys returns `identifier`, `name`, `abilities`, `lastUsedAt`, `expiresAt` and no key. A lost key is replaced by minting another and revoking the first.
 
-**Availability.** The managed-organization route and the `managed` account type are **not yet generally available on `https://api.alien.club`**: ask Alien whether your organization has them before you plan around this chapter.
+**Availability.** The managed-organization route and the `managed` account type are available on `https://api.alien.club` since backend 0.43 (November 2026).
 
 ## What this chapter could not confirm
 
 - How the first admin key of a sponsor organization is issued, and when the sponsor organization is made an enterprise account: ask Alien.
-- Whether the public API already runs the managed-organization route (see Availability above).
 - The statuses above were read, not observed.
 
 Continue with [4. Choosing a resolver](04-resolvers.md).

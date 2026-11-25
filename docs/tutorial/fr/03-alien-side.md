@@ -241,12 +241,11 @@ Lu dans les sources du backend à la date du 2026-11-20. Rien de ce qui suit n'a
 
 **Une clé peut-elle être affichée de nouveau ?** Non. La clé brute ne figure que dans la réponse de l'appel d'émission (`data.token`) ; la liste des clés d'un utilisateur renvoie `identifier`, `name`, `abilities`, `lastUsedAt`, `expiresAt` et aucune clé. Une clé perdue se remplace en en émettant une autre et en révoquant la première.
 
-**Disponibilité.** La route d'organisation gérée et le type de compte `managed` **ne sont pas encore disponibles de façon générale sur `https://api.alien.club`** : demandez à Alien si votre organisation y a accès avant de bâtir un plan sur ce chapitre.
+**Disponibilité.** La route d'organisation gérée et le type de compte `managed` sont disponibles sur `https://api.alien.club` depuis le backend 0.43 (novembre 2026).
 
 ## Ce que ce chapitre n'a pas pu confirmer
 
 - Comment la première clé d'administrateur d'une organisation parrain est délivrée, et quand l'organisation parrain devient un compte enterprise : demandez à Alien.
-- Si l'API publique exécute déjà la route d'organisation gérée (voir Disponibilité ci-dessus).
 - Les statuts ci-dessus ont été lus, non observés.
 
 Suite : [4. Choisir un resolver](04-resolvers.md).
