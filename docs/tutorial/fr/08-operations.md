@@ -326,9 +326,7 @@ curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" "$AL
 
 ### 8.7.6 Clore un client à la fin du contrat
 
-**Pas encore disponible, en attente de correctifs de la plateforme.** Il n'existe pas encore de moyen pris en charge pour clore le compte d'un client côté plateforme, et ce tutoriel n'en documente pas.
-
-Ce qu'il faut faire aujourd'hui pour couper tout accès et toute dépense d'un client :
+Pour couper tout accès et toute dépense d'un client :
 
 1. **Suspendez définitivement son groupe sponsorisé** (8.7.2). C'est final.
 2. **Suspendez définitivement chacun de ses utilisateurs** (8.7.3). Leurs clés sont supprimées.
