@@ -344,9 +344,7 @@ curl -sS --max-time 30 -H @sponsor.hdr -H "x-organization-id: $SPONSOR_ORG" "$AL
 
 ### 8.7.6 Closing a client at the end of the contract
 
-**Not yet available, pending platform fixes.** There is no supported way yet to close a client's account from the platform side, and this tutorial does not document one.
-
-What to do today, to stop all access and all spending of a client:
+To stop all access and all spending of a client:
 
 1. **Suspend its sponsored group permanently** (8.7.2). This is final.
 2. **Suspend each of its users permanently** (8.7.3). Their keys are deleted.
